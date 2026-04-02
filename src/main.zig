@@ -27,6 +27,7 @@ pub const screen = struct {
     pub const grid = @import("screen/grid.zig");
     pub const screen_mod = @import("screen/screen.zig");
     pub const writer = @import("screen/writer.zig");
+    pub const redraw = @import("screen/redraw.zig");
 };
 pub const config = struct {
     pub const parser = @import("config/parser.zig");
@@ -42,6 +43,11 @@ pub const mode = struct {
     pub const tree = @import("mode/tree.zig");
 };
 pub const control = @import("control/control.zig");
+pub const status = struct {
+    pub const style = @import("status/style.zig");
+    pub const format_mod = @import("status/format.zig");
+    pub const status_mod = @import("status/status.zig");
+};
 pub const copy = struct {
     pub const copy_mod = @import("copy/copy.zig");
     pub const paste = @import("copy/paste.zig");
@@ -196,4 +202,8 @@ test {
     _ = copy.copy_mod;
     _ = copy.paste;
     _ = control;
+    _ = status.style;
+    _ = status.format_mod;
+    _ = status.status_mod;
+    _ = screen.redraw;
 }
