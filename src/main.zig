@@ -217,4 +217,5 @@ test {
     _ = screen.redraw;
     _ = hooks.hooks_mod;
     _ = hooks.notify;
+    _ = hooks.job;
 }
