@@ -23,7 +23,14 @@ pub const terminal = struct {
 pub const screen = struct {
     pub const grid = @import("screen/grid.zig");
     pub const screen_mod = @import("screen/screen.zig");
+    pub const writer = @import("screen/writer.zig");
 };
+pub const config = struct {
+    pub const parser = @import("config/parser.zig");
+};
+pub const pane_mod = @import("pane.zig");
+pub const server_mod = @import("server.zig");
+pub const client_mod = @import("client.zig");
 
 const log = core.log;
 
@@ -162,4 +169,6 @@ test {
     _ = terminal.keys;
     _ = screen.grid;
     _ = screen.screen_mod;
+    _ = screen.writer;
+    _ = config.parser;
 }
