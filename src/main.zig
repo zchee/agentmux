@@ -10,7 +10,10 @@ pub const core = struct {
     pub const utf8 = @import("core/utf8.zig");
 };
 
-pub const platform = @import("platform/platform.zig");
+pub const platform = struct {
+    pub const core = @import("platform/platform.zig");
+    pub const linux = @import("platform/linux.zig");
+};
 pub const protocol = @import("protocol.zig");
 pub const layout = struct {
     pub const core = @import("layout/layout.zig");
@@ -60,6 +63,9 @@ pub const status = struct {
 pub const copy = struct {
     pub const copy_mod = @import("copy/copy.zig");
     pub const paste = @import("copy/paste.zig");
+};
+pub const tabs = struct {
+    pub const tabs_mod = @import("tabs/tabs.zig");
 };
 
 const log = core.log;
@@ -220,4 +226,5 @@ test {
     _ = hooks.hooks_mod;
     _ = hooks.notify;
     _ = hooks.job;
+    _ = tabs.tabs_mod;
 }
