@@ -16,9 +16,12 @@ pub const layout = @import("layout/layout.zig");
 pub const window_mod = @import("window.zig");
 pub const session_mod = @import("session.zig");
 pub const terminal = struct {
+    pub const acs = @import("terminal/acs.zig");
+    pub const features = @import("terminal/features.zig");
     pub const input = @import("terminal/input.zig");
     pub const keys = @import("terminal/keys.zig");
     pub const output = @import("terminal/output.zig");
+    pub const terminfo = @import("terminal/terminfo.zig");
 };
 pub const screen = struct {
     pub const grid = @import("screen/grid.zig");
@@ -33,6 +36,9 @@ pub const server_mod = @import("server.zig");
 pub const client_mod = @import("client.zig");
 pub const cmd = @import("cmd/cmd.zig");
 pub const keybind = @import("keybind/bindings.zig");
+pub const mode = struct {
+    pub const tree = @import("mode/tree.zig");
+};
 
 const log = core.log;
 
@@ -175,4 +181,7 @@ test {
     _ = config.parser;
     _ = cmd;
     _ = keybind;
+    _ = terminal.acs;
+    _ = terminal.features;
+    _ = mode.tree;
 }
