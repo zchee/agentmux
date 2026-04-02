@@ -12,7 +12,10 @@ pub const core = struct {
 
 pub const platform = @import("platform/platform.zig");
 pub const protocol = @import("protocol.zig");
-pub const layout = @import("layout/layout.zig");
+pub const layout = struct {
+    pub const core = @import("layout/layout.zig");
+    pub const set = @import("layout/set.zig");
+};
 pub const window_mod = @import("window.zig");
 pub const session_mod = @import("session.zig");
 pub const terminal = struct {
@@ -184,7 +187,8 @@ test {
     _ = core.colour;
     _ = core.environ;
     _ = protocol;
-    _ = layout;
+    _ = layout.core;
+    _ = layout.set;
     _ = window_mod;
     _ = terminal.input;
     _ = terminal.keys;
