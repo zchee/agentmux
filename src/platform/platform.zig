@@ -1,6 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+pub const darwin = @import("darwin.zig");
+
 pub const Os = enum {
     macos,
     linux,

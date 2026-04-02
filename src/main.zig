@@ -240,6 +240,7 @@ test {
     _ = hooks.hooks_mod;
     _ = hooks.notify;
     _ = hooks.job;
+    _ = platform.darwin.GcdEventLoop;
     _ = tabs.tabs_mod;
     _ = render.atlas;
     _ = render.image;
