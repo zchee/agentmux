@@ -1,0 +1,7 @@
+# zmux project generated files to ignore
+#  If you want to ignore files created by your editor/tools,
+#  please consider a global .gitignore https://docs.github.com/en/get-started/git-basics/ignoring-files.
+#  PLEASE DO NOT open a pull request to add something created by your editor or tools
+
+# github/gitignore/Zig
+*.o
