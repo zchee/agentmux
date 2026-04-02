@@ -30,6 +30,8 @@ pub const screen = struct {
 };
 pub const config = struct {
     pub const parser = @import("config/parser.zig");
+    pub const options = @import("config/options.zig");
+    pub const options_table = @import("config/options_table.zig");
 };
 pub const pane_mod = @import("pane.zig");
 pub const server_mod = @import("server.zig");
@@ -38,6 +40,11 @@ pub const cmd = @import("cmd/cmd.zig");
 pub const keybind = @import("keybind/bindings.zig");
 pub const mode = struct {
     pub const tree = @import("mode/tree.zig");
+};
+pub const control = @import("control/control.zig");
+pub const copy = struct {
+    pub const copy_mod = @import("copy/copy.zig");
+    pub const paste = @import("copy/paste.zig");
 };
 
 const log = core.log;
@@ -179,9 +186,14 @@ test {
     _ = screen.screen_mod;
     _ = screen.writer;
     _ = config.parser;
+    _ = config.options;
+    _ = config.options_table;
     _ = cmd;
     _ = keybind;
     _ = terminal.acs;
     _ = terminal.features;
     _ = mode.tree;
+    _ = copy.copy_mod;
+    _ = copy.paste;
+    _ = control;
 }
