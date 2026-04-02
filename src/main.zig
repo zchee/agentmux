@@ -46,6 +46,11 @@ pub const mode = struct {
     pub const tree = @import("mode/tree.zig");
 };
 pub const control = @import("control/control.zig");
+pub const hooks = struct {
+    pub const hooks_mod = @import("hooks/hooks.zig");
+    pub const notify = @import("hooks/notify.zig");
+    pub const job = @import("hooks/job.zig");
+};
 pub const status = struct {
     pub const style = @import("status/style.zig");
     pub const format_mod = @import("status/format.zig");
@@ -210,4 +215,6 @@ test {
     _ = status.format_mod;
     _ = status.status_mod;
     _ = screen.redraw;
+    _ = hooks.hooks_mod;
+    _ = hooks.notify;
 }
