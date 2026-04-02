@@ -74,7 +74,22 @@ pub fn expand(alloc: std.mem.Allocator, fmt: []const u8, ctx: *const FormatConte
                 if (i < fmt.len) {
                     const var_name = fmt[start..i];
                     i += 1; // skip }
-                    try result.appendSlice(alloc, resolveVariable(var_name, ctx));
+                    // Numeric fields need formatting here where we have an allocator.
+                    if (std.mem.eql(u8, var_name, "session_id")) {
+                        var buf: [16]u8 = undefined;
+                        const s = std.fmt.bufPrint(&buf, "{d}", .{ctx.session_id}) catch "?";
+                        try result.appendSlice(alloc, s);
+                    } else if (std.mem.eql(u8, var_name, "window_index")) {
+                        var buf: [16]u8 = undefined;
+                        const s = std.fmt.bufPrint(&buf, "{d}", .{ctx.window_index}) catch "?";
+                        try result.appendSlice(alloc, s);
+                    } else if (std.mem.eql(u8, var_name, "pane_index")) {
+                        var buf: [16]u8 = undefined;
+                        const s = std.fmt.bufPrint(&buf, "{d}", .{ctx.pane_index}) catch "?";
+                        try result.appendSlice(alloc, s);
+                    } else {
+                        try result.appendSlice(alloc, resolveVariable(var_name, ctx));
+                    }
                 }
             },
             '[' => {
@@ -96,10 +111,7 @@ pub fn expand(alloc: std.mem.Allocator, fmt: []const u8, ctx: *const FormatConte
 
 fn resolveVariable(name: []const u8, ctx: *const FormatContext) []const u8 {
     if (std.mem.eql(u8, name, "session_name")) return ctx.session_name;
-    if (std.mem.eql(u8, name, "session_id")) return "";
     if (std.mem.eql(u8, name, "window_name")) return ctx.window_name;
-    if (std.mem.eql(u8, name, "window_index")) return "";
-    if (std.mem.eql(u8, name, "pane_index")) return "";
     if (std.mem.eql(u8, name, "pane_title")) return ctx.pane_title;
     if (std.mem.eql(u8, name, "pane_current_path")) return ctx.pane_current_path;
     if (std.mem.eql(u8, name, "host")) return ctx.host;
@@ -133,4 +145,15 @@ test "expand escape hash" {
     const result = try expand(std.testing.allocator, "##literal", &ctx);
     defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("#literal", result);
+}
+
+test "expand numeric long form" {
+    const ctx = FormatContext{
+        .window_index = 3,
+        .pane_index = 1,
+        .session_id = 7,
+    };
+    const result = try expand(std.testing.allocator, "#{window_index}.#{pane_index} s#{session_id}", &ctx);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("3.1 s7", result);
 }
