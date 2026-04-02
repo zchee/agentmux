@@ -45,6 +45,8 @@ pub const config = struct {
 pub const input_handler = @import("input_handler.zig");
 pub const client_terminal = @import("client_terminal.zig");
 pub const server_loop = @import("server_loop.zig");
+pub const signals = @import("signals.zig");
+pub const clipboard_mod = @import("clipboard.zig");
 pub const pane_mod = @import("pane.zig");
 pub const server_mod = @import("server.zig");
 pub const client_mod = @import("client.zig");
@@ -252,4 +254,6 @@ test {
     _ = input_handler;
     _ = client_terminal;
     _ = server_loop;
+    _ = signals;
+    _ = clipboard_mod;
 }
