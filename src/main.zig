@@ -31,6 +31,8 @@ pub const config = struct {
 pub const pane_mod = @import("pane.zig");
 pub const server_mod = @import("server.zig");
 pub const client_mod = @import("client.zig");
+pub const cmd = @import("cmd/cmd.zig");
+pub const keybind = @import("keybind/bindings.zig");
 
 const log = core.log;
 
@@ -171,4 +173,6 @@ test {
     _ = screen.screen_mod;
     _ = screen.writer;
     _ = config.parser;
+    _ = cmd;
+    _ = keybind;
 }
