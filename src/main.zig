@@ -12,6 +12,7 @@ pub const core = struct {
 
 pub const platform = struct {
     pub const core = @import("platform/platform.zig");
+    pub const darwin = @import("platform/darwin.zig");
     pub const linux = @import("platform/linux.zig");
 };
 pub const protocol = @import("protocol.zig");
@@ -55,6 +56,8 @@ pub const render = struct {
     pub const metal = @import("render/metal.zig");
     pub const vulkan = @import("render/vulkan.zig");
     pub const image = @import("render/image.zig");
+    pub const sixel = @import("render/sixel.zig");
+    pub const kitty = @import("render/kitty.zig");
 };
 pub const mode = struct {
     pub const tree = @import("mode/tree.zig");
@@ -240,4 +243,6 @@ test {
     _ = tabs.tabs_mod;
     _ = render.atlas;
     _ = render.image;
+    _ = render.sixel;
+    _ = render.kitty;
 }
