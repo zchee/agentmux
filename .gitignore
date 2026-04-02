@@ -5,3 +5,6 @@
 
 # github/gitignore/Zig
 *.o
+.zig-cache/
+zig-out/
+zig_test
