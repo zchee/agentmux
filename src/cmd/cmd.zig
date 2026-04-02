@@ -149,6 +149,118 @@ pub const Registry = struct {
             .usage = "send-keys key ...",
             .handler = cmdSendKeys,
         });
+        try self.register(.{
+            .name = "next-window",
+            .alias = "next",
+            .min_args = 0,
+            .max_args = 0,
+            .usage = "next-window",
+            .handler = cmdNextWindow,
+        });
+        try self.register(.{
+            .name = "previous-window",
+            .alias = "prev",
+            .min_args = 0,
+            .max_args = 0,
+            .usage = "previous-window",
+            .handler = cmdPrevWindow,
+        });
+        try self.register(.{
+            .name = "last-window",
+            .alias = "last",
+            .min_args = 0,
+            .max_args = 0,
+            .usage = "last-window",
+            .handler = cmdLastWindow,
+        });
+        try self.register(.{
+            .name = "kill-window",
+            .alias = "killw",
+            .min_args = 0,
+            .max_args = 2,
+            .usage = "kill-window [-t target-window]",
+            .handler = cmdKillWindow,
+        });
+        try self.register(.{
+            .name = "kill-pane",
+            .alias = "killp",
+            .min_args = 0,
+            .max_args = 2,
+            .usage = "kill-pane [-t target-pane]",
+            .handler = cmdKillPane,
+        });
+        try self.register(.{
+            .name = "rename-session",
+            .alias = null,
+            .min_args = 1,
+            .max_args = 2,
+            .usage = "rename-session new-name",
+            .handler = cmdRenameSession,
+        });
+        try self.register(.{
+            .name = "rename-window",
+            .alias = "renamew",
+            .min_args = 1,
+            .max_args = 2,
+            .usage = "rename-window new-name",
+            .handler = cmdRenameWindow,
+        });
+        try self.register(.{
+            .name = "resize-pane",
+            .alias = "resizep",
+            .min_args = 0,
+            .max_args = 4,
+            .usage = "resize-pane [-U|-D|-L|-R] [amount]",
+            .handler = cmdResizePane,
+        });
+        try self.register(.{
+            .name = "swap-pane",
+            .alias = "swapp",
+            .min_args = 0,
+            .max_args = 4,
+            .usage = "swap-pane [-U|-D]",
+            .handler = cmdSwapPane,
+        });
+        try self.register(.{
+            .name = "display-message",
+            .alias = "display",
+            .min_args = 0,
+            .max_args = 10,
+            .usage = "display-message [message]",
+            .handler = cmdDisplayMessage,
+        });
+        try self.register(.{
+            .name = "source-file",
+            .alias = "source",
+            .min_args = 1,
+            .max_args = 1,
+            .usage = "source-file path",
+            .handler = cmdSourceFile,
+        });
+        try self.register(.{
+            .name = "list-windows",
+            .alias = "lsw",
+            .min_args = 0,
+            .max_args = 0,
+            .usage = "list-windows",
+            .handler = cmdListWindows,
+        });
+        try self.register(.{
+            .name = "list-panes",
+            .alias = null,
+            .min_args = 0,
+            .max_args = 0,
+            .usage = "list-panes",
+            .handler = cmdListPanes,
+        });
+        try self.register(.{
+            .name = "run-shell",
+            .alias = "run",
+            .min_args = 1,
+            .max_args = 2,
+            .usage = "run-shell command",
+            .handler = cmdRunShell,
+        });
     }
 };
 
@@ -250,6 +362,97 @@ fn cmdListSessions(ctx: *Context, _: []const []const u8) CmdError!void {
 
 fn cmdSendKeys(_: *Context, _: []const []const u8) CmdError!void {
     // TODO: parse key strings and send to active pane
+}
+
+fn cmdNextWindow(ctx: *Context, _: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    session.nextWindow();
+}
+
+fn cmdPrevWindow(ctx: *Context, _: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    session.prevWindow();
+}
+
+fn cmdLastWindow(_: *Context, _: []const []const u8) CmdError!void {
+    // TODO: track last-used window and switch to it
+}
+
+fn cmdKillWindow(ctx: *Context, _: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    _ = session;
+    // TODO: remove active window from session, close its panes
+}
+
+fn cmdKillPane(ctx: *Context, _: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    const window = session.active_window orelse return CmdError.WindowNotFound;
+    _ = window;
+    // TODO: remove active pane, close its PTY, rebalance layout
+}
+
+fn cmdRenameSession(ctx: *Context, args: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    if (args.len == 0) return CmdError.InvalidArgs;
+    session.rename(args[args.len - 1]) catch return CmdError.OutOfMemory;
+}
+
+fn cmdRenameWindow(ctx: *Context, args: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    const window = session.active_window orelse return CmdError.WindowNotFound;
+    if (args.len == 0) return CmdError.InvalidArgs;
+    window.rename(args[args.len - 1]) catch return CmdError.OutOfMemory;
+}
+
+fn cmdResizePane(_: *Context, _: []const []const u8) CmdError!void {
+    // TODO: parse -U/-D/-L/-R and amount, resize pane in layout
+}
+
+fn cmdSwapPane(ctx: *Context, _: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    const window = session.active_window orelse return CmdError.WindowNotFound;
+    _ = window;
+    // TODO: swap active pane with previous/next
+}
+
+fn cmdDisplayMessage(ctx: *Context, args: []const []const u8) CmdError!void {
+    _ = ctx;
+    if (args.len > 0) {
+        const msg = args[args.len - 1];
+        _ = std.c.write(1, msg.ptr, msg.len);
+        _ = std.c.write(1, "\n", 1);
+    }
+}
+
+fn cmdSourceFile(_: *Context, _: []const []const u8) CmdError!void {
+    // TODO: read file, parse commands, execute each
+}
+
+fn cmdListWindows(ctx: *Context, _: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    for (session.windows.items, 0..) |w, i| {
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "{d}: {s} ({d} panes)\n", .{
+            i,
+            w.name,
+            w.paneCount(),
+        }) catch continue;
+        _ = std.c.write(1, msg.ptr, msg.len);
+    }
+}
+
+fn cmdListPanes(ctx: *Context, _: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    const window = session.active_window orelse return CmdError.WindowNotFound;
+    for (window.panes.items, 0..) |p, i| {
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "{d}: [{d}x{d}]\n", .{ i, p.sx, p.sy }) catch continue;
+        _ = std.c.write(1, msg.ptr, msg.len);
+    }
+}
+
+fn cmdRunShell(_: *Context, _: []const []const u8) CmdError!void {
+    // TODO: fork, exec sh -c command, capture output
 }
 
 test "registry register and find" {
