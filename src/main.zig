@@ -45,7 +45,17 @@ pub const pane_mod = @import("pane.zig");
 pub const server_mod = @import("server.zig");
 pub const client_mod = @import("client.zig");
 pub const cmd = @import("cmd/cmd.zig");
-pub const keybind = @import("keybind/bindings.zig");
+pub const keybind = struct {
+    pub const bindings = @import("keybind/bindings.zig");
+    pub const string = @import("keybind/string.zig");
+};
+pub const render = struct {
+    pub const renderer_mod = @import("render/renderer.zig");
+    pub const atlas = @import("render/atlas.zig");
+    pub const metal = @import("render/metal.zig");
+    pub const vulkan = @import("render/vulkan.zig");
+    pub const image = @import("render/image.zig");
+};
 pub const mode = struct {
     pub const tree = @import("mode/tree.zig");
 };
@@ -172,7 +182,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     log.info("zmux starting (pid={d})", .{std.c.getpid()});
 
     // Determine socket path
-    const socket_dir = try platform.defaultSocketDir(alloc);
+    const socket_dir = try platform.core.defaultSocketDir(alloc);
     defer alloc.free(socket_dir);
 
     const socket_name: []const u8 = if (flags.socket_name) |sn| sn else default_socket_name;
@@ -212,7 +222,8 @@ test {
     _ = config.options;
     _ = config.options_table;
     _ = cmd;
-    _ = keybind;
+    _ = keybind.bindings;
+    _ = keybind.string;
     _ = terminal.acs;
     _ = terminal.features;
     _ = mode.tree;
@@ -227,4 +238,6 @@ test {
     _ = hooks.notify;
     _ = hooks.job;
     _ = tabs.tabs_mod;
+    _ = render.atlas;
+    _ = render.image;
 }
