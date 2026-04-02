@@ -424,8 +424,44 @@ fn cmdDisplayMessage(ctx: *Context, args: []const []const u8) CmdError!void {
     }
 }
 
-fn cmdSourceFile(_: *Context, _: []const []const u8) CmdError!void {
-    // TODO: read file, parse commands, execute each
+fn cmdSourceFile(ctx: *Context, args: []const []const u8) CmdError!void {
+    if (args.len == 0) return CmdError.InvalidArgs;
+    const path = args[args.len - 1];
+
+    // Read file via libc
+    var path_buf: [4096]u8 = .{0} ** 4096;
+    if (path.len >= path_buf.len) return CmdError.CommandFailed;
+    @memcpy(path_buf[0..path.len], path);
+    const cpath: [*:0]const u8 = @ptrCast(path_buf[0..path.len :0]);
+    const fd = std.c.open(cpath, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    if (fd < 0) return CmdError.CommandFailed;
+    defer _ = std.c.close(fd);
+
+    // Read contents
+    var content_buf: [65536]u8 = undefined;
+    var total: usize = 0;
+    while (total < content_buf.len) {
+        const n = std.c.read(fd, content_buf[total..].ptr, content_buf.len - total);
+        if (n <= 0) break;
+        total += @intCast(n);
+    }
+    if (total == 0) return;
+
+    // Parse and execute commands
+    const config_parser = @import("../config/parser.zig");
+    var parser = config_parser.ConfigParser.init(ctx.allocator, content_buf[0..total]);
+    var cmds = parser.parseAll() catch return CmdError.CommandFailed;
+    defer {
+        for (cmds.items) |*c| c.deinit(ctx.allocator);
+        cmds.deinit(ctx.allocator);
+    }
+
+    // Execute each command (need access to registry — for now, log them)
+    for (cmds.items) |cmd_item| {
+        var log_buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&log_buf, "source: {s}\n", .{cmd_item.name}) catch continue;
+        _ = std.c.write(1, msg.ptr, msg.len);
+    }
 }
 
 fn cmdListWindows(ctx: *Context, _: []const []const u8) CmdError!void {

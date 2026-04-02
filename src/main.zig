@@ -43,6 +43,7 @@ pub const config = struct {
     pub const options_table = @import("config/options_table.zig");
 };
 pub const input_handler = @import("input_handler.zig");
+pub const client_terminal = @import("client_terminal.zig");
 pub const pane_mod = @import("pane.zig");
 pub const server_mod = @import("server.zig");
 pub const client_mod = @import("client.zig");
@@ -248,4 +249,5 @@ test {
     _ = render.sixel;
     _ = render.kitty;
     _ = input_handler;
+    _ = client_terminal;
 }
