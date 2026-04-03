@@ -1,0 +1,1 @@
+/autopilot "Fix when running `agentmux new -s test`, do nothing"
