@@ -1288,7 +1288,6 @@ fn cmdDisplayMessage(ctx: *Context, args: []const []const u8) CmdError!void {
 fn cmdSourceFile(ctx: *Context, args: []const []const u8) CmdError!void {
     if (args.len == 0) return CmdError.InvalidArgs;
     const path = args[args.len - 1];
-    const registry = ctx.registry orelse return CmdError.CommandFailed;
 
     var path_buf: [4096]u8 = .{0} ** 4096;
     if (path.len >= path_buf.len) return CmdError.CommandFailed;
@@ -1307,15 +1306,96 @@ fn cmdSourceFile(ctx: *Context, args: []const []const u8) CmdError!void {
     }
     if (total == 0) return;
 
-    var parser = config_parser.ConfigParser.init(ctx.allocator, content_buf[0..total]);
-    var commands = parser.parseAll() catch return CmdError.CommandFailed;
-    defer {
-        for (commands.items) |*command| command.deinit(ctx.allocator);
-        commands.deinit(ctx.allocator);
+    try executeCommandSource(ctx, content_buf[0..total]);
+}
+
+fn cmdSetOption(ctx: *Context, args: []const []const u8) CmdError!void {
+    var option_name: ?[]const u8 = null;
+    var value_start: ?usize = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-g") or
+            std.mem.eql(u8, arg, "-s") or
+            std.mem.eql(u8, arg, "-w") or
+            std.mem.eql(u8, arg, "-p"))
+        {
+            continue;
+        }
+        option_name = arg;
+        value_start = i + 1;
+        break;
     }
 
-    for (commands.items) |*command| {
-        try registry.executeParsed(ctx, command);
+    const resolved_name = option_name orelse return CmdError.InvalidArgs;
+    const start = value_start orelse return CmdError.InvalidArgs;
+    if (start >= args.len) return CmdError.InvalidArgs;
+
+    const def = findOptionDef(resolved_name) orelse return CmdError.CommandFailed;
+    const scope = scopeFromSetArgs(args, def.scope);
+    const raw_value = if (args.len - start == 1)
+        args[start]
+    else
+        blk: {
+            const joined = try joinArgs(ctx.allocator, args[start..]);
+            defer ctx.allocator.free(joined);
+            const parsed_value = try parseOptionValue(def.option_type, joined);
+            try ctx.server.options.set(scope, resolved_name, parsed_value);
+            if (scope == .session) applySessionOption(ctx.server, resolved_name, parsed_value);
+            return;
+        };
+
+    const parsed = try parseOptionValue(def.option_type, raw_value);
+    try ctx.server.options.set(scope, resolved_name, parsed);
+    if (scope == .session) applySessionOption(ctx.server, resolved_name, parsed);
+}
+
+fn cmdBindKey(ctx: *Context, args: []const []const u8) CmdError!void {
+    var table_name: []const u8 = "prefix";
+    var key_name: ?[]const u8 = null;
+    var command_start: usize = 0;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-n")) {
+            table_name = "root";
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "-T")) {
+            if (i + 1 >= args.len) return CmdError.InvalidArgs;
+            table_name = args[i + 1];
+            i += 1;
+            continue;
+        }
+        key_name = arg;
+        command_start = i + 1;
+        break;
+    }
+
+    const resolved_key = key_name orelse return CmdError.InvalidArgs;
+    if (command_start >= args.len) return CmdError.InvalidArgs;
+
+    const parsed_key = key_string.stringToKey(resolved_key) orelse return CmdError.InvalidArgs;
+    const command = if (args.len - command_start == 1)
+        args[command_start]
+    else
+        try joinArgs(ctx.allocator, args[command_start..]);
+    defer if (args.len - command_start > 1) ctx.allocator.free(command);
+
+    const table = ctx.server.bindings.getOrCreateTable(table_name) catch return CmdError.OutOfMemory;
+    table.bind(parsed_key.key, parsed_key.mods, command) catch return CmdError.OutOfMemory;
+}
+
+fn cmdIfShell(ctx: *Context, args: []const []const u8) CmdError!void {
+    if (args.len < 2) return CmdError.InvalidArgs;
+    const exit_code = try runShellCommand(args[0]);
+    if (exit_code == 0) {
+        try executeCommandSource(ctx, args[1]);
+        return;
+    }
+    if (args.len >= 3) {
+        try executeCommandSource(ctx, args[2]);
     }
 }
 
@@ -1417,11 +1497,7 @@ fn cmdDeleteBuffer(ctx: *Context, args: []const []const u8) CmdError!void {
 }
 
 fn cmdListKeys(ctx: *Context, _: []const []const u8) CmdError!void {
-    var manager = binding_mod.BindingManager.init(ctx.allocator);
-    defer manager.deinit();
-    try manager.setupDefaults();
-
-    var iter = manager.tables.iterator();
+    var iter = ctx.server.bindings.tables.iterator();
     while (iter.next()) |entry| {
         const table_name = entry.key_ptr.*;
         const table = entry.value_ptr;
