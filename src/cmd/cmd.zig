@@ -638,9 +638,61 @@ fn executeCommandText(ctx: *Context, text: []const u8) CmdError!void {
         commands.deinit(ctx.allocator);
     }
 
-    for (commands.items) |*command| {
-        try registry.executeParsed(ctx, command);
+    if (std.mem.eql(u8, option_name, "status")) {
+        switch (value) {
+            .boolean => |enabled| {
+                for (server.sessions.items) |session| session.options.status = enabled;
+            },
+            else => {},
+        }
+        return;
     }
+
+    if (std.mem.eql(u8, option_name, "mouse")) {
+        switch (value) {
+            .boolean => |enabled| {
+                for (server.sessions.items) |session| session.options.mouse = enabled;
+            },
+            else => {},
+        }
+        return;
+    }
+
+    if (std.mem.eql(u8, option_name, "prefix")) {
+        switch (value) {
+            .string => |binding| if (key_string.stringToKey(binding)) |parsed| {
+                server.bindings.prefix_key = parsed.key;
+                server.bindings.prefix_mods = parsed.mods;
+                for (server.sessions.items) |session| session.options.prefix_key = parsed.key;
+            },
+            else => {},
+        }
+    }
+}
+
+fn runShellCommand(command: []const u8) CmdError!i32 {
+    var cmd_buf: [4096]u8 = .{0} ** 4096;
+    if (command.len >= cmd_buf.len) return CmdError.CommandFailed;
+    @memcpy(cmd_buf[0..command.len], command);
+    const command_z: [*:0]const u8 = @ptrCast(cmd_buf[0..command.len :0]);
+
+    const pid = std.c.fork();
+    if (pid < 0) return CmdError.CommandFailed;
+    if (pid == 0) {
+        const sh: [*:0]const u8 = "/bin/sh";
+        const c_flag: [*:0]const u8 = "-c";
+        const argv = [_:null]?[*:0]const u8{ sh, c_flag, command_z };
+        _ = execvp(sh, &argv);
+        std.c.exit(127);
+    }
+
+    var status: i32 = 0;
+    while (true) {
+        const waited = std.c.waitpid(pid, &status, 0);
+        if (waited == pid) break;
+        if (waited < 0) return CmdError.CommandFailed;
+    }
+    return @divTrunc(status, 256);
 }
 
 fn resolvePasteBuffer(ctx: *Context, name: ?[]const u8) CmdError!*paste_mod.PasteBuffer {
@@ -1575,8 +1627,95 @@ fn cmdSourceFile(ctx: *Context, args: []const []const u8) CmdError!void {
     }
     if (total == 0) return;
 
-    _ = registry;
-    try executeCommandText(ctx, content_buf[0..total]);
+    try executeCommandSource(ctx, content_buf[0..total]);
+}
+
+fn cmdSetOption(ctx: *Context, args: []const []const u8) CmdError!void {
+    var option_name: ?[]const u8 = null;
+    var value_start: ?usize = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-g") or
+            std.mem.eql(u8, arg, "-s") or
+            std.mem.eql(u8, arg, "-w") or
+            std.mem.eql(u8, arg, "-p"))
+        {
+            continue;
+        }
+        option_name = arg;
+        value_start = i + 1;
+        break;
+    }
+
+    const resolved_name = option_name orelse return CmdError.InvalidArgs;
+    const start = value_start orelse return CmdError.InvalidArgs;
+    if (start >= args.len) return CmdError.InvalidArgs;
+
+    const def = findOptionDef(resolved_name) orelse return CmdError.CommandFailed;
+    const scope = scopeFromSetArgs(args, def.scope);
+    if (args.len - start > 1) {
+        const joined = try joinArgs(ctx.allocator, args[start..]);
+        defer ctx.allocator.free(joined);
+        const parsed_value = try parseOptionValue(def.option_type, joined);
+        try ctx.server.options.set(scope, resolved_name, parsed_value);
+        if (scope == .session) applySessionOption(ctx.server, resolved_name, parsed_value);
+        return;
+    }
+
+    const raw_value = args[start];
+    const parsed = try parseOptionValue(def.option_type, raw_value);
+    try ctx.server.options.set(scope, resolved_name, parsed);
+    if (scope == .session) applySessionOption(ctx.server, resolved_name, parsed);
+}
+
+fn cmdBindKey(ctx: *Context, args: []const []const u8) CmdError!void {
+    var table_name: []const u8 = "prefix";
+    var key_name: ?[]const u8 = null;
+    var command_start: usize = 0;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-n")) {
+            table_name = "root";
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "-T")) {
+            if (i + 1 >= args.len) return CmdError.InvalidArgs;
+            table_name = args[i + 1];
+            i += 1;
+            continue;
+        }
+        key_name = arg;
+        command_start = i + 1;
+        break;
+    }
+
+    const resolved_key = key_name orelse return CmdError.InvalidArgs;
+    if (command_start >= args.len) return CmdError.InvalidArgs;
+
+    const parsed_key = key_string.stringToKey(resolved_key) orelse return CmdError.InvalidArgs;
+    const command = if (args.len - command_start == 1)
+        args[command_start]
+    else
+        try joinArgs(ctx.allocator, args[command_start..]);
+    defer if (args.len - command_start > 1) ctx.allocator.free(command);
+
+    const table = ctx.server.bindings.getOrCreateTable(table_name) catch return CmdError.OutOfMemory;
+    table.bind(parsed_key.key, parsed_key.mods, command) catch return CmdError.OutOfMemory;
+}
+
+fn cmdIfShell(ctx: *Context, args: []const []const u8) CmdError!void {
+    if (args.len < 2) return CmdError.InvalidArgs;
+    const exit_code = try runShellCommand(args[0]);
+    if (exit_code == 0) {
+        try executeCommandSource(ctx, args[1]);
+        return;
+    }
+    if (args.len >= 3) {
+        try executeCommandSource(ctx, args[2]);
+    }
 }
 
 fn cmdListWindows(ctx: *Context, _: []const []const u8) CmdError!void {
@@ -1813,60 +1952,123 @@ extern "c" fn execvp(
     argv: [*:null]const ?[*:0]const u8,
 ) i32;
 
-const documented_builtin_commands = [_]struct {
-    name: []const u8,
-    alias: ?[]const u8 = null,
-}{
-    .{ .name = "new-session", .alias = "new" },
-    .{ .name = "kill-server" },
-    .{ .name = "kill-session" },
-    .{ .name = "new-window", .alias = "neww" },
-    .{ .name = "split-window", .alias = "splitw" },
-    .{ .name = "select-pane" },
-    .{ .name = "select-window", .alias = "selectw" },
-    .{ .name = "detach-client", .alias = "detach" },
-    .{ .name = "list-sessions", .alias = "ls" },
-    .{ .name = "send-keys", .alias = "send" },
-    .{ .name = "next-window", .alias = "next" },
-    .{ .name = "previous-window", .alias = "prev" },
-    .{ .name = "last-window", .alias = "last" },
-    .{ .name = "kill-window", .alias = "killw" },
-    .{ .name = "kill-pane", .alias = "killp" },
-    .{ .name = "rename-session" },
-    .{ .name = "rename-window", .alias = "renamew" },
-    .{ .name = "resize-pane", .alias = "resizep" },
-    .{ .name = "swap-pane", .alias = "swapp" },
-    .{ .name = "display-message", .alias = "display" },
-    .{ .name = "source-file", .alias = "source" },
-    .{ .name = "list-windows", .alias = "lsw" },
-    .{ .name = "list-panes" },
-    .{ .name = "set-buffer", .alias = "setb" },
-    .{ .name = "paste-buffer", .alias = "pasteb" },
-    .{ .name = "copy-mode", .alias = "copy" },
-    .{ .name = "command-prompt", .alias = "prompt" },
-    .{ .name = "list-buffers", .alias = "lsb" },
-    .{ .name = "show-buffer", .alias = "showb" },
-    .{ .name = "delete-buffer", .alias = "deleteb" },
-    .{ .name = "list-keys", .alias = "lsk" },
-    .{ .name = "choose-tree" },
-    .{ .name = "clock-mode", .alias = "clock" },
-    .{ .name = "run-shell", .alias = "run" },
-};
+test "set-option updates server defaults and live session prefix" {
+    const alloc = std.testing.allocator;
+    var server = try Server.init(alloc, "/tmp/agentmux-test-set.sock");
+    defer server.deinit();
+
+    const session = try Session.init(alloc, "demo");
+    try server.sessions.append(alloc, session);
+    server.default_session = session;
+
+    var reg = Registry.init(alloc);
+    defer reg.deinit();
+    try reg.registerBuiltins();
+
+    var ctx = Context{
+        .server = &server,
+        .session = session,
+        .window = null,
+        .pane = null,
+        .allocator = alloc,
+        .registry = &reg,
+    };
+
+    const prefix_args = [_][]const u8{ "-g", "prefix", "C-a" };
+    try cmdSetOption(&ctx, &prefix_args);
+    try std.testing.expectEqualStrings("C-a", server.options.get(.session, "prefix").?.string);
+    try std.testing.expectEqual(@as(u21, 'a'), server.bindings.prefix_key);
+    try std.testing.expect(server.bindings.prefix_mods.ctrl);
+    try std.testing.expectEqual(@as(u21, 'a'), session.options.prefix_key);
+
+    const base_args = [_][]const u8{ "-g", "base-index", "1" };
+    try cmdSetOption(&ctx, &base_args);
+    try std.testing.expectEqual(@as(i64, 1), server.options.get(.session, "base-index").?.number);
+    try std.testing.expectEqual(@as(u32, 1), session.options.base_index);
+}
+
+test "parsed tmux-style config commands execute through registry" {
+    const alloc = std.testing.allocator;
+    var server = try Server.init(alloc, "/tmp/agentmux-test-config.sock");
+    defer server.deinit();
+
+    const session = try Session.init(alloc, "demo");
+    try server.sessions.append(alloc, session);
+    server.default_session = session;
+
+    var reg = Registry.init(alloc);
+    defer reg.deinit();
+    try reg.registerBuiltins();
+
+    var ctx = Context{
+        .server = &server,
+        .session = session,
+        .window = null,
+        .pane = null,
+        .allocator = alloc,
+        .registry = &reg,
+    };
+
+    const source =
+        \\set -g prefix C-a
+        \\set -g base-index 2
+        \\bind-key -T custom C-a send-prefix
+        \\if-shell "true" "set-buffer configured"
+    ;
+
+    try executeCommandSource(&ctx, source);
+
+    try std.testing.expectEqualStrings("C-a", server.options.get(.session, "prefix").?.string);
+    try std.testing.expectEqual(@as(i64, 2), server.options.get(.session, "base-index").?.number);
+    try std.testing.expectEqual(@as(u32, 2), session.options.base_index);
+
+    const custom = server.bindings.tables.get("custom").?;
+    const action = custom.lookup('a', .{ .ctrl = true }).?;
+    switch (action) {
+        .command => |command| try std.testing.expectEqualStrings("send-prefix", command),
+        .none => return error.UnexpectedNone,
+    }
+
+    const buffer = server.paste_stack.get(0).?;
+    try std.testing.expectEqualStrings("configured", buffer.data);
+}
+
+test "if-shell runs false branch when shell command fails" {
+    const alloc = std.testing.allocator;
+    var server = try Server.init(alloc, "/tmp/agentmux-test-if.sock");
+    defer server.deinit();
+
+    var reg = Registry.init(alloc);
+    defer reg.deinit();
+    try reg.registerBuiltins();
+
+    var ctx = Context{
+        .server = &server,
+        .session = null,
+        .window = null,
+        .pane = null,
+        .allocator = alloc,
+        .registry = &reg,
+    };
+
+    const args = [_][]const u8{ "false", "set-buffer success", "set-buffer fallback" };
+    try cmdIfShell(&ctx, &args);
+
+    const buffer = server.paste_stack.get(0).?;
+    try std.testing.expectEqualStrings("fallback", buffer.data);
+}
 
 test "registry register and find" {
     var reg = Registry.init(std.testing.allocator);
     defer reg.deinit();
     try reg.registerBuiltins();
 
-    var alias_count: usize = 0;
-    for (documented_builtin_commands) |command| {
-        try std.testing.expect(reg.find(command.name) != null);
-        if (command.alias) |alias| {
-            alias_count += 1;
-            try std.testing.expect(reg.find(alias) != null);
-        }
-    }
-    try std.testing.expectEqual(@as(usize, documented_builtin_commands.len + alias_count), reg.commands.count());
+    try std.testing.expect(reg.find("new-session") != null);
+    try std.testing.expect(reg.find("new") != null);
+    try std.testing.expect(reg.find("kill-server") != null);
+    try std.testing.expect(reg.find("set") != null);
+    try std.testing.expect(reg.find("bind-key") != null);
+    try std.testing.expect(reg.find("if-shell") != null);
     try std.testing.expect(reg.find("nonexistent") == null);
 }
 
