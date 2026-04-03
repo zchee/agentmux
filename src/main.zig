@@ -63,6 +63,7 @@ pub const render = struct {
     pub const image = @import("render/image.zig");
     pub const sixel = @import("render/sixel.zig");
     pub const kitty = @import("render/kitty.zig");
+    pub const shaders = @import("render/shaders.zig");
 };
 pub const mode = struct {
     pub const tree = @import("mode/tree.zig");
@@ -251,6 +252,7 @@ test {
     _ = render.image;
     _ = render.sixel;
     _ = render.kitty;
+    _ = render.shaders;
     _ = input_handler;
     _ = client_terminal;
     _ = server_loop;
