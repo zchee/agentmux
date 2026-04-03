@@ -88,6 +88,13 @@ pub const tabs = struct {
 };
 
 const cmd_tmux_equivalent_test = @import("cmd/tmux_equivalent_test.zig");
+const cmd_window_commands_test = @import("cmd/window_commands_test.zig");
+const cmd_buffer_commands_test = @import("cmd/buffer_commands_test.zig");
+const cmd_key_commands_test = @import("cmd/key_commands_test.zig");
+const cmd_display_commands_test = @import("cmd/display_commands_test.zig");
+const cmd_option_commands_test = @import("cmd/option_commands_test.zig");
+const cmd_config_shell_test = @import("cmd/config_shell_test.zig");
+const cmd_pane_commands_test = @import("cmd/pane_commands_test.zig");
 const log = core.log;
 
 const version_string = "agentmux 0.1.0";
@@ -355,6 +362,12 @@ test {
     _ = config.options_table;
     _ = cmd;
     _ = cmd_tmux_equivalent_test;
+    _ = cmd_buffer_commands_test;
+    _ = cmd_key_commands_test;
+    _ = cmd_display_commands_test;
+    _ = cmd_option_commands_test;
+    _ = cmd_config_shell_test;
+    _ = cmd_pane_commands_test;
     _ = keybind.bindings;
     _ = keybind.string;
     _ = terminal.acs;
