@@ -108,6 +108,7 @@ const Flags = struct {
     utf8_flag: bool = false,
     verbose: u8 = 0,
     print_version: bool = false,
+    print_help: bool = false,
     remaining: std.ArrayListAligned([:0]const u8, null),
 
     fn deinit(self: *Flags, alloc: std.mem.Allocator) void {
@@ -141,6 +142,7 @@ fn parseArgs(alloc: std.mem.Allocator, init_args: std.process.Args) Flags {
                 'u' => flags.utf8_flag = true,
                 'v' => flags.verbose +|= 1,
                 'V' => flags.print_version = true,
+                'h' => flags.print_help = true,
                 'c' => {
                     flags.shell_command = args.next();
                     break;
@@ -282,6 +284,31 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     var flags = parseArgs(alloc, init.args);
     defer flags.deinit(alloc);
+
+    if (flags.print_help) {
+        writeStdout(
+            \\usage: agentmux [-2CDhuVv] [-c shell-command] [-f file] [-L socket-name]
+            \\                [-S socket-path] [command [flags]]
+            \\
+            \\options:
+            \\  -2            Force 256-color terminal
+            \\  -C            Start in control mode
+            \\  -c command    Execute shell-command using the default shell
+            \\  -D            Do not start the server as a daemon
+            \\  -f file       Specify an alternative configuration file
+            \\  -h            Show this help message
+            \\  -L name       Use a different socket name (default: default)
+            \\  -S path       Specify a full alternative path to the server socket
+            \\  -u            Set the client to UTF-8 mode
+            \\  -V            Print version and exit
+            \\  -v            Enable verbose logging (repeat for more)
+            \\
+            \\commands:
+            \\  Run 'agentmux list-commands' for a list of available commands.
+            \\
+        );
+        return;
+    }
 
     if (flags.print_version) {
         writeStdout(version_string ++ "\n");
