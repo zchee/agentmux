@@ -1285,6 +1285,220 @@ fn cmdDisplayMessage(ctx: *Context, args: []const []const u8) CmdError!void {
     }
 }
 
+fn applyServerOption(ctx: *Context, name: []const u8, value: []const u8) CmdError!void {
+    if (std.mem.eql(u8, name, "default-terminal")) {
+        ctx.server.setDefaultTerminal(value) catch return CmdError.OutOfMemory;
+        return;
+    }
+    if (std.mem.eql(u8, name, "history-limit")) {
+        ctx.server.options.history_limit = std.fmt.parseInt(i64, value, 10) catch return CmdError.InvalidArgs;
+        return;
+    }
+    if (std.mem.eql(u8, name, "escape-time")) {
+        ctx.server.options.escape_time = std.fmt.parseInt(i64, value, 10) catch return CmdError.InvalidArgs;
+        return;
+    }
+    if (std.mem.eql(u8, name, "set-clipboard")) {
+        ctx.server.setSetClipboard(value) catch return CmdError.OutOfMemory;
+        return;
+    }
+    return CmdError.InvalidArgs;
+}
+
+fn applySessionOption(ctx: *Context, name: []const u8, value: []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+
+    if (std.mem.eql(u8, name, "base-index")) {
+        session.options.base_index = std.fmt.parseInt(u32, value, 10) catch return CmdError.InvalidArgs;
+        return;
+    }
+    if (std.mem.eql(u8, name, "default-shell")) {
+        session.setDefaultShell(value) catch return CmdError.OutOfMemory;
+        return;
+    }
+    if (std.mem.eql(u8, name, "status")) {
+        session.options.status = parseBoolValue(value) orelse return CmdError.InvalidArgs;
+        return;
+    }
+    if (std.mem.eql(u8, name, "mouse")) {
+        session.options.mouse = parseBoolValue(value) orelse return CmdError.InvalidArgs;
+        return;
+    }
+    if (std.mem.eql(u8, name, "prefix")) {
+        const result = key_string.stringToKey(value) orelse return CmdError.InvalidArgs;
+        session.setPrefix(value, result.key) catch return CmdError.OutOfMemory;
+        ctx.server.bindings.prefix_key = result.key;
+        ctx.server.bindings.prefix_mods = .{
+            .ctrl = result.mods.ctrl,
+            .meta = result.mods.meta,
+            .shift = result.mods.shift,
+        };
+        return;
+    }
+    if (std.mem.eql(u8, name, "status-style")) {
+        session.options.status_style = status_style.parse(value);
+        return;
+    }
+    if (std.mem.eql(u8, name, "status-left")) {
+        session.setStatusLeft(value) catch return CmdError.OutOfMemory;
+        return;
+    }
+    if (std.mem.eql(u8, name, "status-right")) {
+        session.setStatusRight(value) catch return CmdError.OutOfMemory;
+        return;
+    }
+    if (std.mem.eql(u8, name, "visual-activity")) {
+        session.options.visual_activity = parseBoolValue(value) orelse return CmdError.InvalidArgs;
+        return;
+    }
+    return CmdError.InvalidArgs;
+}
+
+fn applyWindowOption(ctx: *Context, name: []const u8, value: []const u8) CmdError!void {
+    const window = ctx.window orelse return CmdError.WindowNotFound;
+
+    if (std.mem.eql(u8, name, "mode-keys")) {
+        window.setModeKeys(value) catch return CmdError.OutOfMemory;
+        return;
+    }
+    if (std.mem.eql(u8, name, "window-status-format")) {
+        window.setWindowStatusFormat(value) catch return CmdError.OutOfMemory;
+        return;
+    }
+    if (std.mem.eql(u8, name, "aggressive-resize")) {
+        window.options.aggressive_resize = parseBoolValue(value) orelse return CmdError.InvalidArgs;
+        return;
+    }
+    if (std.mem.eql(u8, name, "remain-on-exit")) {
+        window.options.remain_on_exit = parseBoolValue(value) orelse return CmdError.InvalidArgs;
+        return;
+    }
+    return CmdError.InvalidArgs;
+}
+
+fn cmdSetOption(ctx: *Context, args: []const []const u8) CmdError!void {
+    var option_index: ?usize = null;
+    var target_server = false;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "-g") or std.mem.eql(u8, args[i], "-s")) {
+            target_server = true;
+            continue;
+        }
+        if (args[i].len > 0 and args[i][0] == '-') continue;
+        option_index = i;
+        break;
+    }
+
+    const option_pos = option_index orelse return CmdError.InvalidArgs;
+    if (option_pos + 1 >= args.len) return CmdError.InvalidArgs;
+    const option_name = args[option_pos];
+    const value = joinArgs(ctx.allocator, args[option_pos + 1 ..]) catch return CmdError.OutOfMemory;
+    defer ctx.allocator.free(value);
+
+    if (target_server or
+        std.mem.eql(u8, option_name, "default-terminal") or
+        std.mem.eql(u8, option_name, "history-limit") or
+        std.mem.eql(u8, option_name, "escape-time") or
+        std.mem.eql(u8, option_name, "set-clipboard"))
+    {
+        return applyServerOption(ctx, option_name, value);
+    }
+
+    return applySessionOption(ctx, option_name, value);
+}
+
+fn cmdSetWindowOption(ctx: *Context, args: []const []const u8) CmdError!void {
+    var option_index: ?usize = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (args[i].len > 0 and args[i][0] == '-') continue;
+        option_index = i;
+        break;
+    }
+
+    const option_pos = option_index orelse return CmdError.InvalidArgs;
+    if (option_pos + 1 >= args.len) return CmdError.InvalidArgs;
+    const option_name = args[option_pos];
+    const value = joinArgs(ctx.allocator, args[option_pos + 1 ..]) catch return CmdError.OutOfMemory;
+    defer ctx.allocator.free(value);
+    return applyWindowOption(ctx, option_name, value);
+}
+
+fn parseBindingKeyArg(key_arg: []const u8) ?struct { key: u21, mods: binding_mod.Modifiers } {
+    if (key_string.stringToKey(key_arg)) |result| {
+        return .{
+            .key = result.key,
+            .mods = .{
+                .ctrl = result.mods.ctrl,
+                .meta = result.mods.meta,
+                .shift = result.mods.shift,
+            },
+        };
+    }
+    if (key_arg.len == 1) {
+        return .{ .key = key_arg[0], .mods = .{} };
+    }
+    return null;
+}
+
+fn cmdBindKey(ctx: *Context, args: []const []const u8) CmdError!void {
+    var table_name: []const u8 = "prefix";
+    var key_index: ?usize = null;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "-T")) {
+            if (i + 1 >= args.len) return CmdError.InvalidArgs;
+            i += 1;
+            table_name = args[i];
+            continue;
+        }
+        if (std.mem.eql(u8, args[i], "-n")) {
+            table_name = "root";
+            continue;
+        }
+        key_index = i;
+        break;
+    }
+
+    const key_pos = key_index orelse return CmdError.InvalidArgs;
+    if (key_pos + 1 >= args.len) return CmdError.InvalidArgs;
+    const parsed = parseBindingKeyArg(args[key_pos]) orelse return CmdError.InvalidArgs;
+    const command = joinArgs(ctx.allocator, args[key_pos + 1 ..]) catch return CmdError.OutOfMemory;
+    defer ctx.allocator.free(command);
+
+    const table = ctx.server.bindings.getOrCreateTable(table_name) catch return CmdError.OutOfMemory;
+    table.bind(parsed.key, parsed.mods, command) catch return CmdError.OutOfMemory;
+}
+
+fn cmdUnbindKey(ctx: *Context, args: []const []const u8) CmdError!void {
+    var table_name: []const u8 = "prefix";
+    var key_index: ?usize = null;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "-T")) {
+            if (i + 1 >= args.len) return CmdError.InvalidArgs;
+            i += 1;
+            table_name = args[i];
+            continue;
+        }
+        if (std.mem.eql(u8, args[i], "-n")) {
+            table_name = "root";
+            continue;
+        }
+        key_index = i;
+        break;
+    }
+
+    const key_pos = key_index orelse return CmdError.InvalidArgs;
+    const parsed = parseBindingKeyArg(args[key_pos]) orelse return CmdError.InvalidArgs;
+    const table = ctx.server.bindings.tables.getPtr(table_name) orelse return;
+    table.unbind(parsed.key, parsed.mods);
+}
+
 fn cmdSourceFile(ctx: *Context, args: []const []const u8) CmdError!void {
     if (args.len == 0) return CmdError.InvalidArgs;
     const path = args[args.len - 1];
@@ -1306,97 +1520,8 @@ fn cmdSourceFile(ctx: *Context, args: []const []const u8) CmdError!void {
     }
     if (total == 0) return;
 
-    try executeCommandSource(ctx, content_buf[0..total]);
-}
-
-fn cmdSetOption(ctx: *Context, args: []const []const u8) CmdError!void {
-    var option_name: ?[]const u8 = null;
-    var value_start: ?usize = null;
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-        if (std.mem.eql(u8, arg, "-g") or
-            std.mem.eql(u8, arg, "-s") or
-            std.mem.eql(u8, arg, "-w") or
-            std.mem.eql(u8, arg, "-p"))
-        {
-            continue;
-        }
-        option_name = arg;
-        value_start = i + 1;
-        break;
-    }
-
-    const resolved_name = option_name orelse return CmdError.InvalidArgs;
-    const start = value_start orelse return CmdError.InvalidArgs;
-    if (start >= args.len) return CmdError.InvalidArgs;
-
-    const def = findOptionDef(resolved_name) orelse return CmdError.CommandFailed;
-    const scope = scopeFromSetArgs(args, def.scope);
-    const raw_value = if (args.len - start == 1)
-        args[start]
-    else
-        blk: {
-            const joined = try joinArgs(ctx.allocator, args[start..]);
-            defer ctx.allocator.free(joined);
-            const parsed_value = try parseOptionValue(def.option_type, joined);
-            try ctx.server.options.set(scope, resolved_name, parsed_value);
-            if (scope == .session) applySessionOption(ctx.server, resolved_name, parsed_value);
-            return;
-        };
-
-    const parsed = try parseOptionValue(def.option_type, raw_value);
-    try ctx.server.options.set(scope, resolved_name, parsed);
-    if (scope == .session) applySessionOption(ctx.server, resolved_name, parsed);
-}
-
-fn cmdBindKey(ctx: *Context, args: []const []const u8) CmdError!void {
-    var table_name: []const u8 = "prefix";
-    var key_name: ?[]const u8 = null;
-    var command_start: usize = 0;
-
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-        if (std.mem.eql(u8, arg, "-n")) {
-            table_name = "root";
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "-T")) {
-            if (i + 1 >= args.len) return CmdError.InvalidArgs;
-            table_name = args[i + 1];
-            i += 1;
-            continue;
-        }
-        key_name = arg;
-        command_start = i + 1;
-        break;
-    }
-
-    const resolved_key = key_name orelse return CmdError.InvalidArgs;
-    if (command_start >= args.len) return CmdError.InvalidArgs;
-
-    const parsed_key = key_string.stringToKey(resolved_key) orelse return CmdError.InvalidArgs;
-    const command = if (args.len - command_start == 1)
-        args[command_start]
-    else
-        try joinArgs(ctx.allocator, args[command_start..]);
-    defer if (args.len - command_start > 1) ctx.allocator.free(command);
-
-    const table = ctx.server.bindings.getOrCreateTable(table_name) catch return CmdError.OutOfMemory;
-    table.bind(parsed_key.key, parsed_key.mods, command) catch return CmdError.OutOfMemory;
-}
-
-fn cmdIfShell(ctx: *Context, args: []const []const u8) CmdError!void {
-    if (args.len < 2) return CmdError.InvalidArgs;
-    const exit_code = try runShellCommand(args[0]);
-    if (exit_code == 0) {
-        try executeCommandSource(ctx, args[1]);
-        return;
-    }
-    if (args.len >= 3) {
-        try executeCommandSource(ctx, args[2]);
-    }
+    _ = registry;
+    try executeCommandText(ctx, content_buf[0..total]);
 }
 
 fn cmdListWindows(ctx: *Context, _: []const []const u8) CmdError!void {
@@ -1577,10 +1702,14 @@ fn cmdClockMode(ctx: *Context, _: []const []const u8) CmdError!void {
     try writeOutput(ctx, "└──────────┘\n", .{});
 }
 
-fn cmdRunShell(_: *Context, args: []const []const u8) CmdError!void {
-    if (args.len == 0) return CmdError.InvalidArgs;
-    const command = args[args.len - 1];
+fn cmdSendPrefix(ctx: *Context, _: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    const window = session.active_window orelse return CmdError.WindowNotFound;
+    const pane = window.active_pane orelse return CmdError.PaneNotFound;
+    writeKeyArgToPane(pane, session.options.prefix_string);
+}
 
+fn runShellCommandAndWait(command: []const u8) CmdError!i32 {
     var cmd_buf: [4096]u8 = .{0} ** 4096;
     if (command.len >= cmd_buf.len) return CmdError.CommandFailed;
     @memcpy(cmd_buf[0..command.len], command);
@@ -1597,7 +1726,31 @@ fn cmdRunShell(_: *Context, args: []const []const u8) CmdError!void {
         std.c.exit(127);
     }
 
-    _ = std.c.waitpid(pid, null, 0);
+    var status: i32 = 0;
+    _ = std.c.waitpid(pid, &status, 0);
+    return status;
+}
+
+fn cmdRunShell(_: *Context, args: []const []const u8) CmdError!void {
+    if (args.len == 0) return CmdError.InvalidArgs;
+    const command = args[args.len - 1];
+    _ = try runShellCommandAndWait(command);
+}
+
+fn cmdIfShell(ctx: *Context, args: []const []const u8) CmdError!void {
+    if (args.len < 2) return CmdError.InvalidArgs;
+
+    const condition = args[0];
+    const if_command = args[1];
+    const else_command = if (args.len >= 3) args[2] else null;
+    const status = try runShellCommandAndWait(condition);
+    const exited = @as(u8, @truncate(@as(u32, @bitCast(status)) >> 8));
+
+    if (exited == 0) {
+        try executeCommandText(ctx, if_command);
+    } else if (else_command) |fallback| {
+        try executeCommandText(ctx, fallback);
+    }
 }
 
 extern "c" fn execvp(
