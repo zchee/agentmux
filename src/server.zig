@@ -295,14 +295,19 @@ pub const Server = struct {
                 // Accept new clients on listen fd.
                 if (fd == server.listen_fd) {
                     server.acceptClient() catch {};
-                    // Register the new client fd with GCD.
+                    // Register the new client fd with GCD and drain any
+                    // data that arrived before the source was armed.
                     if (server.clients.items.len > 0) {
-                        const new_client = server.clients.items[server.clients.items.len - 1];
+                        const new_idx = server.clients.items.len - 1;
+                        const new_client = server.clients.items[new_idx];
                         if (builtin.os.tag == .macos) {
                             if (server.gcd_loop) |*gl| {
                                 gl.addFd(new_client.fd, .read, makeCallback(server)) catch {};
                             }
                         }
+                        // Drain buffered messages (identify + command may
+                        // already be waiting before the dispatch source fires).
+                        server.drainClient(new_idx);
                     }
                     return;
                 }
@@ -377,9 +382,11 @@ pub const Server = struct {
                     // Accept new clients on listen fd.
                     if (fd == server.listen_fd) {
                         server.acceptClient() catch {};
-                        // Register the new client fd with io_uring.
+                        // Register the new client fd with io_uring and
+                        // drain any buffered messages.
                         if (server.clients.items.len > 0) {
-                            const new_client = server.clients.items[server.clients.items.len - 1];
+                            const new_idx = server.clients.items.len - 1;
+                            const new_client = server.clients.items[new_idx];
                             if (builtin.os.tag == .linux) {
                                 if (server.uring_loop) |*ul| {
                                     const new_cb = event_loop_mod.Callback{
@@ -389,6 +396,7 @@ pub const Server = struct {
                                     ul.addFd(new_client.fd, .read, new_cb) catch {};
                                 }
                             }
+                            server.drainClient(new_idx);
                         }
                         return;
                     }
@@ -799,11 +807,16 @@ pub const Server = struct {
         const ps = pane_state_opt orelse return error.NoPaneState;
 
         // Use a pipe so Output can flush to the write end while we
-        // collect the bytes from the read end.
+        // collect the bytes from the read end. Set write end non-blocking
+        // to prevent deadlock when output exceeds the kernel pipe buffer.
         var pipe_fds: [2]std.c.fd_t = undefined;
         if (std.c.pipe(&pipe_fds) != 0) return error.PipeFailed;
         defer _ = std.c.close(pipe_fds[0]);
-        errdefer _ = std.c.close(pipe_fds[1]);
+
+        const fl = std.c.fcntl(pipe_fds[1], std.c.F.GETFL);
+        if (fl >= 0) {
+            _ = std.c.fcntl(pipe_fds[1], std.c.F.SETFL, fl | @as(i32, @bitCast(std.c.O{ .NONBLOCK = true })));
+        }
 
         // Render dirty screen lines through the redraw pipeline.
         var out = output_mod.Output.init(pipe_fds[1]);
@@ -835,7 +848,6 @@ pub const Server = struct {
 
         // Close write end so read gets EOF.
         _ = std.c.close(pipe_fds[1]);
-        pipe_fds[1] = -1;
 
         // Read rendered bytes from the pipe.
         var rendered: [protocol.max_payload]u8 = undefined;
@@ -848,6 +860,30 @@ pub const Server = struct {
 
         if (total > 0) {
             try protocol.sendMessage(client_fd, .output, rendered[0..total]);
+        }
+    }
+
+    /// Drain all pending messages on a newly accepted client.
+    /// Called after registering the fd with the platform event loop to
+    /// handle data that arrived before the dispatch source was armed.
+    fn drainClient(self: *Server, client_idx: usize) void {
+        if (client_idx >= self.clients.items.len) return;
+        const fd = self.clients.items[client_idx].fd;
+
+        // Set non-blocking temporarily so we don't hang.
+        const fl = std.c.fcntl(fd, std.c.F.GETFL);
+        if (fl >= 0) {
+            _ = std.c.fcntl(fd, std.c.F.SETFL, fl | @as(i32, @bitCast(std.c.O{ .NONBLOCK = true })));
+        }
+        defer if (fl >= 0) {
+            _ = std.c.fcntl(fd, std.c.F.SETFL, fl);
+        };
+
+        // Process up to a few messages (identify + command typically).
+        var count: usize = 0;
+        while (count < 8) : (count += 1) {
+            if (client_idx >= self.clients.items.len) break;
+            self.handleClientReadable(client_idx) catch break;
         }
     }
 
