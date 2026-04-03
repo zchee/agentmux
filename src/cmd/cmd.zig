@@ -294,10 +294,11 @@ fn cmdKillSession(ctx: *Context, args: []const []const u8) CmdError!void {
     }
 
     if (target) |name| {
-        _ = ctx.server.findSession(name) orelse return CmdError.SessionNotFound;
-        // TODO: actually remove the session from the server's list
-    } else if (ctx.session) |_| {
-        // TODO: kill current session
+        const session = ctx.server.findSession(name) orelse return CmdError.SessionNotFound;
+        ctx.server.removeSession(session);
+    } else if (ctx.session) |session| {
+        ctx.session = null;
+        ctx.server.removeSession(session);
     } else {
         return CmdError.SessionNotFound;
     }
@@ -344,8 +345,13 @@ fn cmdSelectWindow(ctx: *Context, args: []const []const u8) CmdError!void {
 }
 
 fn cmdDetachClient(ctx: *Context, _: []const []const u8) CmdError!void {
-    _ = ctx;
-    // TODO: send detach message to client
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    // Detach all clients attached to this session
+    for (ctx.server.clients.items, 0..) |client, i| {
+        if (client.session == session) {
+            ctx.server.detachClient(i);
+        }
+    }
 }
 
 fn cmdListSessions(ctx: *Context, _: []const []const u8) CmdError!void {
@@ -360,8 +366,41 @@ fn cmdListSessions(ctx: *Context, _: []const []const u8) CmdError!void {
     }
 }
 
-fn cmdSendKeys(_: *Context, _: []const []const u8) CmdError!void {
-    // TODO: parse key strings and send to active pane
+fn cmdSendKeys(ctx: *Context, args: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    const window = session.active_window orelse return CmdError.WindowNotFound;
+    const pane = window.active_pane orelse return CmdError.PaneNotFound;
+    if (pane.fd < 0) return CmdError.CommandFailed;
+
+    for (args) |key_str| {
+        // Handle named keys
+        if (std.mem.eql(u8, key_str, "Enter")) {
+            _ = std.c.write(pane.fd, "\n", 1);
+        } else if (std.mem.eql(u8, key_str, "Escape")) {
+            _ = std.c.write(pane.fd, "\x1b", 1);
+        } else if (std.mem.eql(u8, key_str, "Tab")) {
+            _ = std.c.write(pane.fd, "\t", 1);
+        } else if (std.mem.eql(u8, key_str, "Space")) {
+            _ = std.c.write(pane.fd, " ", 1);
+        } else if (std.mem.eql(u8, key_str, "BSpace")) {
+            _ = std.c.write(pane.fd, "\x7f", 1);
+        } else if (key_str.len == 3 and key_str[0] == 'C' and key_str[1] == '-') {
+            // Control key: C-a through C-z
+            const ch = key_str[2];
+            if (ch >= 'a' and ch <= 'z') {
+                const ctrl: [1]u8 = .{ch - 'a' + 1};
+                _ = std.c.write(pane.fd, &ctrl, 1);
+            } else if (ch >= 'A' and ch <= 'Z') {
+                const ctrl: [1]u8 = .{ch - 'A' + 1};
+                _ = std.c.write(pane.fd, &ctrl, 1);
+            } else {
+                _ = std.c.write(pane.fd, key_str.ptr, key_str.len);
+            }
+        } else {
+            // Literal string
+            _ = std.c.write(pane.fd, key_str.ptr, key_str.len);
+        }
+    }
 }
 
 fn cmdNextWindow(ctx: *Context, _: []const []const u8) CmdError!void {
@@ -374,21 +413,40 @@ fn cmdPrevWindow(ctx: *Context, _: []const []const u8) CmdError!void {
     session.prevWindow();
 }
 
-fn cmdLastWindow(_: *Context, _: []const []const u8) CmdError!void {
-    // TODO: track last-used window and switch to it
+fn cmdLastWindow(ctx: *Context, _: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    if (!session.lastWindow()) return CmdError.WindowNotFound;
 }
 
 fn cmdKillWindow(ctx: *Context, _: []const []const u8) CmdError!void {
     const session = ctx.session orelse return CmdError.SessionNotFound;
-    _ = session;
-    // TODO: remove active window from session, close its panes
+    const window = session.active_window orelse return CmdError.WindowNotFound;
+    const empty = session.removeWindow(window);
+    if (empty) {
+        // Session has no windows left — destroy it
+        ctx.session = null;
+        ctx.server.removeSession(session);
+    }
 }
 
 fn cmdKillPane(ctx: *Context, _: []const []const u8) CmdError!void {
     const session = ctx.session orelse return CmdError.SessionNotFound;
     const window = session.active_window orelse return CmdError.WindowNotFound;
-    _ = window;
-    // TODO: remove active pane, close its PTY, rebalance layout
+    const pane = window.active_pane orelse return CmdError.PaneNotFound;
+    const window_empty = window.removePane(pane);
+    if (window_empty) {
+        // Window has no panes left u2014 remove the window
+        const session_empty = session.removeWindow(window);
+        if (session_empty) {
+            ctx.session = null;
+            ctx.server.removeSession(session);
+        }
+    } else {
+        // Rebalance layout to fill the gap
+        if (window.layout_root) |root| {
+            root.resize(window.sx, window.sy);
+        }
+    }
 }
 
 fn cmdRenameSession(ctx: *Context, args: []const []const u8) CmdError!void {
@@ -404,15 +462,69 @@ fn cmdRenameWindow(ctx: *Context, args: []const []const u8) CmdError!void {
     window.rename(args[args.len - 1]) catch return CmdError.OutOfMemory;
 }
 
-fn cmdResizePane(_: *Context, _: []const []const u8) CmdError!void {
-    // TODO: parse -U/-D/-L/-R and amount, resize pane in layout
-}
-
-fn cmdSwapPane(ctx: *Context, _: []const []const u8) CmdError!void {
+fn cmdResizePane(ctx: *Context, args: []const []const u8) CmdError!void {
     const session = ctx.session orelse return CmdError.SessionNotFound;
     const window = session.active_window orelse return CmdError.WindowNotFound;
-    _ = window;
-    // TODO: swap active pane with previous/next
+    const pane = window.active_pane orelse return CmdError.PaneNotFound;
+
+    var dx: i32 = 0;
+    var dy: i32 = 0;
+    var amount: u32 = 1;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "-U")) {
+            dy = -1;
+        } else if (std.mem.eql(u8, args[i], "-D")) {
+            dy = 1;
+        } else if (std.mem.eql(u8, args[i], "-L")) {
+            dx = -1;
+        } else if (std.mem.eql(u8, args[i], "-R")) {
+            dx = 1;
+        } else {
+            // Try to parse as amount
+            amount = std.fmt.parseInt(u32, args[i], 10) catch 1;
+        }
+    }
+
+    if (dx == 0 and dy == 0) return;
+
+    const new_sx = if (dx < 0)
+        @max(1, pane.sx -| amount)
+    else if (dx > 0)
+        pane.sx + amount
+    else
+        pane.sx;
+
+    const new_sy = if (dy < 0)
+        @max(1, pane.sy -| amount)
+    else if (dy > 0)
+        pane.sy + amount
+    else
+        pane.sy;
+
+    pane.resize(new_sx, new_sy);
+
+    // Re-layout the window
+    if (window.layout_root) |root| {
+        root.resize(window.sx, window.sy);
+    }
+}
+
+fn cmdSwapPane(ctx: *Context, args: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    const window = session.active_window orelse return CmdError.WindowNotFound;
+
+    var direction: Window.SwapDirection = .next;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "-U")) {
+            direction = .prev;
+        } else if (std.mem.eql(u8, arg, "-D")) {
+            direction = .next;
+        }
+    }
+
+    window.swapActivePane(direction);
 }
 
 fn cmdDisplayMessage(ctx: *Context, args: []const []const u8) CmdError!void {
@@ -487,9 +599,36 @@ fn cmdListPanes(ctx: *Context, _: []const []const u8) CmdError!void {
     }
 }
 
-fn cmdRunShell(_: *Context, _: []const []const u8) CmdError!void {
-    // TODO: fork, exec sh -c command, capture output
+fn cmdRunShell(_: *Context, args: []const []const u8) CmdError!void {
+    if (args.len == 0) return CmdError.InvalidArgs;
+    const command = args[args.len - 1];
+
+    // Copy command to null-terminated buffer for execvp
+    var cmd_buf: [4096]u8 = .{0} ** 4096;
+    if (command.len >= cmd_buf.len) return CmdError.CommandFailed;
+    @memcpy(cmd_buf[0..command.len], command);
+
+    const pid = std.c.fork();
+    if (pid < 0) return CmdError.CommandFailed;
+
+    if (pid == 0) {
+        // Child: exec sh -c <command>
+        const sh: [*:0]const u8 = "/bin/sh";
+        const c_flag: [*:0]const u8 = "-c";
+        const cmd_z: [*:0]const u8 = @ptrCast(cmd_buf[0..command.len :0]);
+        const argv = [_:null]?[*:0]const u8{ sh, c_flag, cmd_z };
+        _ = execvp(sh, &argv);
+        std.c.exit(127);
+    }
+
+    // Parent: wait for child
+    _ = std.c.waitpid(pid, null, 0);
 }
+
+extern "c" fn execvp(
+    file: [*:0]const u8,
+    argv: [*:null]const ?[*:0]const u8,
+) i32;
 
 test "registry register and find" {
     var reg = Registry.init(std.testing.allocator);
