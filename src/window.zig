@@ -13,6 +13,7 @@ pub const ChooseTreeItem = struct {
     session: ?*anyopaque = null,
     window: ?*anyopaque = null,
     pane: ?*anyopaque = null,
+    buffer_index: ?u32 = null,
 };
 
 pub const ChooseTreeState = struct {
@@ -45,6 +46,7 @@ pub const Pane = struct {
     id: u32,
     pid: std.c.pid_t,
     fd: std.c.fd_t,
+    pipe_fd: std.c.fd_t,
 
     sx: u32,
     sy: u32,
@@ -62,7 +64,8 @@ pub const Pane = struct {
         focused: bool = false,
         exited: bool = false,
         empty: bool = false,
-        _padding: u12 = 0,
+        input_disabled: bool = false,
+        _padding: u11 = 0,
     };
 
     var next_id: u32 = 0;
@@ -73,6 +76,7 @@ pub const Pane = struct {
             .id = next_id,
             .pid = 0,
             .fd = -1,
+            .pipe_fd = -1,
             .sx = sx,
             .sy = sy,
             .xoff = 0,
@@ -90,6 +94,9 @@ pub const Pane = struct {
     pub fn deinit(self: *Pane) void {
         if (self.fd >= 0) {
             _ = std.c.close(self.fd);
+        }
+        if (self.pipe_fd >= 0) {
+            _ = std.c.close(self.pipe_fd);
         }
         if (self.choose_tree_state) |*state| {
             state.deinit();
@@ -111,6 +118,7 @@ pub const Window = struct {
 
     panes: std.ArrayListAligned(*Pane, null),
     active_pane: ?*Pane,
+    last_pane: ?*Pane,
 
     layout_root: ?*LayoutCell,
 
@@ -152,6 +160,7 @@ pub const Window = struct {
             .name = owned_name,
             .panes = .empty,
             .active_pane = null,
+            .last_pane = null,
             .layout_root = null,
             .sx = sx,
             .sy = sy,
@@ -229,6 +238,9 @@ pub const Window = struct {
     }
 
     pub fn selectPane(self: *Window, pane: *Pane) void {
+        if (self.active_pane) |current| {
+            if (current != pane) self.last_pane = current;
+        }
         self.active_pane = pane;
         pane.flags.focused = true;
         if (self.flags.zoomed) self.applyZoomLayout();
@@ -252,6 +264,8 @@ pub const Window = struct {
 
     /// Remove and destroy a pane. Returns true if the window has no panes left.
     pub fn removePane(self: *Window, pane: *Pane) bool {
+        if (self.last_pane == pane) self.last_pane = null;
+
         for (self.panes.items, 0..) |p, i| {
             if (p == pane) {
                 _ = self.panes.orderedRemove(i);

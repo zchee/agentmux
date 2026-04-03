@@ -49,6 +49,25 @@ pub const Environ = struct {
         result.value_ptr.* = .{ .value = owned_val, .hidden = false };
     }
 
+    /// Set a variable as hidden (excluded from toEnvp output).
+    pub fn setHidden(self: *Environ, key: []const u8, value: []const u8) !void {
+        const alloc = self.vars.allocator;
+        const owned_key = try alloc.dupe(u8, key);
+        errdefer alloc.free(owned_key);
+        const owned_val = try alloc.dupe(u8, value);
+        errdefer alloc.free(owned_val);
+
+        const result = try self.vars.getOrPut(owned_key);
+        if (result.found_existing) {
+            alloc.free(result.key_ptr.*);
+            if (result.value_ptr.value) |old_val| {
+                alloc.free(old_val);
+            }
+            result.key_ptr.* = owned_key;
+        }
+        result.value_ptr.* = .{ .value = owned_val, .hidden = true };
+    }
+
     /// Mark a variable as unset.
     pub fn unset(self: *Environ, key: []const u8) !void {
         const alloc = self.vars.allocator;

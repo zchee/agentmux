@@ -11,10 +11,18 @@ const protocol = @import("protocol.zig");
 const cmd = @import("cmd/cmd.zig");
 const config_parser = @import("config/parser.zig");
 const binding_mod = @import("keybind/bindings.zig");
+const hooks_mod = @import("hooks/hooks.zig");
 const output_mod = @import("terminal/output.zig");
 const status_fmt = @import("status/format.zig");
 const log = @import("core/log.zig");
 const signals = @import("signals.zig");
+
+/// Server ACL entry.
+pub const AclEntry = struct {
+    user: []const u8,
+    allow: bool,
+    read_only: bool,
+};
 
 /// Server state.
 pub const Server = struct {
@@ -27,8 +35,13 @@ pub const Server = struct {
     paste_stack: PasteStack,
     session_loop: SessionLoop,
     binding_manager: binding_mod.BindingManager,
+    hook_registry: hooks_mod.HookRegistry,
+    wait_channels: std.StringHashMap(std.ArrayListAligned(std.c.fd_t, null)),
+    prompt_history: std.ArrayListAligned([]const u8, null),
+    acl_entries: std.ArrayListAligned(AclEntry, null),
     global_default_shell: ?[:0]u8,
     config_file: ?[]const u8,
+    messages: std.ArrayListAligned([]u8, null),
     running: bool,
     allocator: std.mem.Allocator,
 
@@ -37,6 +50,8 @@ pub const Server = struct {
         session: ?*Session,
         identified: bool,
         choose_tree_state: ?ChooseTreeState,
+        locked: bool = false,
+        pid: i32 = 0,
     };
 
     pub fn init(alloc: std.mem.Allocator, socket_path: []const u8) !Server {
@@ -53,8 +68,13 @@ pub const Server = struct {
             .paste_stack = PasteStack.init(alloc),
             .session_loop = SessionLoop.init(alloc),
             .binding_manager = bm,
+            .hook_registry = hooks_mod.HookRegistry.init(alloc),
+            .wait_channels = std.StringHashMap(std.ArrayListAligned(std.c.fd_t, null)).init(alloc),
+            .prompt_history = .empty,
+            .acl_entries = .empty,
             .global_default_shell = null,
             .config_file = null,
+            .messages = .empty,
             .running = false,
             .allocator = alloc,
         };
@@ -79,8 +99,30 @@ pub const Server = struct {
         self.paste_stack.deinit();
         self.session_loop.deinit();
         self.binding_manager.deinit();
+        self.hook_registry.deinit();
+        {
+            var wc_iter = self.wait_channels.iterator();
+            while (wc_iter.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+                entry.value_ptr.deinit(self.allocator);
+            }
+            self.wait_channels.deinit();
+        }
+        for (self.prompt_history.items) |h| self.allocator.free(h);
+        self.prompt_history.deinit(self.allocator);
+        for (self.acl_entries.items) |entry| self.allocator.free(entry.user);
+        self.acl_entries.deinit(self.allocator);
         if (self.global_default_shell) |shell| self.allocator.free(shell);
+        for (self.messages.items) |msg| self.allocator.free(msg);
+        self.messages.deinit(self.allocator);
         self.allocator.free(self.socket_path);
+    }
+
+    pub fn addMessage(self: *Server, msg: []const u8) void {
+        const owned = self.allocator.dupe(u8, msg) catch return;
+        self.messages.append(self.allocator, owned) catch {
+            self.allocator.free(owned);
+        };
     }
 
     pub fn listen(self: *Server) !void {
@@ -348,7 +390,9 @@ pub const Server = struct {
 
     fn handleIdentify(self: *Server, client_idx: usize, payload: []const u8) !void {
         if (payload.len < @sizeOf(protocol.IdentifyMsg)) return;
+        const ident: *const protocol.IdentifyMsg = @ptrCast(@alignCast(payload.ptr));
         self.clients.items[client_idx].identified = true;
+        self.clients.items[client_idx].pid = ident.pid;
         if (self.clients.items[client_idx].session == null and self.sessions.items.len == 1) {
             self.setClientSession(client_idx, self.sessions.items[0]);
         } else if (self.clients.items[client_idx].session == null and self.default_session != null) {

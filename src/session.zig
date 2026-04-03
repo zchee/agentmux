@@ -32,6 +32,7 @@ pub const Session = struct {
         status: bool = true,
         mouse: bool = false,
         prefix_key: u21 = 0x02, // C-b
+        prefix2_key: ?u21 = null,
         prefix_string: []u8,
         status_style: Style = .{
             .fg = .green,

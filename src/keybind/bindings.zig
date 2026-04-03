@@ -13,6 +13,8 @@ pub const Binding = struct {
     key: u21,
     modifiers: Modifiers,
     action: Action,
+    note: ?[]const u8 = null,
+    repeat: bool = false,
 };
 
 pub const Modifiers = packed struct(u8) {
@@ -44,20 +46,28 @@ pub const KeyTable = struct {
                 .command => |cmd| self.allocator.free(cmd),
                 .none => {},
             }
+            if (b.note) |n| self.allocator.free(n);
         }
         self.bindings.deinit(self.allocator);
     }
 
     /// Bind a key to a command.
     pub fn bind(self: *KeyTable, key: u21, mods: Modifiers, command: []const u8) !void {
-        // Remove existing binding for this key
-        self.unbind(key, mods);
+        try self.bindFull(key, mods, command, null, false);
+    }
 
+    /// Bind a key with optional note and repeat flag.
+    pub fn bindFull(self: *KeyTable, key: u21, mods: Modifiers, command: []const u8, note: ?[]const u8, repeat: bool) !void {
+        self.unbind(key, mods);
         const owned_cmd = try self.allocator.dupe(u8, command);
+        errdefer self.allocator.free(owned_cmd);
+        const owned_note: ?[]const u8 = if (note) |n| try self.allocator.dupe(u8, n) else null;
         try self.bindings.append(self.allocator, .{
             .key = key,
             .modifiers = mods,
             .action = .{ .command = owned_cmd },
+            .note = owned_note,
+            .repeat = repeat,
         });
     }
 
