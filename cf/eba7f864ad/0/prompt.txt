@@ -1,0 +1,1 @@
+/autopilot "Investigate whether all behaviors other than new features are the same as tmux, and fix any differences."
