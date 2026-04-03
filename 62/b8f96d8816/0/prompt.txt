@@ -1,0 +1,230 @@
+/autopilot "Fix Codex reviewed points"
+
+---
+
+do 'Focus on items 1+2 (composed rendering + key binding dispatch) as the core missing pieces?'
+
+---
+
+Before autopilot, SHOULD commit current changes
+
+---
+
+do 'Focus on items 1+2 (composed rendering + key binding dispatch) as the core missing pieces?'. But before doing autopilot, SHOULD commit current changes
+
+---
+
+<task-notification>
+<task-id>a79e83f012cefcb8e</task-id>
+<tool-use-id>toolu_01YGjQXPNUZxYjuy9vSyRPSr</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-zchee-src-github-com-zchee-agentmux/a707dd1f-c622-4291-892d-0db951620ee1/tasks/a79e83f012cefcb8e.output</output-file>
+<status>completed</status>
+<summary>Agent "Explore rendering infrastructure" completed</summary>
+<result>Now I have a complete picture. Here is a thorough report of every module and what is missing.
+
+---
+
+## Rendering Infrastructure Report
+
+### What exists (and what each module does)
+
+---
+
+#### `src/screen/grid.zig` - Cell/Line/Grid storage
+
+The foundational buffer layer. `Cell` holds a single terminal character: codepoint (u21), fg/bg `Colour`, `Attributes` (packed u16), and `width` (u2 for wide chars). `Line` is a slice of cells with `wrapped`/`extended` flags. `Grid` is an `ArrayList(Line)` with:
+- visible rows + scrollback history (`hsize`, `hlimit`)
+- `getCell(x, y)`, `getLine(y)`, `getHistoryLine(y)`
+- `scrollUp`, `clearLine`, `clearRegion`, `resize`
+
+No concept of pane offset: coordinates are local (0,0 = top-left of that pane's grid). This is correct — offsets are handled at composition time.
+
+---
+
+#### `src/screen/screen.zig` - Terminal state machine state
+
+`Screen` wraps a `Grid` and adds:
+- cursor position (`cx`, `cy`) + `CursorStyle`
+- scroll region (`rupper`, `rlower`)
+- current cell attributes template for new writes (`cell: Cell`)
+- `Mode` packed flags: `cursor_visible`, `insert`, `origin`, `wrap`, `mouse_*`, `bracketed_paste`, `focus_events`, `alt_screen`
+- DECSC/DECRC saved state
+- `title: ?[]const u8`
+- `cursorTo`, `cursorUp/Down`, `setScrollRegion`, `scrollUp/Down`, `saveCursor/restoreCursor`, `reset`
+
+One `Screen` per pane. No awareness of layout coordinates.
+
+---
+
+#### `src/screen/writer.zig` - Screen mutation operations
+
+`Writer` wraps a `*Screen` and provides the full character-cell mutation API:
+- `putChar(u21)` — handles wrap mode, wide chars, cell fill
+- `linefeed`, `carriageReturn`, `backspace`, `tab`, `reverseIndex`
+- Erase operations: `eraseToEol`, `eraseToBol`, `eraseLine`, `eraseToEnd`, `eraseToStart`, `eraseScreen`
+- `insertLines/deleteLines`, `insertChars/deleteChars`
+- `writeString([]const u8)` via UTF-8 iterator
+
+This is the write path that the VT parser drives. It is complete for VT102/xterm purposes.
+
+---
+
+#### `src/screen/redraw.zig` - Dirty-line tracking + screen-to-output flush
+
+`DirtyTracker` is a `[]bool` per-row plus a `force_full` flag. Methods: `markDirty(y)`, `markAllDirty()`, `isDirty(y)`, `clearDirty()`, `resize(new_rows)`.
+
+`redraw(tracker, screen, out)` iterates dirty rows, emits cursor-positioning and SGR escape sequences for each changed cell via `Output`, calls `clearToEol` at end of each row, positions the cursor, shows/hides it, then flushes. This walks `screen.grid` in local coordinates (0-based row/col within that pane).
+
+**Key gap:** `redraw` calls `out.cursorTo(0, y)` using local row `y` directly. There is no offset translation — it assumes the `Output` fd represents the whole terminal and that this pane starts at row 0, col 0. For compositing multiple panes, `redraw` (or a variant) must translate `(x, y)` by `(pane.xoff, pane.yoff)`.
+
+---
+
+#### `src/terminal/output.zig` - Escape code generation
+
+`Output` is an 8192-byte write-buffer bound to a single `fd`. It provides:
+- `writeBytes`, `print(fmt, args)`, `flush`
+- Cursor: `cursorTo(col, row)` (0-based, emits `\x1b[row+1;col+1H`), `cursorUp/Down/Forward/Back`
+- Attributes: `attrReset`, `setFg(Colour)`, `setBg(Colour)`, `setAttrs(Attributes)`
+- Screen ops: `clearScreen`, `clearToEnd`, `clearToEol`, `clearLine`, `setScrollRegion`, `scrollUp/Down`
+- Cursor visibility: `hideCursor`, `showCursor`
+- Alt screen: `enterAltScreen`, `leaveAltScreen`
+- Mouse: `enableMouseSGR/All`, `disableMouseSGR/All`
+- Bracketed paste: `enable/disableBracketedPaste`
+- `setTitle(title)`
+
+`Colour.toSgr` handles default (SGR 39/49), palette 0-7 (30-37/40-47), 8-15 (90-97/100-107), 256-color (`38;5;n`), and 24-bit (`38;2;r;g;b`).
+
+This is the lowest-level output primitive. It writes directly to the client fd. To support composed output across multiple panes, a single shared `Output` instance should be passed into each pane's render call, with `cursorTo` calls offset by `(xoff, yoff)`.
+
+---
+
+#### `src/server_loop.zig` - Per-pane processing + render dispatch
+
+Two types:
+
+`PaneState` owns: `pane_id`, `pty_fd`, `parser: input.Parser`, `screen: Screen`, `dirty: DirtyTracker`. It provides:
+- `processPtyOutput(data)` — feeds bytes through parser -&gt; `input_handler.processBytes` -&gt; screen mutation, marks dirty lines
+- `readAndProcess()` — reads from `pty_fd` and calls `processPtyOutput`
+- `sendKey(data)` — writes to pty
+- `resize(cols, rows)` — resizes grid + dirty tracker + sends `TIOCSWINSZ` ioctl
+- `renderTo(out: *Output)` — calls `redraw_mod.redraw` (local coordinates, no offset)
+
+`SessionLoop` owns a `HashMap(u32, PaneState)`. It provides `addPane`, `removePane`, `processAll`, `getPane`, `sendKeyToPane`, `renderPane(pane_id, out)`, `resizePane`.
+
+**Key gap:** `renderPane` passes a single `Output` but does not apply `xoff`/`yoff` offset, so all panes would render starting at row 0. There is also no border/divider drawing between panes, no status bar paint step, and no sequencing of multi-pane composition into a single frame.
+
+---
+
+#### `src/status/status.zig` - Status bar text renderer
+
+`StatusBar` has `left`, `right` format strings, a `Style`, `interval` (seconds), and `enabled`. `render(alloc, cols, ctx)` calls `format.expand` on both sides, pads the middle with spaces, and returns an owned `[]u8` of exactly `cols` bytes. Default format: left `"[#S] "`, right `" %H:%M %d-%b-%y"`.
+
+**Key gap:** `render` returns a plain byte string — no SGR styling is applied. The `style` field is stored but never used in render. There is no call path that actually writes the status bar to an `Output` at a specific row.
+
+---
+
+#### `src/status/format.zig` - tmux-style format string expansion
+
+`FormatContext` carries: `session_name`, `session_id`, `window_name`, `window_index`, `window_active`, `pane_index`, `pane_title`, `pane_current_path`, `pane_pid`, `host`, `client_name`.
+
+`expand(alloc, fmt, ctx)` handles `#S`, `#W`, `#I`, `#P`, `#T`, `#H`, `#{long_form}`, `##` (escape), and passes `#[style]` through unchanged (it is not rendered here). Numeric fields formatted as decimal. The `%H:%M` date/time tokens in the default right string are NOT expanded — they are passed through literally. No `strftime`-equivalent is wired in.
+
+---
+
+#### `src/status/style.zig` - tmux-style string parser for SGR styles
+
+`parse(s)` parses strings like `"fg=red,bg=blue,bold"` or `"#[fg=colour196,italic]"` into a `Style { fg, bg, attrs }`. Supports: `fg=`/`bg=` with `Colour.parse`, `bold`, `dim`, `italics`/`italic`, `underscore`/`underline`, `blink`, `reverse`, `hidden`, `strikethrough`, `overline`, `default`/`none`, and `no*` negation forms.
+
+**Gap:** `style.zig` is only a parser. There is no function that takes a `Style` and emits SGR to an `Output`.
+
+---
+
+#### `src/layout/layout.zig` - Recursive layout tree
+
+`LayoutCell` is a tree node: `cell_type` (`.pane`, `.horizontal`, `.vertical`), `sx`/`sy` (size in chars), `xoff`/`yoff` (absolute offset in terminal), `pane_id` (for leaves), `parent`, `children`.
+
+- `initLeaf`, `initBranch`
+- `addChild`, `countPanes`, `findPane(pane_id)`
+- `split(direction, new_pane_id, percent)` — converts a leaf to a branch, creates two child leaves with sizes derived from percent (clamped 10-90), allocates -1 char for the border column/row
+- `resize(new_sx, new_sy)` — recursively redistributes size and updates `xoff`/`yoff` on all descendants
+
+The layout tree correctly computes each pane's `(xoff, yoff, sx, sy)` in terminal coordinates. This is the correct source of truth for where to place each pane's content during composition.
+
+---
+
+#### `src/window.zig` - Window + Pane ownership
+
+`Pane` owns: `id`, `pid`, `fd`, `sx`, `sy`, `xoff`, `yoff`, `flags` (redraw, focused, exited, empty), `copy_state`, `prompt_state`, `choose_tree_state`. It carries position/size but does **not** own a `Screen` or `DirtyTracker` — those live in `PaneState` in `server_loop.zig`.
+
+`Window` owns: `id`, `name`, `panes: ArrayList(*Pane)`, `active_pane`, `layout_root: ?*LayoutCell`, `sx`, `sy`, `flags` (bell, activity, silence, zoomed). Methods: `addPane`, `removePane`, `nextPane`/`prevPane`/`selectPane`/`selectPaneBy*`, `splitActivePane(new_pane, direction, percent)`, `resize(new_sx, new_sy)` (calls `layout_root.resize` then `syncPanesFromLayout`), `swapActivePane`, `toggleZoom`, `rename`.
+
+`syncPanesFromLayout` walks the layout tree and copies `xoff/yoff/sx/sy` back to each `Pane` struct, marking `flags.redraw = true`.
+
+---
+
+#### `src/render/renderer.zig` - GPU renderer interface (irrelevant to VT composition)
+
+A vtable-based abstraction over Metal/Vulkan/software GPU backends. VTable: `deinit`, `resize`, `beginFrame`, `endFrame`, `drawCell(x, y, cell)`, `drawRect`, `drawImage`, `present`, `getCellSize`. This is for a potential GUI front-end. It is orthogonal to the client-server VT output path and does not connect to `Output` or `redraw`.
+
+---
+
+#### `src/protocol.zig` - Client/server wire protocol
+
+8-byte framed messages. Client-to-server: `identify` (sends `IdentifyMsg` with cols/rows/term), `command`, `resize` (`ResizeMsg`), `key` (`KeyMsg`), `shell`, `exit`, `exiting`. Server-to-client: `version`, `ready`, `output` (raw PTY bytes), `pause`, `detach`, `shutdown`, `error_msg`, `exit_ack`. Full send/recv helpers with length framing. The `output` message carries raw VT bytes from the PTY — the client is expected to render them, not the server.
+
+---
+
+#### `src/terminal/acs.zig` - VT100 line-drawing character table
+
+`AcsMap.lookup(ch)`, `lookupHeavy(ch)`, `lookupDouble(ch)` map VT100 ACS bytes (`j`/`k`/`l`/`m`/`n`/`q`/`t`/`u`/`v`/`w`/`x`) to Unicode box-drawing codepoints. Normal, heavy, and double-line variants all present.
+
+---
+
+### What is missing to get composed rendering working
+
+Here is the precise gap list, roughly in implementation order:
+
+**1. Offset-aware redraw.** `redraw_mod.redraw` uses local `(0, y)` coordinates. You need a `redrawAt(tracker, screen, out, xoff, yoff)` variant that adds `xoff`/`yoff` to every `out.cursorTo` call and clips drawing to the pane's `sx`/`sy` bounds. `PaneState.renderTo` must be updated to accept or look up the pane's `(xoff, yoff)`.
+
+**2. Pane border drawing.** Nothing draws the `│`, `─`, `┼`, `┤`, `├`, `┬`, `┴` characters between panes. You need a `drawBorders(out, layout_root)` function that walks the layout tree and emits the border cells to `Output` at the correct terminal positions. `AcsMap` already has all the necessary codepoints.
+
+**3. Status bar output path.** `StatusBar.render` produces a `[]u8` but no code writes it to an `Output` at a specific row. You need a `StatusBar.renderTo(out, row, cols, ctx, style)` (or equivalent) that:
+   - Applies `style.fg`/`style.bg` SGR sequences before writing
+   - Calls `out.cursorTo(0, row)` then writes the rendered bytes
+   - Also needs `strftime` expansion for `%H:%M` etc. (currently a literal pass-through)
+
+**4. Style-to-SGR emission.** `style.zig` only parses. A small `applyStyle(out: *Output, style: Style)` helper is needed to emit `out.setBg(style.bg)`, `out.setFg(style.fg)`, `out.setAttrs(style.attrs)` in sequence.
+
+**5. Composed frame loop.** No code sequences the full frame: clear/enter-alt-screen, draw all pane contents with offsets, draw borders, draw status bar, position cursor on active pane, flush. `SessionLoop.processAll` + `renderPane` exist but have no orchestration layer above them. A `renderWindow(window, session_loop, out, status_bar, ctx)` function is the missing piece.
+
+**6. `PaneState` ↔ `Window`/`Pane` offset linkage.** `PaneState` (in `server_loop.zig`) holds `screen`/`dirty` but only knows `pane_id`. `Window`/`Pane` (in `window.zig`) holds `xoff`/`yoff` but does not own a `Screen`. At render time, the composed frame loop needs to look up the `Pane` (for `xoff`/`yoff`) and the `PaneState` (for the screen buffer) by the same `pane_id`. This join is not yet wired anywhere.
+
+**7. `%H:%M` / strftime in format strings.** `format.expand` passes `%`-tokens through unchanged. `StatusBar.default_right` contains `" %H:%M %d-%b-%y"` which will render literally. Either the time tokens need to be pre-expanded before calling `expand`, or `expand` needs a `time: std.time.epoch.EpochSeconds` field in `FormatContext`.
+
+**8. Cursor placement on active pane.** After compositing all panes, the cursor must be moved to `active_pane.xoff + screen.cx`, `active_pane.yoff + screen.cy` and the active pane's cursor style applied. `redraw` currently places the cursor at the pane's local position — for a multi-pane frame the final cursor placement must happen once at the end of the full frame render, not inside each per-pane redraw call.</result>
+<usage><total_tokens>55112</total_tokens><tool_uses>38</tool_uses><duration_ms>253464</duration_ms></usage>
+</task-notification>
+
+---
+
+/ralplan "Implement a feature in `agentmux -h` that displays CLI help, which is common in open-source projects. I known that this feature deviates from the original `tmux`"
+
+---
+
+/team "Implement a feature in `agentmux -h` that displays CLI help, which is common in open-source projects. I known that this feature deviates from the original `tmux`"
+
+---
+
+/commit
+
+---
+
+/deep-interview --deep --autoresearch "Review whether it behaves the same as `tmux`"
+
+---
+
+/list-plan
+
+---
+
+/autopilot "Fix 'Default CLI behavior: Different: Bare agentmux starts server; tmux creates+attaches'"
