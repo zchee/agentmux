@@ -2,7 +2,7 @@ const std = @import("std");
 const protocol = @import("protocol.zig");
 const log = @import("core/log.zig");
 
-/// Client that connects to a zmux server.
+/// Client that connects to an agentmux server.
 pub const Client = struct {
     fd: std.c.fd_t,
     socket_path: []const u8,

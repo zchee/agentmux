@@ -90,7 +90,7 @@ pub const tabs = struct {
 
 const log = core.log;
 
-const version_string = "zmux 0.1.0";
+const version_string = "agentmux 0.1.0";
 const default_socket_name = "default";
 
 /// Write a string to stdout.
@@ -169,9 +169,9 @@ fn parseArgs(alloc: std.mem.Allocator, init_args: std.process.Args) Flags {
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    var zmux_alloc = core.allocator_mod.ZmuxAllocator.init();
-    defer zmux_alloc.deinit();
-    const alloc = zmux_alloc.allocator();
+    var agentmux_alloc = core.allocator_mod.AgentmuxAllocator.init();
+    defer agentmux_alloc.deinit();
+    const alloc = agentmux_alloc.allocator();
 
     var flags = parseArgs(alloc, init.args);
     defer flags.deinit(alloc);
@@ -189,7 +189,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     log.init(log_level, null, flags.verbose > 0);
     defer log.deinit();
 
-    log.info("zmux starting (pid={d})", .{std.c.getpid()});
+    log.info("agentmux starting (pid={d})", .{std.c.getpid()});
 
     // Determine socket path
     const socket_dir = try platform.core.defaultSocketDir(alloc);
@@ -199,7 +199,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const socket_path = if (flags.socket_path) |p|
         try alloc.dupe(u8, p)
     else
-        try std.fmt.allocPrint(alloc, "{s}/zmux-{d}/{s}", .{
+        try std.fmt.allocPrint(alloc, "{s}/agentmux-{d}/{s}", .{
             socket_dir,
             std.c.getuid(),
             socket_name,

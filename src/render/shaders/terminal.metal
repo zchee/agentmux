@@ -1,4 +1,4 @@
-// zmux Metal Shader Library
+// agentmux Metal Shader Library
 // Terminal cell rendering with glyph atlas texture sampling
 
 #include <metal_stdlib>

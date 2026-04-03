@@ -21,10 +21,10 @@ fn getenv(name: [:0]const u8) ?[]const u8 {
     return std.mem.sliceTo(val, 0);
 }
 
-/// Get the default socket path for zmux.
-/// Uses $ZMUX_TMPDIR, $TMPDIR, or /tmp.
+/// Get the default socket path for agentmux.
+/// Uses $AGENTMUX_TMPDIR, $TMPDIR, or /tmp.
 pub fn defaultSocketDir(alloc: std.mem.Allocator) ![]const u8 {
-    if (getenv("ZMUX_TMPDIR")) |dir| {
+    if (getenv("AGENTMUX_TMPDIR")) |dir| {
         return try alloc.dupe(u8, dir);
     }
     if (getenv("TMPDIR")) |dir| {

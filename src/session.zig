@@ -2,7 +2,7 @@ const std = @import("std");
 const Window = @import("window.zig").Window;
 const Environ = @import("core/environ.zig").Environ;
 
-/// A zmux session. Contains windows and tracks attached clients.
+/// An agentmux session. Contains windows and tracks attached clients.
 pub const Session = struct {
     id: u32,
     name: []const u8,
