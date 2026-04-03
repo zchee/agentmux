@@ -505,6 +505,52 @@ fn parseTargetWindow(args: []const []const u8) ?u32 {
     return null;
 }
 
+fn parseTargetPane(args: []const []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (!std.mem.eql(u8, args[i], "-t") or i + 1 >= args.len) continue;
+        return args[i + 1];
+    }
+    return null;
+}
+
+const TargetPane = struct {
+    window: *Window,
+    pane: *Pane,
+};
+
+fn resolveTargetWindow(session: *Session, args: []const []const u8) CmdError!*Window {
+    if (parseTargetWindow(args)) |window_number| {
+        return session.findWindowByNumber(window_number) orelse CmdError.WindowNotFound;
+    }
+    return session.active_window orelse CmdError.WindowNotFound;
+}
+
+fn resolveTargetPane(session: *Session, args: []const []const u8) CmdError!TargetPane {
+    if (parseTargetPane(args)) |target| {
+        if (target.len >= 2 and target[0] == '%') {
+            const pane_id = std.fmt.parseInt(u32, target[1..], 10) catch return CmdError.InvalidArgs;
+            for (session.windows.items) |window| {
+                for (window.panes.items) |pane| {
+                    if (pane.id == pane_id) {
+                        return .{ .window = window, .pane = pane };
+                    }
+                }
+            }
+            return CmdError.PaneNotFound;
+        }
+
+        const window = session.active_window orelse return CmdError.WindowNotFound;
+        const pane_index = std.fmt.parseInt(usize, target, 10) catch return CmdError.InvalidArgs;
+        if (pane_index >= window.panes.items.len) return CmdError.PaneNotFound;
+        return .{ .window = window, .pane = window.panes.items[pane_index] };
+    }
+
+    const window = session.active_window orelse return CmdError.WindowNotFound;
+    const pane = window.active_pane orelse return CmdError.PaneNotFound;
+    return .{ .window = window, .pane = pane };
+}
+
 fn defaultShell(_: ?*Session) [:0]const u8 {
     return "/bin/sh";
 }
@@ -1171,9 +1217,9 @@ fn cmdLastWindow(ctx: *Context, _: []const []const u8) CmdError!void {
     if (!session.lastWindow()) return CmdError.WindowNotFound;
 }
 
-fn cmdKillWindow(ctx: *Context, _: []const []const u8) CmdError!void {
+fn cmdKillWindow(ctx: *Context, args: []const []const u8) CmdError!void {
     const session = ctx.session orelse return CmdError.SessionNotFound;
-    const window = session.active_window orelse return CmdError.WindowNotFound;
+    const window = try resolveTargetWindow(session, args);
     for (window.panes.items) |pane| {
         ctx.server.untrackPane(pane.id);
     }
@@ -1181,13 +1227,17 @@ fn cmdKillWindow(ctx: *Context, _: []const []const u8) CmdError!void {
     if (empty) {
         ctx.session = null;
         ctx.server.removeSession(session);
+    } else {
+        ctx.window = session.active_window;
+        ctx.pane = if (ctx.window) |active_window| active_window.active_pane else null;
     }
 }
 
-fn cmdKillPane(ctx: *Context, _: []const []const u8) CmdError!void {
+fn cmdKillPane(ctx: *Context, args: []const []const u8) CmdError!void {
     const session = ctx.session orelse return CmdError.SessionNotFound;
-    const window = session.active_window orelse return CmdError.WindowNotFound;
-    const pane = window.active_pane orelse return CmdError.PaneNotFound;
+    const target = try resolveTargetPane(session, args);
+    const window = target.window;
+    const pane = target.pane;
     ctx.server.untrackPane(pane.id);
     const window_empty = window.removePane(pane);
     if (window_empty) {
@@ -1198,6 +1248,11 @@ fn cmdKillPane(ctx: *Context, _: []const []const u8) CmdError!void {
         }
     } else if (window.layout_root) |root| {
         root.resize(window.sx, window.sy);
+    }
+
+    if (ctx.session != null) {
+        ctx.window = session.active_window;
+        ctx.pane = if (ctx.window) |active_window| active_window.active_pane else null;
     }
 }
 
@@ -1818,6 +1873,128 @@ test "registry register and find" {
 test "parse target window helper" {
     const args = [_][]const u8{ "-t", ":3" };
     try std.testing.expectEqual(@as(?u32, 3), parseTargetWindow(&args));
+}
+
+test "parse target pane helper" {
+    const args = [_][]const u8{ "-t", "%12" };
+    try std.testing.expectEqualStrings("%12", parseTargetPane(&args).?);
+}
+
+test "resolve target window prefers explicit -t window number" {
+    const alloc = std.testing.allocator;
+    var session = try Session.init(alloc, "demo");
+    defer session.deinit();
+
+    const w1 = try Window.init(alloc, "one", 80, 24);
+    const w2 = try Window.init(alloc, "two", 80, 24);
+    const p1 = try Pane.init(alloc, 80, 24);
+    const p2 = try Pane.init(alloc, 80, 24);
+    try w1.addPane(p1);
+    try w2.addPane(p2);
+    try session.addWindow(w1);
+    try session.addWindow(w2);
+    session.selectWindow(w1);
+
+    const args = [_][]const u8{ "-t", ":1" };
+    try std.testing.expect(try resolveTargetWindow(session, &args) == w2);
+}
+
+test "resolve target pane supports pane id across windows" {
+    const alloc = std.testing.allocator;
+    var session = try Session.init(alloc, "demo");
+    defer session.deinit();
+
+    const w1 = try Window.init(alloc, "one", 80, 24);
+    const w2 = try Window.init(alloc, "two", 80, 24);
+    const p1 = try Pane.init(alloc, 80, 24);
+    const p2 = try Pane.init(alloc, 80, 24);
+    try w1.addPane(p1);
+    try w2.addPane(p2);
+    try session.addWindow(w1);
+    try session.addWindow(w2);
+    session.selectWindow(w1);
+
+    var pane_target_buf: [32]u8 = undefined;
+    const pane_target = try std.fmt.bufPrint(&pane_target_buf, "%{d}", .{p2.id});
+    const args = [_][]const u8{ "-t", pane_target };
+    const target = try resolveTargetPane(session, &args);
+    try std.testing.expect(target.window == w2);
+    try std.testing.expect(target.pane == p2);
+}
+
+test "kill-window honors explicit target window" {
+    const alloc = std.testing.allocator;
+    var server = try Server.init(alloc, "/tmp/agentmux-test-kill-window.sock");
+    defer server.deinit();
+
+    const session = try Session.init(alloc, "demo");
+    try server.sessions.append(alloc, session);
+    server.default_session = session;
+
+    const w1 = try Window.init(alloc, "one", 80, 24);
+    const w2 = try Window.init(alloc, "two", 80, 24);
+    const p1 = try Pane.init(alloc, 80, 24);
+    const p2 = try Pane.init(alloc, 80, 24);
+    try w1.addPane(p1);
+    try w2.addPane(p2);
+    try session.addWindow(w1);
+    try session.addWindow(w2);
+    session.selectWindow(w1);
+
+    var ctx = Context{
+        .server = &server,
+        .session = session,
+        .window = session.active_window,
+        .pane = session.active_window.?.active_pane,
+        .allocator = alloc,
+    };
+
+    const args = [_][]const u8{ "-t", ":1" };
+    try cmdKillWindow(&ctx, &args);
+
+    try std.testing.expectEqual(@as(usize, 1), session.windowCount());
+    try std.testing.expect(session.active_window == w1);
+    try std.testing.expect(ctx.window == w1);
+    try std.testing.expect(ctx.pane == p1);
+}
+
+test "kill-pane honors explicit target pane id" {
+    const alloc = std.testing.allocator;
+    var server = try Server.init(alloc, "/tmp/agentmux-test-kill-pane.sock");
+    defer server.deinit();
+
+    const session = try Session.init(alloc, "demo");
+    try server.sessions.append(alloc, session);
+    server.default_session = session;
+
+    const w1 = try Window.init(alloc, "one", 80, 24);
+    const w2 = try Window.init(alloc, "two", 80, 24);
+    const p1 = try Pane.init(alloc, 80, 24);
+    const p2 = try Pane.init(alloc, 80, 24);
+    try w1.addPane(p1);
+    try w2.addPane(p2);
+    try session.addWindow(w1);
+    try session.addWindow(w2);
+    session.selectWindow(w1);
+
+    var ctx = Context{
+        .server = &server,
+        .session = session,
+        .window = session.active_window,
+        .pane = session.active_window.?.active_pane,
+        .allocator = alloc,
+    };
+
+    var pane_target_buf: [32]u8 = undefined;
+    const pane_target = try std.fmt.bufPrint(&pane_target_buf, "%{d}", .{p2.id});
+    const args = [_][]const u8{ "-t", pane_target };
+    try cmdKillPane(&ctx, &args);
+
+    try std.testing.expectEqual(@as(usize, 1), session.windowCount());
+    try std.testing.expect(session.active_window == w1);
+    try std.testing.expectEqual(@as(usize, 1), w1.paneCount());
+    try std.testing.expect(ctx.window == w1);
+    try std.testing.expect(ctx.pane == p1);
 }
 
 test "formatBindingKey renders ctrl meta modifiers" {
