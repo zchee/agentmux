@@ -212,3 +212,7 @@ Here is the precise gap list, roughly in implementation order:
 ---
 
 /team "Implement a feature in `agentmux -h` that displays CLI help, which is common in open-source projects. I known that this feature deviates from the original `tmux`"
+
+---
+
+/commit
