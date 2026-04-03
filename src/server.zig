@@ -9,7 +9,6 @@ const SessionLoop = @import("server_loop.zig").SessionLoop;
 const protocol = @import("protocol.zig");
 const cmd = @import("cmd/cmd.zig");
 const config_parser = @import("config/parser.zig");
-const binding_mod = @import("keybind/bindings.zig");
 const log = @import("core/log.zig");
 const signals = @import("signals.zig");
 
@@ -21,21 +20,10 @@ pub const Server = struct {
     clients: std.ArrayListAligned(ClientConnection, null),
     default_session: ?*Session,
     choose_tree_state: ?ChooseTreeState,
-    bindings: binding_mod.BindingManager,
     paste_stack: PasteStack,
-    bindings: binding_mod.BindingManager,
-    options: options_mod.OptionsStore,
     session_loop: SessionLoop,
-    options: Options,
     running: bool,
     allocator: std.mem.Allocator,
-
-    pub const Options = struct {
-        default_terminal: []u8,
-        history_limit: i64 = 2000,
-        escape_time: i64 = 500,
-        set_clipboard: []u8,
-    };
 
     pub const ClientConnection = struct {
         fd: std.c.fd_t,
@@ -45,47 +33,18 @@ pub const Server = struct {
     };
 
     pub fn init(alloc: std.mem.Allocator, socket_path: []const u8) !Server {
-        var bindings = binding_mod.BindingManager.init(alloc);
-        errdefer bindings.deinit();
-        try bindings.setupDefaults();
-
-        const owned_socket_path = try alloc.dupe(u8, socket_path);
-        errdefer alloc.free(owned_socket_path);
-        const default_terminal = try alloc.dupe(u8, "screen");
-        errdefer alloc.free(default_terminal);
-        const set_clipboard = try alloc.dupe(u8, "external");
-        errdefer alloc.free(set_clipboard);
-
         return .{
             .listen_fd = -1,
-            .socket_path = owned_socket_path,
+            .socket_path = try alloc.dupe(u8, socket_path),
             .sessions = .empty,
             .clients = .empty,
             .default_session = null,
             .choose_tree_state = null,
-            .bindings = bindings,
             .paste_stack = PasteStack.init(alloc),
-            .bindings = binding_mod.BindingManager.init(alloc),
-            .options = options_mod.OptionsStore.init(alloc),
             .session_loop = SessionLoop.init(alloc),
-            .options = .{
-                .default_terminal = default_terminal,
-                .set_clipboard = set_clipboard,
-            },
             .running = false,
             .allocator = alloc,
         };
-        errdefer {
-            server.bindings.deinit();
-            server.options.deinit();
-            server.paste_stack.deinit();
-            server.session_loop.deinit();
-            alloc.free(server.socket_path);
-        }
-
-        try server.bindings.setupDefaults();
-        try server.options.loadDefaults(&options_table_mod.options_table);
-        return server;
     }
 
     pub fn deinit(self: *Server) void {
@@ -104,26 +63,9 @@ pub const Server = struct {
         if (self.choose_tree_state) |*state| {
             state.deinit();
         }
-        self.bindings.deinit();
         self.paste_stack.deinit();
-        self.bindings.deinit();
-        self.options.deinit();
         self.session_loop.deinit();
-        self.allocator.free(self.options.default_terminal);
-        self.allocator.free(self.options.set_clipboard);
         self.allocator.free(self.socket_path);
-    }
-
-    pub fn setDefaultTerminal(self: *Server, value: []const u8) !void {
-        const owned = try self.allocator.dupe(u8, value);
-        self.allocator.free(self.options.default_terminal);
-        self.options.default_terminal = owned;
-    }
-
-    pub fn setSetClipboard(self: *Server, value: []const u8) !void {
-        const owned = try self.allocator.dupe(u8, value);
-        self.allocator.free(self.options.set_clipboard);
-        self.options.set_clipboard = owned;
     }
 
     pub fn listen(self: *Server) !void {
@@ -157,7 +99,6 @@ pub const Server = struct {
     pub fn createSession(self: *Server, name: []const u8, shell: [:0]const u8, cols: u32, rows: u32) !*Session {
         const session = try Session.init(self.allocator, name);
         errdefer session.deinit();
-        self.applySessionDefaults(session);
 
         const window = try Window.init(self.allocator, name, cols, rows);
         errdefer window.deinit();
@@ -177,41 +118,6 @@ pub const Server = struct {
         if (self.default_session == null) self.default_session = session;
         try self.session_loop.addPane(pane.id, pane.fd, cols, rows);
         return session;
-    }
-
-    pub fn applySessionDefaults(self: *Server, session: *Session) void {
-        if (self.options.get(.session, "base-index")) |value| {
-            switch (value) {
-                .number => |number| {
-                    if (number >= 0) session.options.base_index = @intCast(number);
-                },
-                else => {},
-            }
-        }
-        if (self.options.get(.session, "status")) |value| {
-            switch (value) {
-                .boolean => |enabled| session.options.status = enabled,
-                else => {},
-            }
-        }
-        if (self.options.get(.session, "mouse")) |value| {
-            switch (value) {
-                .boolean => |enabled| session.options.mouse = enabled,
-                else => {},
-            }
-        }
-        if (self.options.get(.session, "prefix")) |value| {
-            switch (value) {
-                .string => |binding| {
-                    if (key_string.stringToKey(binding)) |parsed| {
-                        session.options.prefix_key = parsed.key;
-                        self.bindings.prefix_key = parsed.key;
-                        self.bindings.prefix_mods = parsed.mods;
-                    }
-                },
-                else => {},
-            }
-        }
     }
 
     pub fn acceptClient(self: *Server) !void {
@@ -581,11 +487,7 @@ fn commandErrorMessage(err: cmd.CmdError) []const u8 {
 
 const POLLIN: i16 = 0x0001;
 
-test "commandAllowsMissingSession includes tmux-style config commands" {
-    try std.testing.expect(commandAllowsMissingSession("source-file"));
-    try std.testing.expect(commandAllowsMissingSession("set"));
-    try std.testing.expect(commandAllowsMissingSession("bind-key"));
+test "commandAllowsMissingSession includes if-shell" {
     try std.testing.expect(commandAllowsMissingSession("if-shell"));
-    try std.testing.expect(commandAllowsMissingSession("list-keys"));
-    try std.testing.expect(!commandAllowsMissingSession("split-window"));
+    try std.testing.expect(!commandAllowsMissingSession("send-prefix"));
 }

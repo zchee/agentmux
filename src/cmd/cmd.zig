@@ -1,16 +1,12 @@
 const std = @import("std");
 const protocol = @import("../protocol.zig");
 const config_parser = @import("../config/parser.zig");
-const options_mod = @import("../config/options.zig");
-const options_table_mod = @import("../config/options_table.zig");
 const binding_mod = @import("../keybind/bindings.zig");
 const key_string = @import("../keybind/string.zig");
 const paste_mod = @import("../copy/paste.zig");
 const copy_mod = @import("../copy/copy.zig");
-const status_style = @import("../status/style.zig");
 const tree_mod = @import("../mode/tree.zig");
 const screen_mod = @import("../screen/screen.zig");
-const style_mod = @import("../status/style.zig");
 const Pty = @import("../pane.zig").Pty;
 const Session = @import("../session.zig").Session;
 const Window = @import("../window.zig").Window;
@@ -279,30 +275,6 @@ pub const Registry = struct {
             .handler = cmdSourceFile,
         });
         try self.register(.{
-            .name = "set-option",
-            .alias = "set",
-            .min_args = 2,
-            .max_args = 0,
-            .usage = "set-option [-g|-s|-w|-p] option value",
-            .handler = cmdSetOption,
-        });
-        try self.register(.{
-            .name = "bind-key",
-            .alias = "bind",
-            .min_args = 2,
-            .max_args = 0,
-            .usage = "bind-key [-T table|-n] key command",
-            .handler = cmdBindKey,
-        });
-        try self.register(.{
-            .name = "if-shell",
-            .alias = "if",
-            .min_args = 2,
-            .max_args = 3,
-            .usage = "if-shell shell-command command-if-true [command-if-false]",
-            .handler = cmdIfShell,
-        });
-        try self.register(.{
             .name = "list-windows",
             .alias = "lsw",
             .min_args = 0,
@@ -399,14 +371,6 @@ pub const Registry = struct {
             .handler = cmdClockMode,
         });
         try self.register(.{
-            .name = "send-prefix",
-            .alias = null,
-            .min_args = 0,
-            .max_args = 0,
-            .usage = "send-prefix",
-            .handler = cmdSendPrefix,
-        });
-        try self.register(.{
             .name = "run-shell",
             .alias = "run",
             .min_args = 1,
@@ -444,25 +408,6 @@ fn writeOutput(ctx: *Context, comptime fmt: []const u8, args: anytype) CmdError!
     try writeReplyMessage(ctx, .output, message);
 }
 
-fn executeCommandSource(ctx: *Context, source: []const u8) CmdError!void {
-    const registry = ctx.registry orelse return CmdError.CommandFailed;
-
-    var parser = config_parser.ConfigParser.init(ctx.allocator, source);
-    var commands = parser.parseAll() catch return CmdError.CommandFailed;
-    defer {
-        for (commands.items) |*command| command.deinit(ctx.allocator);
-        commands.deinit(ctx.allocator);
-    }
-
-    for (commands.items) |*command| {
-        try registry.executeParsed(ctx, command);
-    }
-}
-
-fn joinArgs(alloc: std.mem.Allocator, args: []const []const u8) CmdError![]u8 {
-    return std.mem.join(alloc, " ", args) catch return CmdError.OutOfMemory;
-}
-
 fn spawnWindowPane(alloc: std.mem.Allocator, shell: [:0]const u8, sx: u32, sy: u32) CmdError!*Pane {
     const pane = Pane.init(alloc, sx, sy) catch return CmdError.OutOfMemory;
     errdefer pane.deinit();
@@ -489,63 +434,8 @@ fn parseTargetWindow(args: []const []const u8) ?u32 {
     return null;
 }
 
-fn parseTargetPane(args: []const []const u8) ?[]const u8 {
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        if (!std.mem.eql(u8, args[i], "-t") or i + 1 >= args.len) continue;
-        return args[i + 1];
-    }
-    return null;
-}
-
-const TargetPane = struct {
-    window: *Window,
-    pane: *Pane,
-};
-
-fn resolveTargetWindow(session: *Session, args: []const []const u8) CmdError!*Window {
-    if (parseTargetWindow(args)) |window_number| {
-        return session.findWindowByNumber(window_number) orelse CmdError.WindowNotFound;
-    }
-    return session.active_window orelse CmdError.WindowNotFound;
-}
-
-fn resolveTargetPane(session: *Session, args: []const []const u8) CmdError!TargetPane {
-    if (parseTargetPane(args)) |target| {
-        if (target.len >= 2 and target[0] == '%') {
-            const pane_id = std.fmt.parseInt(u32, target[1..], 10) catch return CmdError.InvalidArgs;
-            for (session.windows.items) |window| {
-                for (window.panes.items) |pane| {
-                    if (pane.id == pane_id) {
-                        return .{ .window = window, .pane = pane };
-                    }
-                }
-            }
-            return CmdError.PaneNotFound;
-        }
-
-        const window = session.active_window orelse return CmdError.WindowNotFound;
-        const pane_index = std.fmt.parseInt(usize, target, 10) catch return CmdError.InvalidArgs;
-        if (pane_index >= window.panes.items.len) return CmdError.PaneNotFound;
-        return .{ .window = window, .pane = window.panes.items[pane_index] };
-    }
-
-    const window = session.active_window orelse return CmdError.WindowNotFound;
-    const pane = window.active_pane orelse return CmdError.PaneNotFound;
-    return .{ .window = window, .pane = pane };
-}
-
 fn defaultShell(_: ?*Session) [:0]const u8 {
     return "/bin/sh";
-}
-
-fn sessionDefaultShell(session: ?*Session) [:0]const u8 {
-    if (session) |current| {
-        if (current.options.default_shell.len > 0) {
-            return current.options.default_shell;
-        }
-    }
-    return defaultShell(session);
 }
 
 const ClockTm = extern struct {
@@ -991,7 +881,7 @@ fn cmdNewSession(ctx: *Context, args: []const []const u8) CmdError!void {
         }
     }
 
-    const session = ctx.server.createSession(session_name, sessionDefaultShell(ctx.session), 80, 24) catch return CmdError.CommandFailed;
+    const session = ctx.server.createSession(session_name, defaultShell(ctx.session), 80, 24) catch return CmdError.CommandFailed;
     ctx.session = session;
 }
 
@@ -1034,7 +924,7 @@ fn cmdNewWindow(ctx: *Context, args: []const []const u8) CmdError!void {
     const window = Window.init(ctx.allocator, name, 80, 24) catch return CmdError.OutOfMemory;
     errdefer window.deinit();
 
-    const pane = spawnWindowPane(ctx.allocator, sessionDefaultShell(ctx.session), 80, 24) catch |err| switch (err) {
+    const pane = spawnWindowPane(ctx.allocator, defaultShell(ctx.session), 80, 24) catch |err| switch (err) {
         CmdError.OutOfMemory => return CmdError.OutOfMemory,
         else => return CmdError.CommandFailed,
     };
@@ -1064,7 +954,7 @@ fn cmdSplitWindow(ctx: *Context, args: []const []const u8) CmdError!void {
         }
     }
 
-    const new_pane = spawnWindowPane(ctx.allocator, sessionDefaultShell(ctx.session), window.sx, window.sy) catch |err| switch (err) {
+    const new_pane = spawnWindowPane(ctx.allocator, defaultShell(ctx.session), window.sx, window.sy) catch |err| switch (err) {
         CmdError.OutOfMemory => return CmdError.OutOfMemory,
         else => return CmdError.CommandFailed,
     };
@@ -1160,7 +1050,30 @@ fn cmdSendKeys(ctx: *Context, args: []const []const u8) CmdError!void {
         if (pane.copy_state != null and try handleCopyModeKey(ctx, pane, key_str)) {
             continue;
         }
-        writeKeyArgToPane(pane, key_str);
+        if (std.mem.eql(u8, key_str, "Enter")) {
+            _ = std.c.write(pane.fd, "\n", 1);
+        } else if (std.mem.eql(u8, key_str, "Escape")) {
+            _ = std.c.write(pane.fd, "\x1b", 1);
+        } else if (std.mem.eql(u8, key_str, "Tab")) {
+            _ = std.c.write(pane.fd, "\t", 1);
+        } else if (std.mem.eql(u8, key_str, "Space")) {
+            _ = std.c.write(pane.fd, " ", 1);
+        } else if (std.mem.eql(u8, key_str, "BSpace")) {
+            _ = std.c.write(pane.fd, "\x7f", 1);
+        } else if (key_str.len == 3 and key_str[0] == 'C' and key_str[1] == '-') {
+            const ch = key_str[2];
+            if (ch >= 'a' and ch <= 'z') {
+                const ctrl: [1]u8 = .{ch - 'a' + 1};
+                _ = std.c.write(pane.fd, &ctrl, 1);
+            } else if (ch >= 'A' and ch <= 'Z') {
+                const ctrl: [1]u8 = .{ch - 'A' + 1};
+                _ = std.c.write(pane.fd, &ctrl, 1);
+            } else {
+                _ = std.c.write(pane.fd, key_str.ptr, key_str.len);
+            }
+        } else {
+            _ = std.c.write(pane.fd, key_str.ptr, key_str.len);
+        }
     }
 }
 
@@ -1189,9 +1102,9 @@ fn cmdLastWindow(ctx: *Context, _: []const []const u8) CmdError!void {
     if (!session.lastWindow()) return CmdError.WindowNotFound;
 }
 
-fn cmdKillWindow(ctx: *Context, args: []const []const u8) CmdError!void {
+fn cmdKillWindow(ctx: *Context, _: []const []const u8) CmdError!void {
     const session = ctx.session orelse return CmdError.SessionNotFound;
-    const window = try resolveTargetWindow(session, args);
+    const window = session.active_window orelse return CmdError.WindowNotFound;
     for (window.panes.items) |pane| {
         ctx.server.untrackPane(pane.id);
     }
@@ -1199,17 +1112,13 @@ fn cmdKillWindow(ctx: *Context, args: []const []const u8) CmdError!void {
     if (empty) {
         ctx.session = null;
         ctx.server.removeSession(session);
-    } else {
-        ctx.window = session.active_window;
-        ctx.pane = if (ctx.window) |active_window| active_window.active_pane else null;
     }
 }
 
-fn cmdKillPane(ctx: *Context, args: []const []const u8) CmdError!void {
+fn cmdKillPane(ctx: *Context, _: []const []const u8) CmdError!void {
     const session = ctx.session orelse return CmdError.SessionNotFound;
-    const target = try resolveTargetPane(session, args);
-    const window = target.window;
-    const pane = target.pane;
+    const window = session.active_window orelse return CmdError.WindowNotFound;
+    const pane = window.active_pane orelse return CmdError.PaneNotFound;
     ctx.server.untrackPane(pane.id);
     const window_empty = window.removePane(pane);
     if (window_empty) {
@@ -1220,11 +1129,6 @@ fn cmdKillPane(ctx: *Context, args: []const []const u8) CmdError!void {
         }
     } else if (window.layout_root) |root| {
         root.resize(window.sx, window.sy);
-    }
-
-    if (ctx.session != null) {
-        ctx.window = session.active_window;
-        ctx.pane = if (ctx.window) |active_window| active_window.active_pane else null;
     }
 }
 
@@ -1467,7 +1371,11 @@ fn cmdDeleteBuffer(ctx: *Context, args: []const []const u8) CmdError!void {
 }
 
 fn cmdListKeys(ctx: *Context, _: []const []const u8) CmdError!void {
-    var iter = ctx.server.bindings.tables.iterator();
+    var manager = binding_mod.BindingManager.init(ctx.allocator);
+    defer manager.deinit();
+    try manager.setupDefaults();
+
+    var iter = manager.tables.iterator();
     while (iter.next()) |entry| {
         const table_name = entry.key_ptr.*;
         const table = entry.value_ptr;
@@ -1574,112 +1482,6 @@ extern "c" fn execvp(
     argv: [*:null]const ?[*:0]const u8,
 ) i32;
 
-test "set-option updates server defaults and live session prefix" {
-    const alloc = std.testing.allocator;
-    var server = try Server.init(alloc, "/tmp/agentmux-test-set.sock");
-    defer server.deinit();
-
-    const session = try Session.init(alloc, "demo");
-    try server.sessions.append(alloc, session);
-    server.default_session = session;
-
-    var reg = Registry.init(alloc);
-    defer reg.deinit();
-    try reg.registerBuiltins();
-
-    var ctx = Context{
-        .server = &server,
-        .session = session,
-        .window = null,
-        .pane = null,
-        .allocator = alloc,
-        .registry = &reg,
-    };
-
-    const prefix_args = [_][]const u8{ "-g", "prefix", "C-a" };
-    try cmdSetOption(&ctx, &prefix_args);
-    try std.testing.expectEqualStrings("C-a", server.options.get(.session, "prefix").?.string);
-    try std.testing.expectEqual(@as(u21, 'a'), server.bindings.prefix_key);
-    try std.testing.expect(server.bindings.prefix_mods.ctrl);
-    try std.testing.expectEqual(@as(u21, 'a'), session.options.prefix_key);
-
-    const base_args = [_][]const u8{ "-g", "base-index", "1" };
-    try cmdSetOption(&ctx, &base_args);
-    try std.testing.expectEqual(@as(i64, 1), server.options.get(.session, "base-index").?.number);
-    try std.testing.expectEqual(@as(u32, 1), session.options.base_index);
-}
-
-test "parsed tmux-style config commands execute through registry" {
-    const alloc = std.testing.allocator;
-    var server = try Server.init(alloc, "/tmp/agentmux-test-config.sock");
-    defer server.deinit();
-
-    const session = try Session.init(alloc, "demo");
-    try server.sessions.append(alloc, session);
-    server.default_session = session;
-
-    var reg = Registry.init(alloc);
-    defer reg.deinit();
-    try reg.registerBuiltins();
-
-    var ctx = Context{
-        .server = &server,
-        .session = session,
-        .window = null,
-        .pane = null,
-        .allocator = alloc,
-        .registry = &reg,
-    };
-
-    const source =
-        \\set -g prefix C-a
-        \\set -g base-index 2
-        \\bind-key -T custom C-a send-prefix
-        \\if-shell "true" "set-buffer configured"
-    ;
-
-    try executeCommandSource(&ctx, source);
-
-    try std.testing.expectEqualStrings("C-a", server.options.get(.session, "prefix").?.string);
-    try std.testing.expectEqual(@as(i64, 2), server.options.get(.session, "base-index").?.number);
-    try std.testing.expectEqual(@as(u32, 2), session.options.base_index);
-
-    const custom = server.bindings.tables.get("custom").?;
-    const action = custom.lookup('a', .{ .ctrl = true }).?;
-    switch (action) {
-        .command => |command| try std.testing.expectEqualStrings("send-prefix", command),
-        .none => return error.UnexpectedNone,
-    }
-
-    const buffer = server.paste_stack.get(0).?;
-    try std.testing.expectEqualStrings("configured", buffer.data);
-}
-
-test "if-shell runs false branch when shell command fails" {
-    const alloc = std.testing.allocator;
-    var server = try Server.init(alloc, "/tmp/agentmux-test-if.sock");
-    defer server.deinit();
-
-    var reg = Registry.init(alloc);
-    defer reg.deinit();
-    try reg.registerBuiltins();
-
-    var ctx = Context{
-        .server = &server,
-        .session = null,
-        .window = null,
-        .pane = null,
-        .allocator = alloc,
-        .registry = &reg,
-    };
-
-    const args = [_][]const u8{ "false", "set-buffer success", "set-buffer fallback" };
-    try cmdIfShell(&ctx, &args);
-
-    const buffer = server.paste_stack.get(0).?;
-    try std.testing.expectEqualStrings("fallback", buffer.data);
-}
-
 test "registry register and find" {
     var reg = Registry.init(std.testing.allocator);
     defer reg.deinit();
@@ -1699,128 +1501,6 @@ test "registry register and find" {
 test "parse target window helper" {
     const args = [_][]const u8{ "-t", ":3" };
     try std.testing.expectEqual(@as(?u32, 3), parseTargetWindow(&args));
-}
-
-test "parse target pane helper" {
-    const args = [_][]const u8{ "-t", "%12" };
-    try std.testing.expectEqualStrings("%12", parseTargetPane(&args).?);
-}
-
-test "resolve target window prefers explicit -t window number" {
-    const alloc = std.testing.allocator;
-    var session = try Session.init(alloc, "demo");
-    defer session.deinit();
-
-    const w1 = try Window.init(alloc, "one", 80, 24);
-    const w2 = try Window.init(alloc, "two", 80, 24);
-    const p1 = try Pane.init(alloc, 80, 24);
-    const p2 = try Pane.init(alloc, 80, 24);
-    try w1.addPane(p1);
-    try w2.addPane(p2);
-    try session.addWindow(w1);
-    try session.addWindow(w2);
-    session.selectWindow(w1);
-
-    const args = [_][]const u8{ "-t", ":1" };
-    try std.testing.expect(try resolveTargetWindow(session, &args) == w2);
-}
-
-test "resolve target pane supports pane id across windows" {
-    const alloc = std.testing.allocator;
-    var session = try Session.init(alloc, "demo");
-    defer session.deinit();
-
-    const w1 = try Window.init(alloc, "one", 80, 24);
-    const w2 = try Window.init(alloc, "two", 80, 24);
-    const p1 = try Pane.init(alloc, 80, 24);
-    const p2 = try Pane.init(alloc, 80, 24);
-    try w1.addPane(p1);
-    try w2.addPane(p2);
-    try session.addWindow(w1);
-    try session.addWindow(w2);
-    session.selectWindow(w1);
-
-    var pane_target_buf: [32]u8 = undefined;
-    const pane_target = try std.fmt.bufPrint(&pane_target_buf, "%{d}", .{p2.id});
-    const args = [_][]const u8{ "-t", pane_target };
-    const target = try resolveTargetPane(session, &args);
-    try std.testing.expect(target.window == w2);
-    try std.testing.expect(target.pane == p2);
-}
-
-test "kill-window honors explicit target window" {
-    const alloc = std.testing.allocator;
-    var server = try Server.init(alloc, "/tmp/agentmux-test-kill-window.sock");
-    defer server.deinit();
-
-    const session = try Session.init(alloc, "demo");
-    try server.sessions.append(alloc, session);
-    server.default_session = session;
-
-    const w1 = try Window.init(alloc, "one", 80, 24);
-    const w2 = try Window.init(alloc, "two", 80, 24);
-    const p1 = try Pane.init(alloc, 80, 24);
-    const p2 = try Pane.init(alloc, 80, 24);
-    try w1.addPane(p1);
-    try w2.addPane(p2);
-    try session.addWindow(w1);
-    try session.addWindow(w2);
-    session.selectWindow(w1);
-
-    var ctx = Context{
-        .server = &server,
-        .session = session,
-        .window = session.active_window,
-        .pane = session.active_window.?.active_pane,
-        .allocator = alloc,
-    };
-
-    const args = [_][]const u8{ "-t", ":1" };
-    try cmdKillWindow(&ctx, &args);
-
-    try std.testing.expectEqual(@as(usize, 1), session.windowCount());
-    try std.testing.expect(session.active_window == w1);
-    try std.testing.expect(ctx.window == w1);
-    try std.testing.expect(ctx.pane == p1);
-}
-
-test "kill-pane honors explicit target pane id" {
-    const alloc = std.testing.allocator;
-    var server = try Server.init(alloc, "/tmp/agentmux-test-kill-pane.sock");
-    defer server.deinit();
-
-    const session = try Session.init(alloc, "demo");
-    try server.sessions.append(alloc, session);
-    server.default_session = session;
-
-    const w1 = try Window.init(alloc, "one", 80, 24);
-    const w2 = try Window.init(alloc, "two", 80, 24);
-    const p1 = try Pane.init(alloc, 80, 24);
-    const p2 = try Pane.init(alloc, 80, 24);
-    try w1.addPane(p1);
-    try w2.addPane(p2);
-    try session.addWindow(w1);
-    try session.addWindow(w2);
-    session.selectWindow(w1);
-
-    var ctx = Context{
-        .server = &server,
-        .session = session,
-        .window = session.active_window,
-        .pane = session.active_window.?.active_pane,
-        .allocator = alloc,
-    };
-
-    var pane_target_buf: [32]u8 = undefined;
-    const pane_target = try std.fmt.bufPrint(&pane_target_buf, "%{d}", .{p2.id});
-    const args = [_][]const u8{ "-t", pane_target };
-    try cmdKillPane(&ctx, &args);
-
-    try std.testing.expectEqual(@as(usize, 1), session.windowCount());
-    try std.testing.expect(session.active_window == w1);
-    try std.testing.expectEqual(@as(usize, 1), w1.paneCount());
-    try std.testing.expect(ctx.window == w1);
-    try std.testing.expect(ctx.pane == p1);
 }
 
 test "formatBindingKey renders ctrl meta modifiers" {
@@ -1879,12 +1559,12 @@ test "addChooseTreeEntry stores pane metadata" {
     try std.testing.expect(choose_state.items.items[0].pane != null);
 }
 
-test "set-option updates session and server settings" {
-    var server = try Server.init(std.testing.allocator, "/tmp/agentmux-cmd-set.sock");
+test "if-shell executes success branch" {
+    const alloc = std.testing.allocator;
+    var server = try Server.init(alloc, "/tmp/agentmux-if-shell-success.sock");
     defer server.deinit();
-    var session = try Session.init(std.testing.allocator, "demo");
-    defer session.deinit();
-    var reg = Registry.init(std.testing.allocator);
+
+    var reg = Registry.init(alloc);
     defer reg.deinit();
     try reg.registerBuiltins();
 
@@ -1968,206 +1648,11 @@ test "send-prefix writes configured prefix byte to active pane" {
     var ctx = Context{
         .server = &server,
         .session = session,
-        .window = null,
-        .pane = null,
-        .allocator = std.testing.allocator,
-        .registry = &reg,
-    };
-
-    const session_args = [_][]const u8{ "-g", "base-index", "3" };
-    try cmdSetOption(&ctx, &session_args);
-    try std.testing.expectEqual(@as(u32, 3), session.options.base_index);
-
-    const prefix_args = [_][]const u8{ "prefix", "C-a" };
-    try cmdSetOption(&ctx, &prefix_args);
-    try std.testing.expectEqualStrings("C-a", session.options.prefix_string);
-    try std.testing.expectEqual(@as(u21, 'a'), server.bindings.prefix_key);
-    try std.testing.expect(server.bindings.prefix_mods.ctrl);
-
-    const server_args = [_][]const u8{ "-s", "history-limit", "4096" };
-    try cmdSetOption(&ctx, &server_args);
-    try std.testing.expectEqual(@as(i64, 4096), server.options.history_limit);
-}
-
-test "bind-key and unbind-key update persistent tables" {
-    var server = try Server.init(std.testing.allocator, "/tmp/agentmux-cmd-bind.sock");
-    defer server.deinit();
-    var reg = Registry.init(std.testing.allocator);
-    defer reg.deinit();
-    try reg.registerBuiltins();
-
-    var ctx = Context{
-        .server = &server,
-        .session = null,
-        .window = null,
-        .pane = null,
-        .allocator = std.testing.allocator,
-        .registry = &reg,
-    };
-
-    const bind_args = [_][]const u8{ "-n", "C-a", "send-prefix" };
-    try cmdBindKey(&ctx, &bind_args);
-
-    const root = server.bindings.tables.get("root").?;
-    const action = root.lookup('a', .{ .ctrl = true }).?;
-    switch (action) {
-        .command => |command| try std.testing.expectEqualStrings("send-prefix", command),
-        .none => return error.ExpectedCommandBinding,
-    }
-
-    const unbind_args = [_][]const u8{ "-n", "C-a" };
-    try cmdUnbindKey(&ctx, &unbind_args);
-    try std.testing.expect(root.lookup('a', .{ .ctrl = true }) == null);
-}
-
-test "if-shell executes the matching command branch" {
-    var server = try Server.init(std.testing.allocator, "/tmp/agentmux-cmd-if.sock");
-    defer server.deinit();
-    var session = try Session.init(std.testing.allocator, "demo");
-    defer session.deinit();
-    var reg = Registry.init(std.testing.allocator);
-    defer reg.deinit();
-    try reg.registerBuiltins();
-
-    var ctx = Context{
-        .server = &server,
-        .session = session,
-        .window = null,
-        .pane = null,
-        .allocator = std.testing.allocator,
-        .registry = &reg,
-    };
-
-    const true_args = [_][]const u8{ "true", "set-option base-index 7", "set-option base-index 9" };
-    try cmdIfShell(&ctx, &true_args);
-    try std.testing.expectEqual(@as(u32, 7), session.options.base_index);
-
-    const false_args = [_][]const u8{ "false", "set-option base-index 11", "set-option base-index 13" };
-    try cmdIfShell(&ctx, &false_args);
-    try std.testing.expectEqual(@as(u32, 13), session.options.base_index);
-}
-
-test "source-file applies tmux-style config commands" {
-    const io = std.Options.debug_io;
-    var server = try Server.init(std.testing.allocator, "/tmp/agentmux-cmd-source.sock");
-    defer server.deinit();
-    var session = try Session.init(std.testing.allocator, "demo");
-    defer session.deinit();
-    var reg = Registry.init(std.testing.allocator);
-    defer reg.deinit();
-    try reg.registerBuiltins();
-
-    var ctx = Context{
-        .server = &server,
-        .session = session,
-        .window = null,
-        .pane = null,
-        .allocator = std.testing.allocator,
-        .registry = &reg,
-    };
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "agentmux.conf",
-        .data =
-        \\set -g base-index 5
-        \\bind-key -n C-a send-prefix
-        ,
-    });
-
-    const path = try std.fs.path.join(std.testing.allocator, &.{
-        ".zig-cache",
-        "tmp",
-        tmp.sub_path[0..],
-        "agentmux.conf",
-    });
-    defer std.testing.allocator.free(path);
-
-    const args = [_][]const u8{path};
-    try cmdSourceFile(&ctx, &args);
-
-    try std.testing.expectEqual(@as(u32, 5), session.options.base_index);
-    const root = server.bindings.tables.get("root").?;
-    const action = root.lookup('a', .{ .ctrl = true }).?;
-    switch (action) {
-        .command => |command| try std.testing.expectEqualStrings("send-prefix", command),
-        .none => return error.ExpectedCommandBinding,
-    }
-}
-
-test "set-option updates session base index" {
-    const alloc = std.testing.allocator;
-    var server = try Server.init(alloc, "/tmp/agentmux-set-base-index.sock");
-    defer server.deinit();
-
-    const session = try Session.init(alloc, "demo");
-    try server.sessions.append(alloc, session);
-
-    var ctx = Context{
-        .server = &server,
-        .session = session,
-        .window = null,
-        .pane = null,
-        .allocator = alloc,
-    };
-
-    try cmdSetOption(&ctx, &.{ "-g", "base-index", "3" });
-    try std.testing.expectEqual(@as(u32, 3), session.options.base_index);
-}
-
-test "set-option updates session booleans" {
-    const alloc = std.testing.allocator;
-    var server = try Server.init(alloc, "/tmp/agentmux-set-bool.sock");
-    defer server.deinit();
-
-    const session = try Session.init(alloc, "demo");
-    try server.sessions.append(alloc, session);
-
-    var ctx = Context{
-        .server = &server,
-        .session = session,
-        .window = null,
-        .pane = null,
-        .allocator = alloc,
-    };
-
-    try cmdSetOption(&ctx, &.{ "-g", "mouse", "on" });
-    try cmdSetOption(&ctx, &.{ "-g", "status", "off" });
-    try std.testing.expect(session.options.mouse);
-    try std.testing.expect(!session.options.status);
-}
-
-test "set-option updates prefix for send-prefix" {
-    const alloc = std.testing.allocator;
-    var server = try Server.init(alloc, "/tmp/agentmux-set-prefix.sock");
-    defer server.deinit();
-
-    var session = try Session.init(alloc, "demo");
-    try server.sessions.append(alloc, session);
-    server.default_session = session;
-
-    var window = try Window.init(alloc, "win", 80, 24);
-    const pane = try Pane.init(alloc, 80, 24);
-
-    var fds: [2]std.c.fd_t = undefined;
-    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&fds));
-    defer _ = std.c.close(fds[0]);
-    pane.fd = fds[1];
-
-    try window.addPane(pane);
-    try session.addWindow(window);
-    session.selectWindow(window);
-
-    var ctx = Context{
-        .server = &server,
-        .session = session,
         .window = window,
         .pane = pane,
         .allocator = alloc,
     };
 
-    try cmdSetOption(&ctx, &.{ "-g", "prefix", "C-a" });
     try cmdSendPrefix(&ctx, &.{});
 
     var buf: [1]u8 = undefined;
