@@ -286,7 +286,7 @@ pub const ModeTree = struct {
 
         for (self.items.items, 0..) |_, idx| {
             if (!self.isVisibleIndex(idx)) continue;
-            const score = directMatchScore(self.items.items[idx].label, self.filter[0..self.filter_len]) orelse continue;
+            const score = fuzzyMatchScore(self.items.items[idx].label, self.filter[0..self.filter_len]) orelse continue;
             if (best_score == null or score.betterThan(best_score.?)) {
                 best_idx = idx;
                 best_score = score;
@@ -389,7 +389,12 @@ const FuzzyScore = struct {
 };
 
 fn fuzzyContainsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    return directMatchScore(haystack, needle) != null;
+    return fuzzyMatchScore(haystack, needle) != null;
+}
+
+fn fuzzyMatchScore(haystack: []const u8, needle: []const u8) ?FuzzyScore {
+    if (directMatchScore(haystack, needle)) |score| return score;
+    return approximateTokenScore(haystack, needle);
 }
 
 fn directMatchScore(haystack: []const u8, needle: []const u8) ?FuzzyScore {
@@ -422,6 +427,75 @@ fn directMatchScore(haystack: []const u8, needle: []const u8) ?FuzzyScore {
         }
     }
     return null;
+}
+
+fn approximateTokenScore(haystack: []const u8, needle: []const u8) ?FuzzyScore {
+    if (needle.len == 0) return null;
+    const threshold: usize = if (needle.len <= 4) 1 else 2;
+
+    var token_start: ?usize = null;
+    var best_score: ?FuzzyScore = null;
+
+    for (haystack, 0..) |ch, idx| {
+        const is_token = std.ascii.isAlphanumeric(ch);
+        if (is_token) {
+            if (token_start == null) token_start = idx;
+            continue;
+        }
+        if (token_start) |start| {
+            if (tokenApproximateScore(haystack[start..idx], needle, start, threshold)) |score| {
+                if (best_score == null or score.betterThan(best_score.?)) best_score = score;
+            }
+            token_start = null;
+        }
+    }
+
+    if (token_start) |start| {
+        if (tokenApproximateScore(haystack[start..], needle, start, threshold)) |score| {
+            if (best_score == null or score.betterThan(best_score.?)) best_score = score;
+        }
+    }
+    return best_score;
+}
+
+fn tokenApproximateScore(token: []const u8, needle: []const u8, start: usize, threshold: usize) ?FuzzyScore {
+    const distance = boundedEditDistanceIgnoreCase(token, needle, threshold + 1);
+    if (distance > threshold) return null;
+    return .{
+        .gaps = 100 + distance,
+        .start = start,
+        .span = token.len,
+        .len = token.len,
+        .depth = 0,
+    };
+}
+
+fn boundedEditDistanceIgnoreCase(a: []const u8, b: []const u8, max_distance: usize) usize {
+    if (a.len == 0) return b.len;
+    if (b.len == 0) return a.len;
+
+    var prev: [129]usize = undefined;
+    var curr: [129]usize = undefined;
+    if (b.len > 128) return max_distance + 1;
+
+    for (0..b.len + 1) |j| prev[j] = j;
+
+    for (a, 0..) |ach, i| {
+        curr[0] = i + 1;
+        var row_min = curr[0];
+        for (b, 0..) |bch, j| {
+            const cost: usize = if (std.ascii.toLower(ach) == std.ascii.toLower(bch)) 0 else 1;
+            const deletion = prev[j + 1] + 1;
+            const insertion = curr[j] + 1;
+            const substitution = prev[j] + cost;
+            const best = @min(@min(deletion, insertion), substitution);
+            curr[j + 1] = best;
+            if (best < row_min) row_min = best;
+        }
+        if (row_min > max_distance) return max_distance + 1;
+        for (0..b.len + 1) |j| prev[j] = curr[j];
+    }
+    return prev[b.len];
 }
 
 test "mode tree navigation" {
@@ -583,4 +657,37 @@ test "mode tree filter selection prefers direct match over ancestor visibility" 
     _ = tree.handleKey('a');
 
     try std.testing.expectEqual(@as(usize, 2), tree.selected);
+}
+
+test "mode tree typo-tolerant filter matches near token" {
+    var tree = ModeTree.init(std.testing.allocator, 10);
+    defer tree.deinit();
+
+    try tree.addItem(.{ .label = "plancheck", .depth = 0, .expanded = true, .has_children = true, .tag = 0 });
+    try tree.addItem(.{ .label = "1: extra (1 panes)", .depth = 1, .expanded = false, .has_children = false, .tag = 1 });
+
+    _ = tree.handleKey('/');
+    _ = tree.handleKey('e');
+    _ = tree.handleKey('x');
+    _ = tree.handleKey('r');
+    _ = tree.handleKey('a');
+
+    try std.testing.expectEqual(@as(usize, 1), tree.selected);
+}
+
+test "mode tree typo-tolerant filter still rejects distant terms" {
+    var tree = ModeTree.init(std.testing.allocator, 10);
+    defer tree.deinit();
+
+    try tree.addItem(.{ .label = "plancheck", .depth = 0, .expanded = true, .has_children = false, .tag = 0 });
+    try tree.addItem(.{ .label = "extra", .depth = 0, .expanded = true, .has_children = false, .tag = 1 });
+
+    _ = tree.handleKey('/');
+    _ = tree.handleKey('z');
+    _ = tree.handleKey('z');
+    _ = tree.handleKey('z');
+
+    const rendered = try tree.render(std.testing.allocator);
+    defer std.testing.allocator.free(rendered);
+    try std.testing.expect(fuzzyContainsIgnoreCase(rendered, "no matches"));
 }
