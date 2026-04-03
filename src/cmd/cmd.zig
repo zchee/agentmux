@@ -7,6 +7,7 @@ const binding_mod = @import("../keybind/bindings.zig");
 const key_string = @import("../keybind/string.zig");
 const paste_mod = @import("../copy/paste.zig");
 const copy_mod = @import("../copy/copy.zig");
+const status_style = @import("../status/style.zig");
 const tree_mod = @import("../mode/tree.zig");
 const screen_mod = @import("../screen/screen.zig");
 const style_mod = @import("../status/style.zig");
@@ -254,6 +255,38 @@ pub const Registry = struct {
             .handler = cmdDisplayMessage,
         });
         try self.register(.{
+            .name = "set-option",
+            .alias = "set",
+            .min_args = 2,
+            .max_args = 8,
+            .usage = "set-option [-g] option value",
+            .handler = cmdSetOption,
+        });
+        try self.register(.{
+            .name = "set-window-option",
+            .alias = "setw",
+            .min_args = 2,
+            .max_args = 8,
+            .usage = "set-window-option option value",
+            .handler = cmdSetWindowOption,
+        });
+        try self.register(.{
+            .name = "bind-key",
+            .alias = "bind",
+            .min_args = 2,
+            .max_args = 16,
+            .usage = "bind-key [-T table|-n] key command",
+            .handler = cmdBindKey,
+        });
+        try self.register(.{
+            .name = "unbind-key",
+            .alias = "unbind",
+            .min_args = 1,
+            .max_args = 8,
+            .usage = "unbind-key [-T table|-n] key",
+            .handler = cmdUnbindKey,
+        });
+        try self.register(.{
             .name = "source-file",
             .alias = "source",
             .min_args = 1,
@@ -382,12 +415,28 @@ pub const Registry = struct {
             .handler = cmdClockMode,
         });
         try self.register(.{
+            .name = "send-prefix",
+            .alias = null,
+            .min_args = 0,
+            .max_args = 0,
+            .usage = "send-prefix",
+            .handler = cmdSendPrefix,
+        });
+        try self.register(.{
             .name = "run-shell",
             .alias = "run",
             .min_args = 1,
             .max_args = 2,
             .usage = "run-shell command",
             .handler = cmdRunShell,
+        });
+        try self.register(.{
+            .name = "if-shell",
+            .alias = "if",
+            .min_args = 2,
+            .max_args = 4,
+            .usage = "if-shell shell-command command [else-command]",
+            .handler = cmdIfShell,
         });
     }
 };
@@ -460,6 +509,15 @@ fn defaultShell(_: ?*Session) [:0]const u8 {
     return "/bin/sh";
 }
 
+fn sessionDefaultShell(session: ?*Session) [:0]const u8 {
+    if (session) |current| {
+        if (current.options.default_shell.len > 0) {
+            return @ptrCast(current.options.default_shell.ptr);
+        }
+    }
+    return defaultShell(session);
+}
+
 const ClockTm = extern struct {
     tm_sec: i32,
     tm_min: i32,
@@ -485,122 +543,58 @@ fn parseNamedOption(args: []const []const u8, flag: []const u8) ?[]const u8 {
     return null;
 }
 
-fn parseBoolean(value: []const u8) ?bool {
-    if (std.ascii.eqlIgnoreCase(value, "1") or
-        std.ascii.eqlIgnoreCase(value, "on") or
+fn joinArgs(alloc: std.mem.Allocator, parts: []const []const u8) ![]u8 {
+    if (parts.len == 0) return try alloc.dupe(u8, "");
+
+    var total: usize = 0;
+    for (parts, 0..) |part, i| {
+        total += part.len;
+        if (i + 1 < parts.len) total += 1;
+    }
+
+    var out = try alloc.alloc(u8, total);
+    var pos: usize = 0;
+    for (parts, 0..) |part, i| {
+        @memcpy(out[pos .. pos + part.len], part);
+        pos += part.len;
+        if (i + 1 < parts.len) {
+            out[pos] = ' ';
+            pos += 1;
+        }
+    }
+    return out;
+}
+
+fn parseBoolValue(value: []const u8) ?bool {
+    if (std.ascii.eqlIgnoreCase(value, "on") or
         std.ascii.eqlIgnoreCase(value, "yes") or
-        std.ascii.eqlIgnoreCase(value, "true"))
+        std.ascii.eqlIgnoreCase(value, "true") or
+        std.mem.eql(u8, value, "1"))
     {
         return true;
     }
-    if (std.ascii.eqlIgnoreCase(value, "0") or
-        std.ascii.eqlIgnoreCase(value, "off") or
+    if (std.ascii.eqlIgnoreCase(value, "off") or
         std.ascii.eqlIgnoreCase(value, "no") or
-        std.ascii.eqlIgnoreCase(value, "false"))
+        std.ascii.eqlIgnoreCase(value, "false") or
+        std.mem.eql(u8, value, "0"))
     {
         return false;
     }
     return null;
 }
 
-fn findOptionDef(name: []const u8) ?options_mod.OptionDef {
-    for (options_table_mod.options_table) |def| {
-        if (std.mem.eql(u8, def.name, name)) return def;
-    }
-    return null;
-}
-
-fn scopeFromSetArgs(args: []const []const u8, default_scope: options_mod.OptionScope) options_mod.OptionScope {
-    for (args) |arg| {
-        if (std.mem.eql(u8, arg, "-s")) return .server;
-        if (std.mem.eql(u8, arg, "-w")) return .window;
-        if (std.mem.eql(u8, arg, "-p")) return .pane;
-        if (std.mem.eql(u8, arg, "-g")) continue;
-        if (arg.len > 0 and arg[0] == '-') continue;
-        break;
-    }
-    return default_scope;
-}
-
-fn parseOptionValue(option_type: options_mod.OptionType, raw_value: []const u8) CmdError!options_mod.OptionValue {
-    return switch (option_type) {
-        .string => .{ .string = raw_value },
-        .number => .{ .number = std.fmt.parseInt(i64, raw_value, 10) catch return CmdError.InvalidArgs },
-        .boolean => .{ .boolean = parseBoolean(raw_value) orelse return CmdError.InvalidArgs },
-        .colour => .{ .colour = options_mod.Colour.parse(raw_value) orelse return CmdError.InvalidArgs },
-        .style => blk: {
-            const parsed = style_mod.parse(raw_value);
-            break :blk .{ .style = .{
-                .fg = parsed.fg,
-                .bg = parsed.bg,
-                .attrs = parsed.attrs,
-            } };
-        },
-    };
-}
-
-fn applySessionOption(server: *Server, option_name: []const u8, value: options_mod.OptionValue) void {
-    if (std.mem.eql(u8, option_name, "base-index")) {
-        switch (value) {
-            .number => |number| if (number >= 0) {
-                for (server.sessions.items) |session| session.options.base_index = @intCast(number);
-            },
-            else => {},
-        }
-        return;
+fn executeCommandText(ctx: *Context, text: []const u8) CmdError!void {
+    const registry = ctx.registry orelse return CmdError.CommandFailed;
+    var parser = config_parser.ConfigParser.init(ctx.allocator, text);
+    var commands = parser.parseAll() catch return CmdError.CommandFailed;
+    defer {
+        for (commands.items) |*command| command.deinit(ctx.allocator);
+        commands.deinit(ctx.allocator);
     }
 
-    if (std.mem.eql(u8, option_name, "status")) {
-        switch (value) {
-            .boolean => |enabled| for (server.sessions.items) |session| session.options.status = enabled,
-            else => {},
-        }
-        return;
+    for (commands.items) |*command| {
+        try registry.executeParsed(ctx, command);
     }
-
-    if (std.mem.eql(u8, option_name, "mouse")) {
-        switch (value) {
-            .boolean => |enabled| for (server.sessions.items) |session| session.options.mouse = enabled,
-            else => {},
-        }
-        return;
-    }
-
-    if (std.mem.eql(u8, option_name, "prefix")) {
-        switch (value) {
-            .string => |binding| if (key_string.stringToKey(binding)) |parsed| {
-                server.bindings.prefix_key = parsed.key;
-                server.bindings.prefix_mods = parsed.mods;
-                for (server.sessions.items) |session| session.options.prefix_key = parsed.key;
-            },
-            else => {},
-        }
-    }
-}
-
-fn runShellCommand(command: []const u8) CmdError!i32 {
-    var cmd_buf: [4096]u8 = .{0} ** 4096;
-    if (command.len >= cmd_buf.len) return CmdError.CommandFailed;
-    @memcpy(cmd_buf[0..command.len], command);
-    const command_z: [*:0]const u8 = @ptrCast(cmd_buf[0..command.len :0]);
-
-    const pid = std.c.fork();
-    if (pid < 0) return CmdError.CommandFailed;
-    if (pid == 0) {
-        const sh: [*:0]const u8 = "/bin/sh";
-        const c_flag: [*:0]const u8 = "-c";
-        const argv = [_:null]?[*:0]const u8{ sh, c_flag, command_z };
-        _ = execvp(sh, &argv);
-        std.c.exit(127);
-    }
-
-    var status: i32 = 0;
-    while (true) {
-        const waited = std.c.waitpid(pid, &status, 0);
-        if (waited == pid) break;
-        if (waited < 0) return CmdError.CommandFailed;
-    }
-    return @divTrunc(status, 256);
 }
 
 fn resolvePasteBuffer(ctx: *Context, name: ?[]const u8) CmdError!*paste_mod.PasteBuffer {
@@ -948,6 +942,35 @@ fn formatBindingKey(buf: []u8, key: u21, mods: binding_mod.Modifiers) []const u8
     return buf[0 .. pos + rendered.len];
 }
 
+fn writeKeyArgToPane(pane: *Pane, key_str: []const u8) void {
+    if (pane.fd < 0) return;
+
+    if (std.mem.eql(u8, key_str, "Enter")) {
+        _ = std.c.write(pane.fd, "\n", 1);
+    } else if (std.mem.eql(u8, key_str, "Escape")) {
+        _ = std.c.write(pane.fd, "\x1b", 1);
+    } else if (std.mem.eql(u8, key_str, "Tab")) {
+        _ = std.c.write(pane.fd, "\t", 1);
+    } else if (std.mem.eql(u8, key_str, "Space")) {
+        _ = std.c.write(pane.fd, " ", 1);
+    } else if (std.mem.eql(u8, key_str, "BSpace")) {
+        _ = std.c.write(pane.fd, "\x7f", 1);
+    } else if (key_str.len == 3 and key_str[0] == 'C' and key_str[1] == '-') {
+        const ch = key_str[2];
+        if (ch >= 'a' and ch <= 'z') {
+            const ctrl: [1]u8 = .{ch - 'a' + 1};
+            _ = std.c.write(pane.fd, &ctrl, 1);
+        } else if (ch >= 'A' and ch <= 'Z') {
+            const ctrl: [1]u8 = .{ch - 'A' + 1};
+            _ = std.c.write(pane.fd, &ctrl, 1);
+        } else {
+            _ = std.c.write(pane.fd, key_str.ptr, key_str.len);
+        }
+    } else {
+        _ = std.c.write(pane.fd, key_str.ptr, key_str.len);
+    }
+}
+
 // -- Command implementations --
 
 fn cmdNewSession(ctx: *Context, args: []const []const u8) CmdError!void {
@@ -1129,30 +1152,7 @@ fn cmdSendKeys(ctx: *Context, args: []const []const u8) CmdError!void {
         if (pane.copy_state != null and try handleCopyModeKey(ctx, pane, key_str)) {
             continue;
         }
-        if (std.mem.eql(u8, key_str, "Enter")) {
-            _ = std.c.write(pane.fd, "\n", 1);
-        } else if (std.mem.eql(u8, key_str, "Escape")) {
-            _ = std.c.write(pane.fd, "\x1b", 1);
-        } else if (std.mem.eql(u8, key_str, "Tab")) {
-            _ = std.c.write(pane.fd, "\t", 1);
-        } else if (std.mem.eql(u8, key_str, "Space")) {
-            _ = std.c.write(pane.fd, " ", 1);
-        } else if (std.mem.eql(u8, key_str, "BSpace")) {
-            _ = std.c.write(pane.fd, "\x7f", 1);
-        } else if (key_str.len == 3 and key_str[0] == 'C' and key_str[1] == '-') {
-            const ch = key_str[2];
-            if (ch >= 'a' and ch <= 'z') {
-                const ctrl: [1]u8 = .{ch - 'a' + 1};
-                _ = std.c.write(pane.fd, &ctrl, 1);
-            } else if (ch >= 'A' and ch <= 'Z') {
-                const ctrl: [1]u8 = .{ch - 'A' + 1};
-                _ = std.c.write(pane.fd, &ctrl, 1);
-            } else {
-                _ = std.c.write(pane.fd, key_str.ptr, key_str.len);
-            }
-        } else {
-            _ = std.c.write(pane.fd, key_str.ptr, key_str.len);
-        }
+        writeKeyArgToPane(pane, key_str);
     }
 }
 

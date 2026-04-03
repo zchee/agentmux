@@ -10,9 +10,6 @@ const protocol = @import("protocol.zig");
 const cmd = @import("cmd/cmd.zig");
 const config_parser = @import("config/parser.zig");
 const binding_mod = @import("keybind/bindings.zig");
-const key_string = @import("keybind/string.zig");
-const options_mod = @import("config/options.zig");
-const options_table_mod = @import("config/options_table.zig");
 const log = @import("core/log.zig");
 const signals = @import("signals.zig");
 
@@ -24,12 +21,21 @@ pub const Server = struct {
     clients: std.ArrayListAligned(ClientConnection, null),
     default_session: ?*Session,
     choose_tree_state: ?ChooseTreeState,
+    bindings: binding_mod.BindingManager,
     paste_stack: PasteStack,
     bindings: binding_mod.BindingManager,
     options: options_mod.OptionsStore,
     session_loop: SessionLoop,
+    options: Options,
     running: bool,
     allocator: std.mem.Allocator,
+
+    pub const Options = struct {
+        default_terminal: []u8,
+        history_limit: i64 = 2000,
+        escape_time: i64 = 500,
+        set_clipboard: []u8,
+    };
 
     pub const ClientConnection = struct {
         fd: std.c.fd_t,
@@ -39,17 +45,33 @@ pub const Server = struct {
     };
 
     pub fn init(alloc: std.mem.Allocator, socket_path: []const u8) !Server {
-        var server = Server{
+        var bindings = binding_mod.BindingManager.init(alloc);
+        errdefer bindings.deinit();
+        try bindings.setupDefaults();
+
+        const owned_socket_path = try alloc.dupe(u8, socket_path);
+        errdefer alloc.free(owned_socket_path);
+        const default_terminal = try alloc.dupe(u8, "screen");
+        errdefer alloc.free(default_terminal);
+        const set_clipboard = try alloc.dupe(u8, "external");
+        errdefer alloc.free(set_clipboard);
+
+        return .{
             .listen_fd = -1,
-            .socket_path = try alloc.dupe(u8, socket_path),
+            .socket_path = owned_socket_path,
             .sessions = .empty,
             .clients = .empty,
             .default_session = null,
             .choose_tree_state = null,
+            .bindings = bindings,
             .paste_stack = PasteStack.init(alloc),
             .bindings = binding_mod.BindingManager.init(alloc),
             .options = options_mod.OptionsStore.init(alloc),
             .session_loop = SessionLoop.init(alloc),
+            .options = .{
+                .default_terminal = default_terminal,
+                .set_clipboard = set_clipboard,
+            },
             .running = false,
             .allocator = alloc,
         };
@@ -82,11 +104,26 @@ pub const Server = struct {
         if (self.choose_tree_state) |*state| {
             state.deinit();
         }
+        self.bindings.deinit();
         self.paste_stack.deinit();
         self.bindings.deinit();
         self.options.deinit();
         self.session_loop.deinit();
+        self.allocator.free(self.options.default_terminal);
+        self.allocator.free(self.options.set_clipboard);
         self.allocator.free(self.socket_path);
+    }
+
+    pub fn setDefaultTerminal(self: *Server, value: []const u8) !void {
+        const owned = try self.allocator.dupe(u8, value);
+        self.allocator.free(self.options.default_terminal);
+        self.options.default_terminal = owned;
+    }
+
+    pub fn setSetClipboard(self: *Server, value: []const u8) !void {
+        const owned = try self.allocator.dupe(u8, value);
+        self.allocator.free(self.options.set_clipboard);
+        self.options.set_clipboard = owned;
     }
 
     pub fn listen(self: *Server) !void {
