@@ -1,0 +1,28 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "e364c6d807f5",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "src/cmd/cmd.zig",
+    "src/cmd/pane_commands_test.zig",
+    "src/cmd/tmux_equivalent_test.zig",
+    "src/session.zig"
+  ],
+  "sessions": [
+    {
+      "metadata": "/e3/64c6d807f5/0/metadata.json",
+      "transcript": "/e3/64c6d807f5/0/full.jsonl",
+      "content_hash": "/e3/64c6d807f5/0/content_hash.txt",
+      "prompt": "/e3/64c6d807f5/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 431,
+    "cache_creation_tokens": 718164,
+    "cache_read_tokens": 25762713,
+    "output_tokens": 39163,
+    "api_call_count": 144
+  }
+}
