@@ -2254,6 +2254,7 @@ test "if-shell executes the matching command branch" {
 }
 
 test "source-file applies tmux-style config commands" {
+    const io = std.Options.debug_io;
     var server = try Server.init(std.testing.allocator, "/tmp/agentmux-cmd-source.sock");
     defer server.deinit();
     var session = try Session.init(std.testing.allocator, "demo");
@@ -2273,7 +2274,7 @@ test "source-file applies tmux-style config commands" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(io, .{
         .sub_path = "agentmux.conf",
         .data =
         \\set -g base-index 5
@@ -2281,7 +2282,12 @@ test "source-file applies tmux-style config commands" {
         ,
     });
 
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "agentmux.conf");
+    const path = try std.fs.path.join(std.testing.allocator, &.{
+        ".zig-cache",
+        "tmp",
+        tmp.sub_path[0..],
+        "agentmux.conf",
+    });
     defer std.testing.allocator.free(path);
 
     const args = [_][]const u8{path};
