@@ -203,7 +203,7 @@ pub const ModeTree = struct {
     fn itemMatchesFilter(self: *const ModeTree, index: usize) bool {
         if (self.filter_len == 0) return true;
         const item = self.items.items[index];
-        return containsIgnoreCase(item.label, self.filter[0..self.filter_len]);
+        return fuzzyContainsIgnoreCase(item.label, self.filter[0..self.filter_len]);
     }
 
     fn hasMatchingAncestor(self: *const ModeTree, index: usize) bool {
@@ -351,23 +351,17 @@ pub const ModeTree = struct {
     }
 };
 
-fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+fn fuzzyContainsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     if (needle.len == 0) return true;
-    if (needle.len > haystack.len) return false;
 
-    var start: usize = 0;
-    while (start + needle.len <= haystack.len) : (start += 1) {
-        var matched = true;
-        var i: usize = 0;
-        while (i < needle.len) : (i += 1) {
-            if (std.ascii.toLower(haystack[start + i]) != std.ascii.toLower(needle[i])) {
-                matched = false;
-                break;
-            }
+    var needle_index: usize = 0;
+    for (haystack) |ch| {
+        if (std.ascii.toLower(ch) == std.ascii.toLower(needle[needle_index])) {
+            needle_index += 1;
+            if (needle_index == needle.len) return true;
         }
-        if (matched) return true;
     }
-    return false;
+    return needle_index == needle.len;
 }
 
 test "mode tree navigation" {
@@ -455,9 +449,9 @@ test "mode tree filter keeps matching descendants and ancestors visible" {
 
     const rendered = try tree.render(std.testing.allocator);
     defer std.testing.allocator.free(rendered);
-    try std.testing.expect(containsIgnoreCase(rendered, "session"));
-    try std.testing.expect(containsIgnoreCase(rendered, "window-beta"));
-    try std.testing.expect(!containsIgnoreCase(rendered, "window-alpha"));
+    try std.testing.expect(fuzzyContainsIgnoreCase(rendered, "session"));
+    try std.testing.expect(fuzzyContainsIgnoreCase(rendered, "window-beta"));
+    try std.testing.expect(!fuzzyContainsIgnoreCase(rendered, "window-alpha"));
 }
 
 test "mode tree filter backspace and escape" {
@@ -477,4 +471,22 @@ test "mode tree filter backspace and escape" {
     _ = tree.handleKey(0x1b);
     try std.testing.expect(tree.filter_len == 0);
     try std.testing.expect(!tree.filtering);
+}
+
+test "mode tree fuzzy filter matches subsequence" {
+    var tree = ModeTree.init(std.testing.allocator, 10);
+    defer tree.deinit();
+
+    try tree.addItem(.{ .label = "plancheck", .depth = 0, .expanded = true, .has_children = false, .tag = 0 });
+    try tree.addItem(.{ .label = "extra", .depth = 0, .expanded = true, .has_children = false, .tag = 1 });
+
+    _ = tree.handleKey('/');
+    _ = tree.handleKey('p');
+    _ = tree.handleKey('l');
+    _ = tree.handleKey('n');
+
+    const rendered = try tree.render(std.testing.allocator);
+    defer std.testing.allocator.free(rendered);
+    try std.testing.expect(fuzzyContainsIgnoreCase(rendered, "plancheck"));
+    try std.testing.expect(!fuzzyContainsIgnoreCase(rendered, "extra"));
 }
