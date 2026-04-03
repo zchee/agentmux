@@ -86,6 +86,29 @@ pub const PasteStack = struct {
         }
         self.buffers.clearRetainingCapacity();
     }
+
+    pub fn removeByName(self: *PasteStack, name: []const u8) bool {
+        var i = self.buffers.items.len;
+        while (i > 0) {
+            i -= 1;
+            const buf = self.buffers.items[i];
+            if (buf.name) |n| {
+                if (std.mem.eql(u8, n, name)) {
+                    const removed = self.buffers.orderedRemove(i);
+                    removed.deinit();
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    pub fn removeTop(self: *PasteStack) bool {
+        if (self.buffers.items.len == 0) return false;
+        const buf = self.buffers.pop() orelse return false;
+        buf.deinit();
+        return true;
+    }
 };
 
 test "paste buffer init and deinit" {
@@ -170,4 +193,26 @@ test "paste stack clear" {
 
     try std.testing.expectEqual(@as(usize, 0), stack.count());
     try std.testing.expect(stack.pop() == null);
+}
+
+test "paste stack remove by name" {
+    var stack = PasteStack.init(std.testing.allocator);
+    defer stack.deinit();
+
+    try stack.push("first", "a");
+    try stack.push("second", "b");
+    try std.testing.expect(stack.removeByName("a"));
+    try std.testing.expect(stack.getByName("a") == null);
+    try std.testing.expectEqual(@as(usize, 1), stack.count());
+}
+
+test "paste stack remove top" {
+    var stack = PasteStack.init(std.testing.allocator);
+    defer stack.deinit();
+
+    try stack.push("first", null);
+    try stack.push("second", null);
+    try std.testing.expect(stack.removeTop());
+    try std.testing.expectEqual(@as(usize, 1), stack.count());
+    try std.testing.expectEqualStrings("first", stack.get(0).?.data);
 }

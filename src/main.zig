@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 
 pub const core = struct {
     pub const allocator_mod = @import("core/allocator.zig");
@@ -93,17 +92,10 @@ const log = core.log;
 const version_string = "agentmux 0.1.0";
 const default_socket_name = "default";
 
-/// Write a string to stdout.
 fn writeStdout(s: []const u8) void {
     _ = std.c.write(1, s.ptr, s.len);
 }
 
-/// Write a string to stderr.
-fn writeStderr(s: []const u8) void {
-    _ = std.c.write(2, s.ptr, s.len);
-}
-
-/// Command-line flags.
 const Flags = struct {
     force_256: bool = false,
     control_mode: bool = false,
@@ -122,11 +114,14 @@ const Flags = struct {
     }
 };
 
+fn getenv(name: [:0]const u8) ?[]const u8 {
+    const value = std.c.getenv(name) orelse return null;
+    return std.mem.sliceTo(value, 0);
+}
+
 fn parseArgs(alloc: std.mem.Allocator, init_args: std.process.Args) Flags {
     var flags = Flags{ .remaining = .empty };
     var args = std.process.Args.Iterator.init(init_args);
-
-    // Skip argv[0]
     _ = args.next();
 
     while (args.next()) |arg| {
@@ -168,6 +163,107 @@ fn parseArgs(alloc: std.mem.Allocator, init_args: std.process.Args) Flags {
     return flags;
 }
 
+fn resolveSocketPath(alloc: std.mem.Allocator, flags: *const Flags) ![]u8 {
+    if (flags.socket_path) |path| {
+        return try alloc.dupe(u8, path);
+    }
+    if (getenv("AGENTMUX_SOCKET_PATH")) |path| {
+        return try alloc.dupe(u8, path);
+    }
+
+    const socket_dir = try platform.core.defaultSocketDir(alloc);
+    defer alloc.free(socket_dir);
+    const socket_name = if (flags.socket_name) |sn|
+        sn
+    else if (getenv("AGENTMUX_SOCKET_NAME")) |sn|
+        sn
+    else
+        default_socket_name;
+
+    return try std.fmt.allocPrint(alloc, "{s}/agentmux-{d}/{s}", .{
+        socket_dir,
+        std.c.getuid(),
+        socket_name,
+    });
+}
+
+fn determineTerminalName() []const u8 {
+    return getenv("TERM") orelse "xterm-256color";
+}
+
+fn runServer(alloc: std.mem.Allocator, socket_path: []const u8, daemonize_server: bool) !void {
+    if (daemonize_server) {
+        try signals.daemonize();
+    }
+    signals.SignalHandler.install();
+    var server = try server_mod.Server.init(alloc, socket_path);
+    defer server.deinit();
+    try server.listen();
+    try server.run();
+}
+
+fn waitForServer(alloc: std.mem.Allocator, socket_path: []const u8) !void {
+    var attempt: usize = 0;
+    while (attempt < 100) : (attempt += 1) {
+        var probe = client_mod.Client.init(alloc, socket_path);
+        if (probe.connect()) {
+            probe.disconnect();
+            return;
+        } else |_| {
+            var delay = std.c.timespec{
+                .sec = 0,
+                .nsec = 50 * std.time.ns_per_ms,
+            };
+            _ = std.c.nanosleep(&delay, null);
+        }
+    }
+    return error.ServerStartTimeout;
+}
+
+fn autostartServer(alloc: std.mem.Allocator, socket_path: []const u8) !void {
+    const pid = std.c.fork();
+    if (pid < 0) return error.ForkFailed;
+    if (pid == 0) {
+        detachStdio();
+        runServer(std.heap.c_allocator, socket_path, false) catch {};
+        std.c.exit(0);
+    }
+    try waitForServer(alloc, socket_path);
+}
+
+fn detachStdio() void {
+    _ = std.c.setsid();
+    _ = std.c.close(0);
+    _ = std.c.close(1);
+    _ = std.c.close(2);
+
+    const devnull: [*:0]const u8 = "/dev/null";
+    const fd = std.c.open(devnull, .{ .ACCMODE = .RDWR }, @as(std.c.mode_t, 0));
+    if (fd < 0) return;
+    _ = std.c.dup2(fd, 0);
+    _ = std.c.dup2(fd, 1);
+    _ = std.c.dup2(fd, 2);
+    if (fd > 2) _ = std.c.close(fd);
+}
+
+fn runCommandMode(alloc: std.mem.Allocator, flags: *const Flags, socket_path: []const u8) !void {
+    var client = client_mod.Client.init(alloc, socket_path);
+    client.connect() catch |err| switch (err) {
+        error.ConnectFailed => {
+            try autostartServer(alloc, socket_path);
+            try client.connect();
+        },
+        else => return err,
+    };
+    defer client.disconnect();
+
+    try client.identify(determineTerminalName(), 80, 24);
+    const result = try client.requestCommand(flags.remaining.items);
+    if (result.exit_code != 0) {
+        std.c.exit(result.exit_code);
+    }
+}
+
 pub fn main(init: std.process.Init.Minimal) !void {
     var agentmux_alloc = core.allocator_mod.AgentmuxAllocator.init();
     defer agentmux_alloc.deinit();
@@ -181,7 +277,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
 
-    // Initialize logging
     const log_level: log.Level = switch (flags.verbose) {
         0 => .info,
         else => .debug,
@@ -189,29 +284,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
     log.init(log_level, null, flags.verbose > 0);
     defer log.deinit();
 
-    log.info("agentmux starting (pid={d})", .{std.c.getpid()});
-
-    // Determine socket path
-    const socket_dir = try platform.core.defaultSocketDir(alloc);
-    defer alloc.free(socket_dir);
-
-    const socket_name: []const u8 = if (flags.socket_name) |sn| sn else default_socket_name;
-    const socket_path = if (flags.socket_path) |p|
-        try alloc.dupe(u8, p)
-    else
-        try std.fmt.allocPrint(alloc, "{s}/agentmux-{d}/{s}", .{
-            socket_dir,
-            std.c.getuid(),
-            socket_name,
-        });
+    const socket_path = try resolveSocketPath(alloc, &flags);
     defer alloc.free(socket_path);
 
-    log.info("socket path: {s}", .{socket_path});
+    if (flags.remaining.items.len == 0) {
+        try runServer(alloc, socket_path, !flags.no_daemon);
+        return;
+    }
 
-    // TODO: Dispatch to server or client based on command.
-    const msg = try std.fmt.allocPrint(alloc, "{s} - socket: {s}\n", .{ version_string, socket_path });
-    defer alloc.free(msg);
-    writeStdout(msg);
+    try runCommandMode(alloc, &flags, socket_path);
 }
 
 test {
@@ -260,4 +341,15 @@ test {
     _ = server_loop;
     _ = signals;
     _ = clipboard_mod;
+}
+
+test "protocol command args preserve argument boundaries" {
+    const alloc = std.testing.allocator;
+    const args = [_][:0]const u8{ "display-message", "hello world" };
+    const encoded = try protocol.encodeCommandArgs(alloc, &args);
+    defer alloc.free(encoded);
+    try std.testing.expectEqualStrings("display-message", encoded[0.."display-message".len]);
+    try std.testing.expectEqual(@as(u8, 0), encoded["display-message".len]);
+    try std.testing.expectEqualStrings("hello world", encoded["display-message".len + 1 .. encoded.len - 1]);
+    try std.testing.expectEqual(@as(u8, 0), encoded[encoded.len - 1]);
 }

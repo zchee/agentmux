@@ -2,6 +2,10 @@ const std = @import("std");
 const protocol = @import("protocol.zig");
 const log = @import("core/log.zig");
 
+pub const CommandResult = struct {
+    exit_code: u16,
+};
+
 /// Client that connects to an agentmux server.
 pub const Client = struct {
     fd: std.c.fd_t,
@@ -67,6 +71,46 @@ pub const Client = struct {
             log.err("failed to send command: {}", .{err});
             return err;
         };
+    }
+
+    pub fn sendCommandArgs(self: *Client, args: []const []const u8) !void {
+        const payload = try protocol.encodeCommandArgs(self.allocator, args);
+        defer self.allocator.free(payload);
+
+        protocol.sendMessage(self.fd, .command, payload) catch |err| {
+            log.err("failed to send command args: {}", .{err});
+            return err;
+        };
+    }
+
+    pub fn readCommandResult(self: *Client) !CommandResult {
+        while (true) {
+            var msg = try protocol.recvMessageAlloc(self.allocator, self.fd);
+            defer msg.deinit();
+
+            switch (msg.msg_type) {
+                .output => {
+                    if (msg.payload.len > 0) {
+                        _ = std.c.write(1, msg.payload.ptr, msg.payload.len);
+                    }
+                },
+                .error_msg => {
+                    if (msg.payload.len > 0) {
+                        _ = std.c.write(2, msg.payload.ptr, msg.payload.len);
+                    }
+                },
+                .exit_ack => {
+                    return .{ .exit_code = msg.flags };
+                },
+                .ready, .version => {},
+                else => {},
+            }
+        }
+    }
+
+    pub fn requestCommand(self: *Client, args: []const []const u8) !CommandResult {
+        try self.sendCommandArgs(args);
+        return self.readCommandResult();
     }
 
     /// Send a key event.

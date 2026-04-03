@@ -1,5 +1,6 @@
 const std = @import("std");
 const Window = @import("window.zig").Window;
+const Pane = @import("window.zig").Pane;
 const Environ = @import("core/environ.zig").Environ;
 
 /// An agentmux session. Contains windows and tracks attached clients.
@@ -77,6 +78,14 @@ pub const Session = struct {
             if (w.id == index) return w;
         }
         return null;
+    }
+
+    /// Find a window by its displayed number (base-index-adjusted position).
+    pub fn findWindowByNumber(self: *const Session, number: u32) ?*Window {
+        if (number < self.options.base_index) return null;
+        const offset = number - self.options.base_index;
+        if (offset >= self.windows.items.len) return null;
+        return self.windows.items[offset];
     }
 
     /// Get the number of windows.
@@ -168,3 +177,24 @@ pub const Session = struct {
         self.name = owned;
     }
 };
+
+test "findWindowByNumber uses base index" {
+    const alloc = std.testing.allocator;
+    var session = try Session.init(alloc, "demo");
+    defer session.deinit();
+    session.options.base_index = 1;
+
+    var w1 = try Window.init(alloc, "one", 80, 24);
+    var w2 = try Window.init(alloc, "two", 80, 24);
+
+    const p1 = try Pane.init(alloc, 80, 24);
+    const p2 = try Pane.init(alloc, 80, 24);
+    try w1.addPane(p1);
+    try w2.addPane(p2);
+    try session.addWindow(w1);
+    try session.addWindow(w2);
+
+    try std.testing.expect(session.findWindowByNumber(0) == null);
+    try std.testing.expect(session.findWindowByNumber(1) == w1);
+    try std.testing.expect(session.findWindowByNumber(2) == w2);
+}

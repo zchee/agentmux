@@ -35,22 +35,33 @@ pub const Header = extern struct {
     flags: u16 align(1),
 };
 
+pub const Message = struct {
+    msg_type: MessageType,
+    flags: u16,
+    payload: []u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *Message) void {
+        self.allocator.free(self.payload);
+        self.* = undefined;
+    }
+};
+
 comptime {
-    // Ensure header is a fixed size for wire protocol
     std.debug.assert(@sizeOf(Header) == 8);
 }
 
 /// Identification message sent by client on connect.
-pub const IdentifyMsg = struct {
-    protocol_version: u32,
-    pid: i32,
-    flags: IdentifyFlags,
-    term_name: [64]u8,
-    tty_name: [64]u8,
-    cols: u16,
-    rows: u16,
-    xpixel: u16,
-    ypixel: u16,
+pub const IdentifyMsg = extern struct {
+    protocol_version: u32 align(1),
+    pid: i32 align(1),
+    flags: IdentifyFlags align(1),
+    term_name: [64]u8 align(1),
+    tty_name: [64]u8 align(1),
+    cols: u16 align(1),
+    rows: u16 align(1),
+    xpixel: u16 align(1),
+    ypixel: u16 align(1),
 };
 
 pub const IdentifyFlags = packed struct(u32) {
@@ -60,7 +71,6 @@ pub const IdentifyFlags = packed struct(u32) {
     _padding: u29 = 0,
 };
 
-/// Resize message.
 pub const ResizeMsg = extern struct {
     cols: u16 align(1),
     rows: u16 align(1),
@@ -68,7 +78,6 @@ pub const ResizeMsg = extern struct {
     ypixel: u16 align(1),
 };
 
-/// Key input message.
 pub const KeyMsg = extern struct {
     key: u64 align(1),
     mouse_x: u16 align(1),
@@ -77,7 +86,6 @@ pub const KeyMsg = extern struct {
     mouse_flags: u8 align(1),
 };
 
-/// Serialize a header to bytes.
 pub fn serializeHeader(header: Header) [8]u8 {
     var buf: [8]u8 = undefined;
     std.mem.writeInt(u16, buf[0..2], header.msg_type, .little);
@@ -86,7 +94,6 @@ pub fn serializeHeader(header: Header) [8]u8 {
     return buf;
 }
 
-/// Deserialize a header from bytes.
 pub fn deserializeHeader(buf: *const [8]u8) Header {
     return .{
         .msg_type = std.mem.readInt(u16, buf[0..2], .little),
@@ -95,39 +102,170 @@ pub fn deserializeHeader(buf: *const [8]u8) Header {
     };
 }
 
-/// Send a message by writing header + payload to a file descriptor.
+pub fn messageTypeFromInt(raw: u16) !MessageType {
+    return switch (raw) {
+        @intFromEnum(MessageType.identify) => .identify,
+        @intFromEnum(MessageType.command) => .command,
+        @intFromEnum(MessageType.resize) => .resize,
+        @intFromEnum(MessageType.key) => .key,
+        @intFromEnum(MessageType.shell) => .shell,
+        @intFromEnum(MessageType.exit) => .exit,
+        @intFromEnum(MessageType.exiting) => .exiting,
+        @intFromEnum(MessageType.version) => .version,
+        @intFromEnum(MessageType.ready) => .ready,
+        @intFromEnum(MessageType.output) => .output,
+        @intFromEnum(MessageType.pause) => .pause,
+        @intFromEnum(MessageType.detach) => .detach,
+        @intFromEnum(MessageType.shutdown) => .shutdown,
+        @intFromEnum(MessageType.error_msg) => .error_msg,
+        @intFromEnum(MessageType.exit_ack) => .exit_ack,
+        else => error.InvalidMessageType,
+    };
+}
+
+pub fn writeAll(fd: std.posix.fd_t, bytes: []const u8) !void {
+    var written: usize = 0;
+    while (written < bytes.len) {
+        const rc = std.c.write(fd, bytes[written..].ptr, bytes.len - written);
+        if (rc < 0) switch (std.posix.errno(rc)) {
+            .INTR, .AGAIN => continue,
+            else => return error.WriteFailed,
+        };
+        if (rc == 0) return error.WriteFailed;
+        written += @intCast(rc);
+    }
+}
+
+pub fn readExact(fd: std.posix.fd_t, buf: []u8) !void {
+    var read_total: usize = 0;
+    while (read_total < buf.len) {
+        const rc = std.c.read(fd, buf[read_total..].ptr, buf.len - read_total);
+        if (rc < 0) switch (std.posix.errno(rc)) {
+            .INTR, .AGAIN => continue,
+            else => return error.ReadFailed,
+        };
+        if (rc == 0) return error.UnexpectedEof;
+        read_total += @intCast(rc);
+    }
+}
+
 pub fn sendMessage(fd: std.posix.fd_t, msg_type: MessageType, payload: []const u8) !void {
+    return sendMessageWithFlags(fd, msg_type, 0, payload);
+}
+
+pub fn sendMessageWithFlags(fd: std.posix.fd_t, msg_type: MessageType, flags: u16, payload: []const u8) !void {
     if (payload.len > max_payload) return error.PayloadTooLarge;
 
     const header_bytes = serializeHeader(.{
         .msg_type = @intFromEnum(msg_type),
         .payload_len = @intCast(payload.len),
-        .flags = 0,
+        .flags = flags,
     });
-
-    // Write header then payload via libc
-    _ = std.c.write(fd, &header_bytes, header_bytes.len);
+    try writeAll(fd, &header_bytes);
     if (payload.len > 0) {
-        _ = std.c.write(fd, payload.ptr, payload.len);
+        try writeAll(fd, payload);
     }
 }
 
-/// Receive a message header from a file descriptor.
 pub fn recvHeader(fd: std.posix.fd_t) !Header {
     var buf: [8]u8 = undefined;
-    const n = std.c.read(fd, &buf, buf.len);
-    if (n != 8) return error.IncompleteHeader;
+    try readExact(fd, &buf);
     return deserializeHeader(&buf);
+}
+
+pub fn recvMessageAlloc(alloc: std.mem.Allocator, fd: std.posix.fd_t) !Message {
+    const header = try recvHeader(fd);
+    const msg_type = try messageTypeFromInt(header.msg_type);
+    if (header.payload_len > max_payload) return error.PayloadTooLarge;
+
+    const payload = try alloc.alloc(u8, header.payload_len);
+    errdefer alloc.free(payload);
+    if (payload.len > 0) {
+        try readExact(fd, payload);
+    }
+
+    return .{
+        .msg_type = msg_type,
+        .flags = header.flags,
+        .payload = payload,
+        .allocator = alloc,
+    };
+}
+
+pub fn encodeCommandArgs(alloc: std.mem.Allocator, args: []const []const u8) ![]u8 {
+    var total: usize = 0;
+    for (args) |arg| total += arg.len + 1;
+    if (total > max_payload) return error.PayloadTooLarge;
+
+    const payload = try alloc.alloc(u8, total);
+    var offset: usize = 0;
+    for (args) |arg| {
+        @memcpy(payload[offset .. offset + arg.len], arg);
+        offset += arg.len;
+        payload[offset] = 0;
+        offset += 1;
+    }
+    return payload;
+}
+
+pub fn decodeCommandArgs(alloc: std.mem.Allocator, payload: []const u8) !std.ArrayListAligned([]const u8, null) {
+    var args: std.ArrayListAligned([]const u8, null) = .empty;
+    errdefer args.deinit(alloc);
+
+    if (payload.len == 0) return args;
+
+    var start: usize = 0;
+    for (payload, 0..) |byte, i| {
+        if (byte != 0) continue;
+        try args.append(alloc, payload[start..i]);
+        start = i + 1;
+    }
+
+    if (start < payload.len) {
+        try args.append(alloc, payload[start..]);
+    }
+
+    return args;
 }
 
 test "header roundtrip" {
     const h = Header{
         .msg_type = @intFromEnum(MessageType.identify),
         .payload_len = 1234,
-        .flags = 0,
+        .flags = 7,
     };
     const bytes = serializeHeader(h);
     const h2 = deserializeHeader(&bytes);
     try std.testing.expectEqual(h.msg_type, h2.msg_type);
     try std.testing.expectEqual(h.payload_len, h2.payload_len);
+    try std.testing.expectEqual(h.flags, h2.flags);
+}
+
+test "message roundtrip through pipe" {
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    try sendMessageWithFlags(fds[1], .output, 3, "hello");
+    var msg = try recvMessageAlloc(std.testing.allocator, fds[0]);
+    defer msg.deinit();
+
+    try std.testing.expectEqual(MessageType.output, msg.msg_type);
+    try std.testing.expectEqual(@as(u16, 3), msg.flags);
+    try std.testing.expectEqualStrings("hello", msg.payload);
+}
+
+test "command arg payload roundtrip" {
+    const input = [_][]const u8{ "new-session", "-s", "demo session" };
+    const payload = try encodeCommandArgs(std.testing.allocator, &input);
+    defer std.testing.allocator.free(payload);
+
+    var decoded = try decodeCommandArgs(std.testing.allocator, payload);
+    defer decoded.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, input.len), decoded.items.len);
+    for (input, decoded.items) |expected, actual| {
+        try std.testing.expectEqualStrings(expected, actual);
+    }
 }

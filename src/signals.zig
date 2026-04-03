@@ -12,7 +12,7 @@ pub const SignalHandler = struct {
     // C signal handler declarations
     const sigaction_fn = struct {
         const Sigaction = extern struct {
-            handler: ?*const fn (i32) callconv(.C) void,
+            handler: ?*const fn (i32) callconv(.c) void,
             mask: [4]u32 = .{ 0, 0, 0, 0 },
             flags: i32 = 0,
         };
@@ -25,24 +25,23 @@ pub const SignalHandler = struct {
     const SIGHUP: i32 = 1;
     const SIGUSR1: i32 = if (builtin.os.tag == .linux) 10 else 30;
     const SIGPIPE: i32 = 13;
-    const SIG_IGN: ?*const fn (i32) callconv(.C) void = @ptrFromInt(1);
 
     // Global state for C signal handlers (must be global since C callbacks have no context)
     var global: SignalHandler = .{};
 
-    fn handleWinch(_: i32) callconv(.C) void {
+    fn handleWinch(_: i32) callconv(.c) void {
         global.winch_received = true;
     }
 
-    fn handleTerm(_: i32) callconv(.C) void {
+    fn handleTerm(_: i32) callconv(.c) void {
         global.term_received = true;
     }
 
-    fn handleHup(_: i32) callconv(.C) void {
+    fn handleHup(_: i32) callconv(.c) void {
         global.hup_received = true;
     }
 
-    fn handleUsr1(_: i32) callconv(.C) void {
+    fn handleUsr1(_: i32) callconv(.c) void {
         global.usr1_received = true;
     }
 
@@ -52,13 +51,11 @@ pub const SignalHandler = struct {
         const term_act = sigaction_fn.Sigaction{ .handler = handleTerm };
         const hup_act = sigaction_fn.Sigaction{ .handler = handleHup };
         const usr1_act = sigaction_fn.Sigaction{ .handler = handleUsr1 };
-        const ignore_act = sigaction_fn.Sigaction{ .handler = SIG_IGN };
-
         _ = sigaction_fn.sigaction(SIGWINCH, &winch_act, null);
         _ = sigaction_fn.sigaction(SIGTERM, &term_act, null);
         _ = sigaction_fn.sigaction(SIGHUP, &hup_act, null);
         _ = sigaction_fn.sigaction(SIGUSR1, &usr1_act, null);
-        _ = sigaction_fn.sigaction(SIGPIPE, &ignore_act, null); // Ignore SIGPIPE
+        _ = sigaction_fn.sigaction(SIGPIPE, null, null);
     }
 
     /// Check and clear SIGWINCH.

@@ -1,7 +1,20 @@
 const std = @import("std");
+const protocol = @import("../protocol.zig");
+const config_parser = @import("../config/parser.zig");
+const binding_mod = @import("../keybind/bindings.zig");
+const key_string = @import("../keybind/string.zig");
+const paste_mod = @import("../copy/paste.zig");
+const copy_mod = @import("../copy/copy.zig");
+const tree_mod = @import("../mode/tree.zig");
+const screen_mod = @import("../screen/screen.zig");
+const Pty = @import("../pane.zig").Pty;
 const Session = @import("../session.zig").Session;
 const Window = @import("../window.zig").Window;
 const Pane = @import("../window.zig").Pane;
+const PromptState = @import("../window.zig").PromptState;
+const ChooseTreeState = @import("../window.zig").ChooseTreeState;
+const ChooseTreeItem = @import("../window.zig").ChooseTreeItem;
+const CellType = @import("../layout/layout.zig").CellType;
 const Server = @import("../server.zig").Server;
 
 /// Command execution context.
@@ -10,7 +23,10 @@ pub const Context = struct {
     session: ?*Session,
     window: ?*Window,
     pane: ?*Pane,
+    client_index: ?usize = null,
     allocator: std.mem.Allocator,
+    reply_fd: ?std.c.fd_t = null,
+    registry: ?*const Registry = null,
 };
 
 /// Command handler function type.
@@ -21,6 +37,7 @@ pub const CmdError = error{
     SessionNotFound,
     WindowNotFound,
     PaneNotFound,
+    BufferNotFound,
     CommandFailed,
     OutOfMemory,
 };
@@ -65,6 +82,10 @@ pub const Registry = struct {
             return CmdError.InvalidArgs;
         }
         return def.handler(ctx, args);
+    }
+
+    pub fn executeParsed(self: *const Registry, ctx: *Context, command: *const config_parser.Command) CmdError!void {
+        return self.execute(ctx, command.name, command.args.items);
     }
 
     /// Register all built-in commands.
@@ -114,7 +135,7 @@ pub const Registry = struct {
             .alias = null,
             .min_args = 0,
             .max_args = 4,
-            .usage = "select-pane [-U|-D|-L|-R]",
+            .usage = "select-pane [-U|-D|-L|-R] [-t target-pane]",
             .handler = cmdSelectPane,
         });
         try self.register(.{
@@ -254,6 +275,86 @@ pub const Registry = struct {
             .handler = cmdListPanes,
         });
         try self.register(.{
+            .name = "set-buffer",
+            .alias = "setb",
+            .min_args = 1,
+            .max_args = 3,
+            .usage = "set-buffer [-b name] data",
+            .handler = cmdSetBuffer,
+        });
+        try self.register(.{
+            .name = "paste-buffer",
+            .alias = "pasteb",
+            .min_args = 0,
+            .max_args = 2,
+            .usage = "paste-buffer [-b name]",
+            .handler = cmdPasteBuffer,
+        });
+        try self.register(.{
+            .name = "copy-mode",
+            .alias = "copy",
+            .min_args = 0,
+            .max_args = 1,
+            .usage = "copy-mode",
+            .handler = cmdCopyMode,
+        });
+        try self.register(.{
+            .name = "command-prompt",
+            .alias = "prompt",
+            .min_args = 0,
+            .max_args = 8,
+            .usage = "command-prompt [initial-command]",
+            .handler = cmdCommandPrompt,
+        });
+        try self.register(.{
+            .name = "list-buffers",
+            .alias = "lsb",
+            .min_args = 0,
+            .max_args = 0,
+            .usage = "list-buffers",
+            .handler = cmdListBuffers,
+        });
+        try self.register(.{
+            .name = "show-buffer",
+            .alias = "showb",
+            .min_args = 0,
+            .max_args = 2,
+            .usage = "show-buffer [-b name]",
+            .handler = cmdShowBuffer,
+        });
+        try self.register(.{
+            .name = "delete-buffer",
+            .alias = "deleteb",
+            .min_args = 0,
+            .max_args = 2,
+            .usage = "delete-buffer [-b name]",
+            .handler = cmdDeleteBuffer,
+        });
+        try self.register(.{
+            .name = "list-keys",
+            .alias = "lsk",
+            .min_args = 0,
+            .max_args = 0,
+            .usage = "list-keys",
+            .handler = cmdListKeys,
+        });
+        try self.register(.{
+            .name = "choose-tree",
+            .alias = null,
+            .min_args = 0,
+            .max_args = 2,
+            .usage = "choose-tree [-s|-w]",
+            .handler = cmdChooseTree,
+        });
+        try self.register(.{
+            .name = "clock-mode",
+            .alias = "clock",
+            .min_args = 0,
+            .max_args = 0,
+            .usage = "clock-mode",
+            .handler = cmdClockMode,
+        });
+        try self.register(.{
             .name = "run-shell",
             .alias = "run",
             .min_args = 1,
@@ -263,6 +364,418 @@ pub const Registry = struct {
         });
     }
 };
+
+fn writeReplyMessage(ctx: *Context, msg_type: protocol.MessageType, message: []const u8) CmdError!void {
+    if (ctx.reply_fd) |fd| {
+        protocol.sendMessage(fd, msg_type, message) catch return CmdError.CommandFailed;
+        return;
+    }
+
+    const target_fd: std.c.fd_t = switch (msg_type) {
+        .error_msg => 2,
+        else => 1,
+    };
+    _ = std.c.write(target_fd, message.ptr, message.len);
+}
+
+fn writeOutput(ctx: *Context, comptime fmt: []const u8, args: anytype) CmdError!void {
+    var buf: [1024]u8 = undefined;
+    const message = std.fmt.bufPrint(&buf, fmt, args) catch return CmdError.CommandFailed;
+    try writeReplyMessage(ctx, .output, message);
+}
+
+fn spawnWindowPane(alloc: std.mem.Allocator, shell: [:0]const u8, sx: u32, sy: u32) CmdError!*Pane {
+    const pane = Pane.init(alloc, sx, sy) catch return CmdError.OutOfMemory;
+    errdefer pane.deinit();
+
+    var pty = Pty.openPty() catch return CmdError.CommandFailed;
+    pty.forkExec(shell, null) catch return CmdError.CommandFailed;
+    pty.resize(@intCast(sx), @intCast(sy));
+    pane.fd = pty.master_fd;
+    pane.pid = pty.pid;
+    return pane;
+}
+
+fn parseTargetWindow(args: []const []const u8) ?u32 {
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (!std.mem.eql(u8, args[i], "-t") or i + 1 >= args.len) continue;
+        i += 1;
+        const target = args[i];
+        if (target.len >= 2 and target[0] == ':') {
+            return std.fmt.parseInt(u32, target[1..], 10) catch null;
+        }
+        return std.fmt.parseInt(u32, target, 10) catch null;
+    }
+    return null;
+}
+
+fn defaultShell(_: ?*Session) [:0]const u8 {
+    return "/bin/sh";
+}
+
+const ClockTm = extern struct {
+    tm_sec: i32,
+    tm_min: i32,
+    tm_hour: i32,
+    tm_mday: i32,
+    tm_mon: i32,
+    tm_year: i32,
+    tm_wday: i32,
+    tm_yday: i32,
+    tm_isdst: i32,
+};
+
+extern "c" fn time(timer: ?*i64) i64;
+extern "c" fn localtime(timer: *const i64) ?*ClockTm;
+
+fn parseNamedOption(args: []const []const u8, flag: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], flag) and i + 1 < args.len) {
+            return args[i + 1];
+        }
+    }
+    return null;
+}
+
+fn resolvePasteBuffer(ctx: *Context, name: ?[]const u8) CmdError!*paste_mod.PasteBuffer {
+    if (name) |buffer_name| {
+        return ctx.server.paste_stack.getByName(buffer_name) orelse CmdError.BufferNotFound;
+    }
+    return ctx.server.paste_stack.get(0) orelse CmdError.BufferNotFound;
+}
+
+fn extractGridLineSlice(alloc: std.mem.Allocator, pane_state: anytype, absolute_y: u32, start_x: u32, end_x: u32) ![]u8 {
+    const grid = &pane_state.screen.grid;
+    const total_lines = grid.hsize + grid.rows;
+    if (absolute_y >= total_lines) return try alloc.dupe(u8, "");
+
+    const line = if (absolute_y < grid.hsize)
+        grid.getHistoryLine(absolute_y)
+    else
+        grid.getLine(absolute_y - grid.hsize);
+
+    const max_x = @min(end_x, grid.cols -| 1);
+    if (start_x > max_x) return try alloc.dupe(u8, "");
+
+    var buf: std.ArrayListAligned(u8, null) = .empty;
+    defer buf.deinit(alloc);
+    var x = start_x;
+    while (x <= max_x) : (x += 1) {
+        const cell = line.getCell(x);
+        const ch: u8 = if (cell.codepoint == 0)
+            ' '
+        else if (cell.codepoint < 0x80)
+            @truncate(cell.codepoint)
+        else
+            '?';
+        try buf.append(alloc, ch);
+    }
+
+    while (buf.items.len > 0 and buf.items[buf.items.len - 1] == ' ') {
+        _ = buf.pop();
+    }
+    return try buf.toOwnedSlice(alloc);
+}
+
+fn extractCopySelection(alloc: std.mem.Allocator, pane_state: anytype, state: *const copy_mod.CopyState) ![]u8 {
+    const grid = &pane_state.screen.grid;
+    const total_lines = grid.hsize + grid.rows;
+    if (total_lines == 0) return try alloc.dupe(u8, "");
+
+    const start_y = @min(state.sel_start_y, state.cy);
+    const end_y = @min(@max(state.sel_start_y, state.cy), total_lines - 1);
+    const start_x = @min(state.sel_start_x, state.cx);
+    const end_x = @max(state.sel_start_x, state.cx);
+
+    var out: std.ArrayListAligned(u8, null) = .empty;
+    errdefer out.deinit(alloc);
+
+    var y = start_y;
+    while (y <= end_y) : (y += 1) {
+        const line_text = if (state.mode == .visual_line)
+            try extractGridLineSlice(alloc, pane_state, y, 0, grid.cols -| 1)
+        else if (start_y == end_y)
+            try extractGridLineSlice(alloc, pane_state, y, start_x, end_x)
+        else if (y == start_y)
+            try extractGridLineSlice(alloc, pane_state, y, start_x, grid.cols -| 1)
+        else if (y == end_y)
+            try extractGridLineSlice(alloc, pane_state, y, 0, end_x)
+        else
+            try extractGridLineSlice(alloc, pane_state, y, 0, grid.cols -| 1);
+        defer alloc.free(line_text);
+
+        try out.appendSlice(alloc, line_text);
+        if (y != end_y) try out.append(alloc, '\n');
+    }
+
+    return try out.toOwnedSlice(alloc);
+}
+
+fn handleCopyModeAction(ctx: *Context, pane: *Pane, pane_state: anytype, action: copy_mod.CopyAction) CmdError!void {
+    switch (action) {
+        .move_cursor, .start_selection, .search_next, .search_prev => {},
+        .scroll_up => if (pane.copy_state) |*state| {
+            if (state.cy > 0) state.cy -= 1;
+        },
+        .scroll_down => if (pane.copy_state) |*state| {
+            const max_y = pane_state.screen.grid.hsize + pane_state.screen.grid.rows -| 1;
+            state.cy = @min(max_y, state.cy + 1);
+        },
+        .page_up => if (pane.copy_state) |*state| {
+            const step = pane_state.screen.grid.rows;
+            state.cy = state.cy -| step;
+        },
+        .page_down => if (pane.copy_state) |*state| {
+            const step = pane_state.screen.grid.rows;
+            const max_y = pane_state.screen.grid.hsize + pane_state.screen.grid.rows -| 1;
+            state.cy = @min(max_y, state.cy + step);
+        },
+        .cancel => pane.copy_state = null,
+        .copy_selection => {
+            const state = pane.copy_state orelse return;
+            const text = extractCopySelection(ctx.allocator, pane_state, &state) catch return CmdError.CommandFailed;
+            defer ctx.allocator.free(text);
+            ctx.server.paste_stack.push(text, null) catch return CmdError.OutOfMemory;
+            pane.copy_state = null;
+        },
+    }
+}
+
+fn handleCopyModeKey(ctx: *Context, pane: *Pane, key_arg: []const u8) CmdError!bool {
+    const pane_state = ctx.server.session_loop.getPane(pane.id) orelse return false;
+    var handled = false;
+
+    if (key_string.stringToKey(key_arg)) |result| {
+        if (pane.copy_state) |*state| {
+            const mods: copy_mod.Modifiers = .{
+                .ctrl = result.mods.ctrl,
+                .meta = result.mods.meta,
+                .shift = result.mods.shift,
+            };
+            if (state.handleKey(result.key, mods)) |action| {
+                try handleCopyModeAction(ctx, pane, pane_state, action);
+            }
+            handled = true;
+        }
+    } else if (pane.copy_state) |*state| {
+        for (key_arg) |byte| {
+            if (state.handleKey(byte, .{})) |action| {
+                try handleCopyModeAction(ctx, pane, pane_state, action);
+            }
+        }
+        handled = true;
+    }
+
+    return handled;
+}
+
+fn appendPromptBytes(state: *PromptState, bytes: []const u8) void {
+    const remaining = state.buffer.len - state.len;
+    const copy_len = @min(remaining, bytes.len);
+    if (copy_len == 0) return;
+    @memcpy(state.buffer[state.len .. state.len + copy_len], bytes[0..copy_len]);
+    state.len += copy_len;
+}
+
+fn executePromptBuffer(ctx: *Context, pane: *Pane) CmdError!void {
+    const prompt_state = pane.prompt_state orelse return;
+    const registry = ctx.registry orelse return CmdError.CommandFailed;
+    const command_text = prompt_state.buffer[0..prompt_state.len];
+
+    pane.prompt_state = null;
+    if (command_text.len == 0) return;
+
+    var parser = config_parser.ConfigParser.init(ctx.allocator, command_text);
+    var commands = parser.parseAll() catch return CmdError.CommandFailed;
+    defer {
+        for (commands.items) |*command| command.deinit(ctx.allocator);
+        commands.deinit(ctx.allocator);
+    }
+    if (commands.items.len == 0) return CmdError.InvalidArgs;
+
+    for (commands.items) |*command| {
+        try registry.executeParsed(ctx, command);
+    }
+}
+
+fn handlePromptKey(ctx: *Context, pane: *Pane, key_arg: []const u8) CmdError!bool {
+    var prompt_state = &(pane.prompt_state orelse return false);
+
+    if (std.mem.eql(u8, key_arg, "Enter")) {
+        try executePromptBuffer(ctx, pane);
+        return true;
+    }
+    if (std.mem.eql(u8, key_arg, "Escape")) {
+        pane.prompt_state = null;
+        return true;
+    }
+    if (std.mem.eql(u8, key_arg, "BSpace")) {
+        if (prompt_state.len > 0) prompt_state.len -= 1;
+        return true;
+    }
+    if (std.mem.eql(u8, key_arg, "Space")) {
+        appendPromptBytes(prompt_state, " ");
+        return true;
+    }
+    if (std.mem.eql(u8, key_arg, "Tab")) {
+        appendPromptBytes(prompt_state, "\t");
+        return true;
+    }
+
+    appendPromptBytes(prompt_state, key_arg);
+    return true;
+}
+
+fn addChooseTreeEntry(state: *ChooseTreeState, label: []const u8, depth: u8, session: *Session, window: ?*Window) CmdError!void {
+    const owned_label = state.allocator.dupe(u8, label) catch return CmdError.OutOfMemory;
+    errdefer state.allocator.free(owned_label);
+    state.labels.append(state.allocator, owned_label) catch return CmdError.OutOfMemory;
+    state.tree.addItem(.{
+        .label = owned_label,
+        .depth = depth,
+        .expanded = true,
+        .has_children = false,
+        .tag = @intCast(state.items.items.len),
+    }) catch return CmdError.OutOfMemory;
+    state.items.append(state.allocator, .{
+        .session = @ptrCast(session),
+        .window = if (window) |w| @ptrCast(w) else null,
+    }) catch return CmdError.OutOfMemory;
+}
+
+fn currentChooseTreeState(ctx: *Context, pane: ?*Pane) ?*ChooseTreeState {
+    if (ctx.server.choose_tree_state) |*state| return state;
+    if (ctx.client_index) |client_index| {
+        if (client_index < ctx.server.clients.items.len) {
+            if (ctx.server.clients.items[client_index].choose_tree_state) |*state| return state;
+        }
+    }
+    if (pane) |p| {
+        if (p.choose_tree_state) |*state| return state;
+    }
+    return null;
+}
+
+fn clearChooseTreeState(ctx: *Context, pane: ?*Pane) void {
+    if (ctx.server.choose_tree_state) |*state| {
+        state.deinit();
+        ctx.server.choose_tree_state = null;
+    }
+    if (ctx.client_index) |client_index| {
+        if (client_index < ctx.server.clients.items.len) {
+            if (ctx.server.clients.items[client_index].choose_tree_state) |*state| {
+                state.deinit();
+            }
+            ctx.server.clients.items[client_index].choose_tree_state = null;
+        }
+    }
+    if (pane) |p| {
+        if (p.choose_tree_state) |*state| {
+            state.deinit();
+        }
+        p.choose_tree_state = null;
+    }
+}
+
+fn renderChooseTree(ctx: *Context, pane: ?*Pane) CmdError!void {
+    const state = currentChooseTreeState(ctx, pane) orelse return CmdError.CommandFailed;
+    const rendered = state.tree.render(ctx.allocator) catch return CmdError.OutOfMemory;
+    defer ctx.allocator.free(rendered);
+    try writeOutput(ctx, "{s}", .{rendered});
+}
+
+fn handleChooseTreeSelect(ctx: *Context, pane: ?*Pane, item_index: usize) CmdError!void {
+    const state = currentChooseTreeState(ctx, pane) orelse return CmdError.CommandFailed;
+    if (item_index >= state.items.items.len) return CmdError.InvalidArgs;
+    const item = state.items.items[item_index];
+    const session: *Session = @ptrCast(@alignCast(item.session orelse return CmdError.SessionNotFound));
+    ctx.session = session;
+    ctx.server.default_session = session;
+    if (item.window) |window_ptr| {
+        const window: *Window = @ptrCast(@alignCast(window_ptr));
+        session.selectWindow(window);
+        ctx.window = window;
+        ctx.pane = window.active_pane;
+    } else {
+        ctx.window = session.active_window;
+        ctx.pane = if (ctx.window) |window| window.active_pane else null;
+    }
+    clearChooseTreeState(ctx, pane);
+}
+
+fn handleChooseTreeKey(ctx: *Context, pane: ?*Pane, key_arg: []const u8) CmdError!bool {
+    if (currentChooseTreeState(ctx, pane) == null) return false;
+
+    const key: u21 = if (key_string.stringToKey(key_arg)) |result|
+        result.key
+    else if (key_arg.len == 1)
+        key_arg[0]
+    else
+        return false;
+
+    var state = currentChooseTreeState(ctx, pane) orelse return false;
+    switch (state.tree.handleKey(key)) {
+        .none => {
+            try renderChooseTree(ctx, pane);
+            return true;
+        },
+        .cancel => {
+            clearChooseTreeState(ctx, pane);
+            return true;
+        },
+        .select, .toggle_expand => {
+            const selected = state.tree.selected;
+            try handleChooseTreeSelect(ctx, pane, selected);
+            return true;
+        },
+    }
+}
+
+fn formatBindingKey(buf: []u8, key: u21, mods: binding_mod.Modifiers) []const u8 {
+    var pos: usize = 0;
+    if (mods.ctrl) {
+        @memcpy(buf[pos .. pos + 2], "C-");
+        pos += 2;
+    }
+    if (mods.meta) {
+        @memcpy(buf[pos .. pos + 2], "M-");
+        pos += 2;
+    }
+    if (mods.shift) {
+        @memcpy(buf[pos .. pos + 2], "S-");
+        pos += 2;
+    }
+
+    const special: ?[]const u8 = switch (key) {
+        '\r' => "Enter",
+        0x1b => "Escape",
+        ' ' => "Space",
+        '\t' => "Tab",
+        0x7f => "BSpace",
+        0x100 => "Up",
+        0x101 => "Down",
+        0x102 => "Left",
+        0x103 => "Right",
+        else => null,
+    };
+
+    if (special) |name| {
+        @memcpy(buf[pos .. pos + name.len], name);
+        pos += name.len;
+        return buf[0..pos];
+    }
+
+    if (key < 0x80) {
+        buf[pos] = @truncate(key);
+        pos += 1;
+        return buf[0..pos];
+    }
+
+    const rendered = std.fmt.bufPrint(buf[pos..], "U+{X}", .{key}) catch "?";
+    return buf[0 .. pos + rendered.len];
+}
 
 // -- Command implementations --
 
@@ -275,8 +788,9 @@ fn cmdNewSession(ctx: *Context, args: []const []const u8) CmdError!void {
             session_name = args[i];
         }
     }
-    const shell: [:0]const u8 = "/bin/sh";
-    _ = ctx.server.createSession(session_name, shell, 80, 24) catch return CmdError.CommandFailed;
+
+    const session = ctx.server.createSession(session_name, defaultShell(ctx.session), 80, 24) catch return CmdError.CommandFailed;
+    ctx.session = session;
 }
 
 fn cmdKillServer(ctx: *Context, _: []const []const u8) CmdError!void {
@@ -314,39 +828,96 @@ fn cmdNewWindow(ctx: *Context, args: []const []const u8) CmdError!void {
             name = args[i];
         }
     }
+
     const window = Window.init(ctx.allocator, name, 80, 24) catch return CmdError.OutOfMemory;
-    const pane = Pane.init(ctx.allocator, 80, 24) catch {
-        window.deinit();
-        return CmdError.OutOfMemory;
+    errdefer window.deinit();
+
+    const pane = spawnWindowPane(ctx.allocator, defaultShell(ctx.session), 80, 24) catch |err| switch (err) {
+        CmdError.OutOfMemory => return CmdError.OutOfMemory,
+        else => return CmdError.CommandFailed,
     };
+    errdefer pane.deinit();
+
     window.addPane(pane) catch return CmdError.OutOfMemory;
     session.addWindow(window) catch return CmdError.OutOfMemory;
+    session.selectWindow(window);
+    ctx.server.trackPane(pane, window.sx, window.sy) catch return CmdError.CommandFailed;
 }
 
 fn cmdSplitWindow(ctx: *Context, args: []const []const u8) CmdError!void {
-    _ = args;
     const session = ctx.session orelse return CmdError.SessionNotFound;
     const window = session.active_window orelse return CmdError.WindowNotFound;
-    const pane = Pane.init(ctx.allocator, window.sx / 2, window.sy) catch return CmdError.OutOfMemory;
-    window.addPane(pane) catch return CmdError.OutOfMemory;
+
+    var direction: CellType = .horizontal;
+    var percent: u32 = 50;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "-h")) {
+            direction = .horizontal;
+        } else if (std.mem.eql(u8, args[i], "-v")) {
+            direction = .vertical;
+        } else if (std.mem.eql(u8, args[i], "-p") and i + 1 < args.len) {
+            i += 1;
+            percent = std.fmt.parseInt(u32, args[i], 10) catch 50;
+        }
+    }
+
+    const new_pane = spawnWindowPane(ctx.allocator, defaultShell(ctx.session), window.sx, window.sy) catch |err| switch (err) {
+        CmdError.OutOfMemory => return CmdError.OutOfMemory,
+        else => return CmdError.CommandFailed,
+    };
+    errdefer new_pane.deinit();
+    window.splitActivePane(new_pane, direction, percent) catch return CmdError.CommandFailed;
+    ctx.server.trackPane(new_pane, new_pane.sx, new_pane.sy) catch return CmdError.CommandFailed;
 }
 
 fn cmdSelectPane(ctx: *Context, args: []const []const u8) CmdError!void {
-    _ = args;
     const session = ctx.session orelse return CmdError.SessionNotFound;
     const window = session.active_window orelse return CmdError.WindowNotFound;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "-t") and i + 1 < args.len) {
+            i += 1;
+            const target = args[i];
+            if (std.mem.eql(u8, target, ":.+") or std.mem.eql(u8, target, ":+")) {
+                window.nextPane();
+                return;
+            }
+            if (target.len >= 2 and target[0] == '%') {
+                const pane_id = std.fmt.parseInt(u32, target[1..], 10) catch return CmdError.InvalidArgs;
+                if (!window.selectPaneById(pane_id)) return CmdError.PaneNotFound;
+                return;
+            }
+            const pane_index = std.fmt.parseInt(usize, target, 10) catch return CmdError.InvalidArgs;
+            if (!window.selectPaneByIndex(pane_index)) return CmdError.PaneNotFound;
+            return;
+        }
+        if (std.mem.eql(u8, args[i], "-U") or std.mem.eql(u8, args[i], "-L")) {
+            window.prevPane();
+            return;
+        }
+        if (std.mem.eql(u8, args[i], "-D") or std.mem.eql(u8, args[i], "-R")) {
+            window.nextPane();
+            return;
+        }
+    }
+
     window.nextPane();
 }
 
 fn cmdSelectWindow(ctx: *Context, args: []const []const u8) CmdError!void {
-    _ = args;
     const session = ctx.session orelse return CmdError.SessionNotFound;
+    if (parseTargetWindow(args)) |window_number| {
+        const window = session.findWindowByNumber(window_number) orelse return CmdError.WindowNotFound;
+        session.selectWindow(window);
+        return;
+    }
     session.nextWindow();
 }
 
 fn cmdDetachClient(ctx: *Context, _: []const []const u8) CmdError!void {
     const session = ctx.session orelse return CmdError.SessionNotFound;
-    // Detach all clients attached to this session
     for (ctx.server.clients.items, 0..) |client, i| {
         if (client.session == session) {
             ctx.server.detachClient(i);
@@ -356,24 +927,37 @@ fn cmdDetachClient(ctx: *Context, _: []const []const u8) CmdError!void {
 
 fn cmdListSessions(ctx: *Context, _: []const []const u8) CmdError!void {
     for (ctx.server.sessions.items) |session| {
-        var buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "{s}: {d} windows (attached: {d})\n", .{
+        try writeOutput(ctx, "{s}: {d} windows (attached: {d})\n", .{
             session.name,
             session.windowCount(),
             session.attached,
-        }) catch continue;
-        _ = std.c.write(1, msg.ptr, msg.len);
+        });
     }
 }
 
 fn cmdSendKeys(ctx: *Context, args: []const []const u8) CmdError!void {
+    if (ctx.server.choose_tree_state != null) {
+        for (args) |key_str| {
+            if (try handleChooseTreeKey(ctx, null, key_str)) continue;
+        }
+        return;
+    }
+
     const session = ctx.session orelse return CmdError.SessionNotFound;
     const window = session.active_window orelse return CmdError.WindowNotFound;
     const pane = window.active_pane orelse return CmdError.PaneNotFound;
     if (pane.fd < 0) return CmdError.CommandFailed;
 
     for (args) |key_str| {
-        // Handle named keys
+        if (pane.prompt_state != null and try handlePromptKey(ctx, pane, key_str)) {
+            continue;
+        }
+        if (try handleChooseTreeKey(ctx, pane, key_str)) {
+            continue;
+        }
+        if (pane.copy_state != null and try handleCopyModeKey(ctx, pane, key_str)) {
+            continue;
+        }
         if (std.mem.eql(u8, key_str, "Enter")) {
             _ = std.c.write(pane.fd, "\n", 1);
         } else if (std.mem.eql(u8, key_str, "Escape")) {
@@ -385,7 +969,6 @@ fn cmdSendKeys(ctx: *Context, args: []const []const u8) CmdError!void {
         } else if (std.mem.eql(u8, key_str, "BSpace")) {
             _ = std.c.write(pane.fd, "\x7f", 1);
         } else if (key_str.len == 3 and key_str[0] == 'C' and key_str[1] == '-') {
-            // Control key: C-a through C-z
             const ch = key_str[2];
             if (ch >= 'a' and ch <= 'z') {
                 const ctrl: [1]u8 = .{ch - 'a' + 1};
@@ -397,7 +980,6 @@ fn cmdSendKeys(ctx: *Context, args: []const []const u8) CmdError!void {
                 _ = std.c.write(pane.fd, key_str.ptr, key_str.len);
             }
         } else {
-            // Literal string
             _ = std.c.write(pane.fd, key_str.ptr, key_str.len);
         }
     }
@@ -421,9 +1003,11 @@ fn cmdLastWindow(ctx: *Context, _: []const []const u8) CmdError!void {
 fn cmdKillWindow(ctx: *Context, _: []const []const u8) CmdError!void {
     const session = ctx.session orelse return CmdError.SessionNotFound;
     const window = session.active_window orelse return CmdError.WindowNotFound;
+    for (window.panes.items) |pane| {
+        ctx.server.untrackPane(pane.id);
+    }
     const empty = session.removeWindow(window);
     if (empty) {
-        // Session has no windows left — destroy it
         ctx.session = null;
         ctx.server.removeSession(session);
     }
@@ -433,19 +1017,16 @@ fn cmdKillPane(ctx: *Context, _: []const []const u8) CmdError!void {
     const session = ctx.session orelse return CmdError.SessionNotFound;
     const window = session.active_window orelse return CmdError.WindowNotFound;
     const pane = window.active_pane orelse return CmdError.PaneNotFound;
+    ctx.server.untrackPane(pane.id);
     const window_empty = window.removePane(pane);
     if (window_empty) {
-        // Window has no panes left u2014 remove the window
         const session_empty = session.removeWindow(window);
         if (session_empty) {
             ctx.session = null;
             ctx.server.removeSession(session);
         }
-    } else {
-        // Rebalance layout to fill the gap
-        if (window.layout_root) |root| {
-            root.resize(window.sx, window.sy);
-        }
+    } else if (window.layout_root) |root| {
+        root.resize(window.sx, window.sy);
     }
 }
 
@@ -473,7 +1054,10 @@ fn cmdResizePane(ctx: *Context, args: []const []const u8) CmdError!void {
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "-U")) {
+        if (std.mem.eql(u8, args[i], "-Z")) {
+            _ = window.toggleZoom();
+            return;
+        } else if (std.mem.eql(u8, args[i], "-U")) {
             dy = -1;
         } else if (std.mem.eql(u8, args[i], "-D")) {
             dy = 1;
@@ -482,7 +1066,6 @@ fn cmdResizePane(ctx: *Context, args: []const []const u8) CmdError!void {
         } else if (std.mem.eql(u8, args[i], "-R")) {
             dx = 1;
         } else {
-            // Try to parse as amount
             amount = std.fmt.parseInt(u32, args[i], 10) catch 1;
         }
     }
@@ -504,8 +1087,6 @@ fn cmdResizePane(ctx: *Context, args: []const []const u8) CmdError!void {
         pane.sy;
 
     pane.resize(new_sx, new_sy);
-
-    // Re-layout the window
     if (window.layout_root) |root| {
         root.resize(window.sx, window.sy);
     }
@@ -528,19 +1109,16 @@ fn cmdSwapPane(ctx: *Context, args: []const []const u8) CmdError!void {
 }
 
 fn cmdDisplayMessage(ctx: *Context, args: []const []const u8) CmdError!void {
-    _ = ctx;
     if (args.len > 0) {
-        const msg = args[args.len - 1];
-        _ = std.c.write(1, msg.ptr, msg.len);
-        _ = std.c.write(1, "\n", 1);
+        try writeOutput(ctx, "{s}\n", .{args[args.len - 1]});
     }
 }
 
 fn cmdSourceFile(ctx: *Context, args: []const []const u8) CmdError!void {
     if (args.len == 0) return CmdError.InvalidArgs;
     const path = args[args.len - 1];
+    const registry = ctx.registry orelse return CmdError.CommandFailed;
 
-    // Read file via libc
     var path_buf: [4096]u8 = .{0} ** 4096;
     if (path.len >= path_buf.len) return CmdError.CommandFailed;
     @memcpy(path_buf[0..path.len], path);
@@ -549,7 +1127,6 @@ fn cmdSourceFile(ctx: *Context, args: []const []const u8) CmdError!void {
     if (fd < 0) return CmdError.CommandFailed;
     defer _ = std.c.close(fd);
 
-    // Read contents
     var content_buf: [65536]u8 = undefined;
     var total: usize = 0;
     while (total < content_buf.len) {
@@ -559,51 +1136,193 @@ fn cmdSourceFile(ctx: *Context, args: []const []const u8) CmdError!void {
     }
     if (total == 0) return;
 
-    // Parse and execute commands
-    const config_parser = @import("../config/parser.zig");
     var parser = config_parser.ConfigParser.init(ctx.allocator, content_buf[0..total]);
-    var cmds = parser.parseAll() catch return CmdError.CommandFailed;
+    var commands = parser.parseAll() catch return CmdError.CommandFailed;
     defer {
-        for (cmds.items) |*c| c.deinit(ctx.allocator);
-        cmds.deinit(ctx.allocator);
+        for (commands.items) |*command| command.deinit(ctx.allocator);
+        commands.deinit(ctx.allocator);
     }
 
-    // Execute each command (need access to registry — for now, log them)
-    for (cmds.items) |cmd_item| {
-        var log_buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&log_buf, "source: {s}\n", .{cmd_item.name}) catch continue;
-        _ = std.c.write(1, msg.ptr, msg.len);
+    for (commands.items) |*command| {
+        try registry.executeParsed(ctx, command);
     }
 }
 
 fn cmdListWindows(ctx: *Context, _: []const []const u8) CmdError!void {
     const session = ctx.session orelse return CmdError.SessionNotFound;
-    for (session.windows.items, 0..) |w, i| {
-        var buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "{d}: {s} ({d} panes)\n", .{
-            i,
-            w.name,
-            w.paneCount(),
-        }) catch continue;
-        _ = std.c.write(1, msg.ptr, msg.len);
+    for (session.windows.items, 0..) |window, i| {
+        try writeOutput(ctx, "{d}: {s} ({d} panes)\n", .{
+            session.options.base_index + @as(u32, @intCast(i)),
+            window.name,
+            window.paneCount(),
+        });
     }
 }
 
 fn cmdListPanes(ctx: *Context, _: []const []const u8) CmdError!void {
     const session = ctx.session orelse return CmdError.SessionNotFound;
     const window = session.active_window orelse return CmdError.WindowNotFound;
-    for (window.panes.items, 0..) |p, i| {
-        var buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "{d}: [{d}x{d}]\n", .{ i, p.sx, p.sy }) catch continue;
-        _ = std.c.write(1, msg.ptr, msg.len);
+    for (window.panes.items, 0..) |pane, i| {
+        try writeOutput(ctx, "{d}: pane {d} [{d}x{d}]\n", .{ i, pane.id, pane.sx, pane.sy });
     }
+}
+
+fn cmdSetBuffer(ctx: *Context, args: []const []const u8) CmdError!void {
+    const name = parseNamedOption(args, "-b");
+    var data: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "-b") and i + 1 < args.len) {
+            i += 1;
+            continue;
+        }
+        data = args[i];
+    }
+
+    const buffer_data = data orelse return CmdError.InvalidArgs;
+    ctx.server.paste_stack.push(buffer_data, name) catch return CmdError.OutOfMemory;
+}
+
+fn cmdPasteBuffer(ctx: *Context, args: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    const window = session.active_window orelse return CmdError.WindowNotFound;
+    const pane = window.active_pane orelse return CmdError.PaneNotFound;
+    if (pane.fd < 0) return CmdError.CommandFailed;
+
+    const buffer = try resolvePasteBuffer(ctx, parseNamedOption(args, "-b"));
+    _ = std.c.write(pane.fd, buffer.data.ptr, buffer.data.len);
+}
+
+fn cmdCopyMode(ctx: *Context, _: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    const window = session.active_window orelse return CmdError.WindowNotFound;
+    const pane = window.active_pane orelse return CmdError.PaneNotFound;
+    const pane_state = ctx.server.session_loop.getPane(pane.id) orelse return CmdError.CommandFailed;
+
+    var state = copy_mod.CopyState.init();
+    state.cx = pane_state.screen.cx;
+    state.cy = pane_state.screen.grid.hsize + pane_state.screen.cy;
+    pane.copy_state = state;
+}
+
+fn cmdCommandPrompt(ctx: *Context, args: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    const window = session.active_window orelse return CmdError.WindowNotFound;
+    const pane = window.active_pane orelse return CmdError.PaneNotFound;
+
+    var state = PromptState{};
+    for (args, 0..) |arg, i| {
+        if (i > 0) appendPromptBytes(&state, " ");
+        appendPromptBytes(&state, arg);
+    }
+    pane.prompt_state = state;
+    try writeOutput(ctx, ":\n", .{});
+}
+
+fn cmdListBuffers(ctx: *Context, _: []const []const u8) CmdError!void {
+    const count = ctx.server.paste_stack.count();
+    var index: usize = 0;
+    while (index < count) : (index += 1) {
+        const buffer = ctx.server.paste_stack.get(index) orelse continue;
+        if (buffer.name) |name| {
+            try writeOutput(ctx, "{d}: {s} ({d} bytes)\n", .{ index, name, buffer.data.len });
+        } else {
+            try writeOutput(ctx, "{d}: buffer{d} ({d} bytes)\n", .{ index, index, buffer.data.len });
+        }
+    }
+}
+
+fn cmdShowBuffer(ctx: *Context, args: []const []const u8) CmdError!void {
+    const buffer = try resolvePasteBuffer(ctx, parseNamedOption(args, "-b"));
+    try writeOutput(ctx, "{s}\n", .{buffer.data});
+}
+
+fn cmdDeleteBuffer(ctx: *Context, args: []const []const u8) CmdError!void {
+    if (parseNamedOption(args, "-b")) |name| {
+        if (!ctx.server.paste_stack.removeByName(name)) return CmdError.BufferNotFound;
+        return;
+    }
+    if (!ctx.server.paste_stack.removeTop()) return CmdError.BufferNotFound;
+}
+
+fn cmdListKeys(ctx: *Context, _: []const []const u8) CmdError!void {
+    var manager = binding_mod.BindingManager.init(ctx.allocator);
+    defer manager.deinit();
+    try manager.setupDefaults();
+
+    var iter = manager.tables.iterator();
+    while (iter.next()) |entry| {
+        const table_name = entry.key_ptr.*;
+        const table = entry.value_ptr;
+        for (table.bindings.items) |binding| {
+            var key_buf: [32]u8 = undefined;
+            const rendered_key = formatBindingKey(&key_buf, binding.key, binding.modifiers);
+            switch (binding.action) {
+                .command => |command| try writeOutput(ctx, "-T {s} {s} {s}\n", .{ table_name, rendered_key, command }),
+                .none => {},
+            }
+        }
+    }
+}
+
+fn cmdChooseTree(ctx: *Context, args: []const []const u8) CmdError!void {
+    const pane = if (ctx.session) |session|
+        if (session.active_window) |window| window.active_pane else null
+    else
+        null;
+
+    var sessions_only = false;
+    var windows_only = false;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "-s")) sessions_only = true;
+        if (std.mem.eql(u8, arg, "-w")) windows_only = true;
+    }
+
+    var state = ChooseTreeState.init(ctx.allocator, 20);
+    errdefer state.deinit();
+
+    for (ctx.server.sessions.items) |tree_session| {
+        try addChooseTreeEntry(&state, tree_session.name, 0, tree_session, null);
+        if (sessions_only) continue;
+
+        for (tree_session.windows.items, 0..) |tree_window, window_idx| {
+            var label_buf: [256]u8 = undefined;
+            const label = std.fmt.bufPrint(&label_buf, "{d}: {s} ({d} panes)", .{
+                tree_session.options.base_index + @as(u32, @intCast(window_idx)),
+                tree_window.name,
+                tree_window.paneCount(),
+            }) catch return CmdError.CommandFailed;
+            try addChooseTreeEntry(&state, label, 1, tree_session, tree_window);
+            if (windows_only) continue;
+        }
+    }
+
+    if (ctx.server.choose_tree_state) |*existing| existing.deinit();
+    ctx.server.choose_tree_state = state;
+    try renderChooseTree(ctx, pane);
+}
+
+fn cmdClockMode(ctx: *Context, _: []const []const u8) CmdError!void {
+    var now: i64 = 0;
+    _ = time(&now);
+    const tm_ptr = localtime(&now) orelse return CmdError.CommandFailed;
+
+    var line_buf: [64]u8 = undefined;
+    const clock = std.fmt.bufPrint(&line_buf, " {d:0>2}:{d:0>2}:{d:0>2} ", .{
+        @as(u32, @intCast(tm_ptr.tm_hour)),
+        @as(u32, @intCast(tm_ptr.tm_min)),
+        @as(u32, @intCast(tm_ptr.tm_sec)),
+    }) catch return CmdError.CommandFailed;
+
+    try writeOutput(ctx, "┌──────────┐\n", .{});
+    try writeOutput(ctx, "│{s}│\n", .{clock});
+    try writeOutput(ctx, "└──────────┘\n", .{});
 }
 
 fn cmdRunShell(_: *Context, args: []const []const u8) CmdError!void {
     if (args.len == 0) return CmdError.InvalidArgs;
     const command = args[args.len - 1];
 
-    // Copy command to null-terminated buffer for execvp
     var cmd_buf: [4096]u8 = .{0} ** 4096;
     if (command.len >= cmd_buf.len) return CmdError.CommandFailed;
     @memcpy(cmd_buf[0..command.len], command);
@@ -612,7 +1331,6 @@ fn cmdRunShell(_: *Context, args: []const []const u8) CmdError!void {
     if (pid < 0) return CmdError.CommandFailed;
 
     if (pid == 0) {
-        // Child: exec sh -c <command>
         const sh: [*:0]const u8 = "/bin/sh";
         const c_flag: [*:0]const u8 = "-c";
         const cmd_z: [*:0]const u8 = @ptrCast(cmd_buf[0..command.len :0]);
@@ -621,7 +1339,6 @@ fn cmdRunShell(_: *Context, args: []const []const u8) CmdError!void {
         std.c.exit(127);
     }
 
-    // Parent: wait for child
     _ = std.c.waitpid(pid, null, 0);
 }
 
@@ -636,7 +1353,51 @@ test "registry register and find" {
     try reg.registerBuiltins();
 
     try std.testing.expect(reg.find("new-session") != null);
-    try std.testing.expect(reg.find("new") != null); // alias
+    try std.testing.expect(reg.find("new") != null);
     try std.testing.expect(reg.find("kill-server") != null);
     try std.testing.expect(reg.find("nonexistent") == null);
+}
+
+test "parse target window helper" {
+    const args = [_][]const u8{ "-t", ":3" };
+    try std.testing.expectEqual(@as(?u32, 3), parseTargetWindow(&args));
+}
+
+test "formatBindingKey renders ctrl meta modifiers" {
+    var buf: [32]u8 = undefined;
+    const rendered = formatBindingKey(&buf, 'b', .{ .ctrl = true, .meta = true });
+    try std.testing.expectEqualStrings("C-M-b", rendered);
+}
+
+test "extractCopySelection reads visual line from screen history space" {
+    var fake = struct {
+        screen: screen_mod.Screen,
+    }{
+        .screen = screen_mod.Screen.init(std.testing.allocator, 20, 5, 10),
+    };
+    defer fake.screen.deinit();
+
+    const line = fake.screen.grid.getLine(0);
+    line.getCell(0).codepoint = 'h';
+    line.getCell(1).codepoint = 'e';
+    line.getCell(2).codepoint = 'l';
+    line.getCell(3).codepoint = 'l';
+    line.getCell(4).codepoint = 'o';
+
+    var state = copy_mod.CopyState.init();
+    state.mode = .visual_line;
+    state.sel_start_y = 0;
+    state.cy = 0;
+
+    const text = try extractCopySelection(std.testing.allocator, &fake, &state);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("hello", text);
+}
+
+test "appendPromptBytes appends text" {
+    var state = PromptState{};
+    appendPromptBytes(&state, "display-message");
+    appendPromptBytes(&state, " ");
+    appendPromptBytes(&state, "ok");
+    try std.testing.expectEqualStrings("display-message ok", state.buffer[0..state.len]);
 }

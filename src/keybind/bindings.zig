@@ -238,3 +238,44 @@ test "binding manager prefix" {
     try std.testing.expectEqualStrings("new-window", r2.?);
     try std.testing.expect(!mgr.in_prefix);
 }
+
+test "default deferred bindings produce explicit messages" {
+    var mgr = BindingManager.init(std.testing.allocator);
+    defer mgr.deinit();
+    try mgr.setupDefaults();
+
+    _ = mgr.processKey('b', .{ .ctrl = true });
+    const choose_tree = mgr.processKey('w', .{});
+    try std.testing.expect(choose_tree != null);
+    try std.testing.expectEqualStrings("choose-tree -w", choose_tree.?);
+
+    _ = mgr.processKey('b', .{ .ctrl = true });
+    const list_keys = mgr.processKey('?', .{});
+    try std.testing.expect(list_keys != null);
+    try std.testing.expectEqualStrings("list-keys", list_keys.?);
+
+    _ = mgr.processKey('b', .{ .ctrl = true });
+    const zoom = mgr.processKey('z', .{});
+    try std.testing.expect(zoom != null);
+    try std.testing.expectEqualStrings("resize-pane -Z", zoom.?);
+
+    _ = mgr.processKey('b', .{ .ctrl = true });
+    const paste = mgr.processKey(']', .{});
+    try std.testing.expect(paste != null);
+    try std.testing.expectEqualStrings("paste-buffer", paste.?);
+
+    _ = mgr.processKey('b', .{ .ctrl = true });
+    const copy = mgr.processKey('[', .{});
+    try std.testing.expect(copy != null);
+    try std.testing.expectEqualStrings("copy-mode", copy.?);
+
+    _ = mgr.processKey('b', .{ .ctrl = true });
+    const prompt = mgr.processKey(':', .{});
+    try std.testing.expect(prompt != null);
+    try std.testing.expectEqualStrings("command-prompt", prompt.?);
+
+    _ = mgr.processKey('b', .{ .ctrl = true });
+    const clock = mgr.processKey('t', .{});
+    try std.testing.expect(clock != null);
+    try std.testing.expectEqualStrings("clock-mode", clock.?);
+}

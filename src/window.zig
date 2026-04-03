@@ -1,5 +1,44 @@
 const std = @import("std");
 const LayoutCell = @import("layout/layout.zig").LayoutCell;
+const CellType = @import("layout/layout.zig").CellType;
+const CopyState = @import("copy/copy.zig").CopyState;
+const ModeTree = @import("mode/tree.zig").ModeTree;
+
+pub const PromptState = struct {
+    buffer: [512]u8 = .{0} ** 512,
+    len: usize = 0,
+};
+
+pub const ChooseTreeItem = struct {
+    session: ?*anyopaque = null,
+    window: ?*anyopaque = null,
+    pane: ?*anyopaque = null,
+};
+
+pub const ChooseTreeState = struct {
+    tree: ModeTree,
+    items: std.ArrayListAligned(ChooseTreeItem, null),
+    labels: std.ArrayListAligned([]u8, null),
+    allocator: std.mem.Allocator,
+
+    pub fn init(alloc: std.mem.Allocator, visible_rows: u32) ChooseTreeState {
+        return .{
+            .tree = ModeTree.init(alloc, visible_rows),
+            .items = .empty,
+            .labels = .empty,
+            .allocator = alloc,
+        };
+    }
+
+    pub fn deinit(self: *ChooseTreeState) void {
+        self.tree.deinit();
+        for (self.labels.items) |label| {
+            self.allocator.free(label);
+        }
+        self.labels.deinit(self.allocator);
+        self.items.deinit(self.allocator);
+    }
+};
 
 /// A pane within a window.
 pub const Pane = struct {
@@ -13,6 +52,9 @@ pub const Pane = struct {
     yoff: u32,
 
     flags: Flags,
+    copy_state: ?CopyState,
+    prompt_state: ?PromptState,
+    choose_tree_state: ?ChooseTreeState,
     allocator: std.mem.Allocator,
 
     pub const Flags = packed struct(u16) {
@@ -36,6 +78,9 @@ pub const Pane = struct {
             .xoff = 0,
             .yoff = 0,
             .flags = .{},
+            .copy_state = null,
+            .prompt_state = null,
+            .choose_tree_state = null,
             .allocator = alloc,
         };
         next_id += 1;
@@ -45,6 +90,9 @@ pub const Pane = struct {
     pub fn deinit(self: *Pane) void {
         if (self.fd >= 0) {
             _ = std.c.close(self.fd);
+        }
+        if (self.choose_tree_state) |*state| {
+            state.deinit();
         }
         self.allocator.destroy(self);
     }
@@ -118,6 +166,9 @@ pub const Window = struct {
         if (self.active_pane == null) {
             self.active_pane = pane;
         }
+        if (self.layout_root == null) {
+            self.layout_root = try LayoutCell.initLeaf(self.allocator, pane.id, self.sx, self.sy, 0, 0);
+        }
     }
 
     /// Get the number of panes.
@@ -133,11 +184,13 @@ pub const Window = struct {
                 if (p == active) {
                     const next_idx = (i + 1) % self.panes.items.len;
                     self.active_pane = self.panes.items[next_idx];
+                    if (self.flags.zoomed) self.applyZoomLayout();
                     return;
                 }
             }
         }
         self.active_pane = self.panes.items[0];
+        if (self.flags.zoomed) self.applyZoomLayout();
     }
 
     /// Select the previous pane.
@@ -148,10 +201,33 @@ pub const Window = struct {
                 if (p == active) {
                     const prev_idx = if (i == 0) self.panes.items.len - 1 else i - 1;
                     self.active_pane = self.panes.items[prev_idx];
+                    if (self.flags.zoomed) self.applyZoomLayout();
                     return;
                 }
             }
         }
+    }
+
+    pub fn selectPane(self: *Window, pane: *Pane) void {
+        self.active_pane = pane;
+        pane.flags.focused = true;
+        if (self.flags.zoomed) self.applyZoomLayout();
+    }
+
+    pub fn selectPaneByIndex(self: *Window, index: usize) bool {
+        if (index >= self.panes.items.len) return false;
+        self.selectPane(self.panes.items[index]);
+        return true;
+    }
+
+    pub fn selectPaneById(self: *Window, pane_id: u32) bool {
+        for (self.panes.items) |pane| {
+            if (pane.id == pane_id) {
+                self.selectPane(pane);
+                return true;
+            }
+        }
+        return false;
     }
 
     /// Remove and destroy a pane. Returns true if the window has no panes left.
@@ -214,9 +290,77 @@ pub const Window = struct {
     pub fn resize(self: *Window, new_sx: u32, new_sy: u32) void {
         self.sx = new_sx;
         self.sy = new_sy;
-        if (self.layout_root) |root| {
+        if (self.flags.zoomed) {
+            self.applyZoomLayout();
+        } else if (self.layout_root) |root| {
             root.resize(new_sx, new_sy);
+            self.syncPanesFromLayout();
         }
+    }
+
+    pub fn splitActivePane(self: *Window, new_pane: *Pane, direction: CellType, percent: u32) !void {
+        const active = self.active_pane orelse {
+            try self.addPane(new_pane);
+            return;
+        };
+
+        if (self.layout_root == null) {
+            self.layout_root = try LayoutCell.initLeaf(self.allocator, active.id, self.sx, self.sy, 0, 0);
+        }
+
+        const root = self.layout_root.?;
+        const target = root.findPane(active.id) orelse return error.PaneNotFound;
+        _ = try target.split(direction, new_pane.id, percent);
+        try self.panes.append(self.allocator, new_pane);
+        self.active_pane = new_pane;
+        if (self.flags.zoomed) {
+            self.applyZoomLayout();
+        } else {
+            self.syncPanesFromLayout();
+        }
+    }
+
+    fn syncPanesFromLayout(self: *Window) void {
+        const root = self.layout_root orelse return;
+        for (self.panes.items) |pane| {
+            if (root.findPane(pane.id)) |cell| {
+                pane.xoff = cell.xoff;
+                pane.yoff = cell.yoff;
+                pane.sx = cell.sx;
+                pane.sy = cell.sy;
+                pane.flags.redraw = true;
+            }
+        }
+    }
+
+    fn applyZoomLayout(self: *Window) void {
+        const active = self.active_pane orelse return;
+        for (self.panes.items) |pane| {
+            if (pane == active) {
+                pane.xoff = 0;
+                pane.yoff = 0;
+                pane.sx = self.sx;
+                pane.sy = self.sy;
+            } else {
+                pane.xoff = 0;
+                pane.yoff = 0;
+                pane.sx = 0;
+                pane.sy = 0;
+            }
+            pane.flags.redraw = true;
+        }
+    }
+
+    pub fn toggleZoom(self: *Window) bool {
+        if (self.active_pane == null) return self.flags.zoomed;
+        self.flags.zoomed = !self.flags.zoomed;
+        if (self.flags.zoomed) {
+            self.applyZoomLayout();
+        } else if (self.layout_root) |root| {
+            root.resize(self.sx, self.sy);
+            self.syncPanesFromLayout();
+        }
+        return self.flags.zoomed;
     }
 
     /// Rename the window.
@@ -240,4 +384,51 @@ test "window and pane lifecycle" {
     const p2 = try Pane.init(alloc, 40, 24);
     try w.addPane(p2);
     try std.testing.expectEqual(@as(usize, 2), w.paneCount());
+}
+
+test "splitActivePane updates layout and active pane" {
+    const alloc = std.testing.allocator;
+    var w = try Window.init(alloc, "test", 80, 24);
+    defer w.deinit();
+
+    const p1 = try Pane.init(alloc, 80, 24);
+    try w.addPane(p1);
+
+    const p2 = try Pane.init(alloc, 80, 24);
+    try w.splitActivePane(p2, .horizontal, 50);
+
+    try std.testing.expectEqual(@as(usize, 2), w.paneCount());
+    try std.testing.expect(w.active_pane == p2);
+    try std.testing.expect(w.layout_root != null);
+    try std.testing.expect(p1.sx > 0);
+    try std.testing.expect(p2.sx > 0);
+}
+
+test "toggleZoom zooms and restores active pane geometry" {
+    const alloc = std.testing.allocator;
+    var w = try Window.init(alloc, "zoom", 80, 24);
+    defer w.deinit();
+
+    const p1 = try Pane.init(alloc, 80, 24);
+    try w.addPane(p1);
+    const p2 = try Pane.init(alloc, 80, 24);
+    try w.splitActivePane(p2, .horizontal, 50);
+
+    const left_width = p1.sx;
+    const right_width = p2.sx;
+    try std.testing.expectEqual(@as(u32, 40), left_width);
+    try std.testing.expectEqual(@as(u32, 39), right_width);
+
+    try std.testing.expectEqual(true, w.toggleZoom());
+    try std.testing.expect(w.flags.zoomed);
+    try std.testing.expectEqual(@as(u32, 80), p2.sx);
+    try std.testing.expectEqual(@as(u32, 24), p2.sy);
+    try std.testing.expectEqual(@as(u32, 0), p1.sx);
+    try std.testing.expectEqual(@as(u32, 0), p1.sy);
+
+    try std.testing.expectEqual(false, w.toggleZoom());
+    try std.testing.expect(!w.flags.zoomed);
+    try std.testing.expect(p1.sx > 0);
+    try std.testing.expect(p2.sx > 0);
+    try std.testing.expectEqual(@as(u32, 79), p1.sx + p2.sx);
 }
