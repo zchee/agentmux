@@ -382,7 +382,19 @@ pub const ModeTree = struct {
             }
 
             // Label
-            try buf.appendSlice(alloc, item.label);
+            if (self.filter_len > 0) {
+                if (highlightMatchRange(item.label, self.filter[0..self.filter_len])) |range| {
+                    try buf.appendSlice(alloc, item.label[0..range.start]);
+                    try buf.appendSlice(alloc, "\x1b[1m");
+                    try buf.appendSlice(alloc, item.label[range.start..range.end]);
+                    try buf.appendSlice(alloc, "\x1b[22m");
+                    try buf.appendSlice(alloc, item.label[range.end..]);
+                } else {
+                    try buf.appendSlice(alloc, item.label);
+                }
+            } else {
+                try buf.appendSlice(alloc, item.label);
+            }
 
             if (is_selected) {
                 try buf.appendSlice(alloc, "\x1b[0m"); // reset
@@ -484,6 +496,11 @@ pub const ModeTree = struct {
     }
 };
 
+const MatchRange = struct {
+    start: usize,
+    end: usize,
+};
+
 const FuzzyScore = struct {
     gaps: usize,
     start: usize,
@@ -502,6 +519,25 @@ const FuzzyScore = struct {
 
 fn fuzzyContainsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     return fuzzyMatchScore(haystack, needle) != null;
+}
+
+fn highlightMatchRange(haystack: []const u8, needle: []const u8) ?MatchRange {
+    if (needle.len == 0) return null;
+
+    var first_idx: ?usize = null;
+    var last_idx: usize = 0;
+    var needle_index: usize = 0;
+
+    for (haystack, 0..) |ch, idx| {
+        if (std.ascii.toLower(ch) != std.ascii.toLower(needle[needle_index])) continue;
+        if (first_idx == null) first_idx = idx;
+        last_idx = idx;
+        needle_index += 1;
+        if (needle_index == needle.len) {
+            return .{ .start = first_idx.?, .end = last_idx + 1 };
+        }
+    }
+    return null;
 }
 
 fn fuzzyMatchScore(haystack: []const u8, needle: []const u8) ?FuzzyScore {
@@ -788,7 +824,7 @@ test "mode tree filtered render hides weaker non-matching sibling branch" {
 
     const rendered = try tree.render(std.testing.allocator);
     defer std.testing.allocator.free(rendered);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "1: extra") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "extra") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "0: plancheck") == null);
 }
 
@@ -823,4 +859,20 @@ test "mode tree typo-tolerant filter still rejects distant terms" {
     const rendered = try tree.render(std.testing.allocator);
     defer std.testing.allocator.free(rendered);
     try std.testing.expect(fuzzyContainsIgnoreCase(rendered, "no matches"));
+}
+
+test "mode tree filtered render highlights direct subsequence span" {
+    var tree = ModeTree.init(std.testing.allocator, 10);
+    defer tree.deinit();
+
+    try tree.addItem(.{ .label = "plancheck", .depth = 0, .expanded = true, .has_children = false, .tag = 0 });
+    _ = tree.handleKey('/');
+    _ = tree.handleKey('p');
+    _ = tree.handleKey('l');
+    _ = tree.handleKey('n');
+
+    const rendered = try tree.render(std.testing.allocator);
+    defer std.testing.allocator.free(rendered);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "\x1b[1m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "\x1b[22m") != null);
 }
