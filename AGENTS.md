@@ -27,8 +27,7 @@ Use repo-supported socket settings (`AGENTMUX_SOCKET_NAME`, `AGENTMUX_SOCKET_PAT
 
 # Commit Messages
 - Use the repository's existing `scope: imperative summary` style for commit subjects.
-- When a task spans multiple logical slices, commit and push each validated slice incrementally instead of batching unrelated work into one final commit.
 - Keep the scope lowercase and map it to the primary area changed, for example `docs`, `web`, `worker`, `orchestrator`, `deploy`, `ci`, `hack`, or `github/workflows`.
-- Write the summary as a short imperative phrase, not a sentence with terminal punctuation.
 - When writing or editing a commit message, do not rely on shell-escaped newlines with repeated `-m` flags. Write the full message to a temporary file and use `git commit --gpg-sign -F <file>` so paragraph breaks, backticks, and trailers are preserved exactly.
-    - Example subjects from the current history: `docs: add local codex skills`, `rendor: align tooling workflow with validated Vite+ behavior`, `orchestrator: keep execution-review approvals on the plan track`.
+    - Example subjects from the current history: `docs: add local skills`, `rendor: align tooling workflow`.
+- SHOULD respert to oh-my-codex or oh-my-claudecode commit message style other than above rules.
