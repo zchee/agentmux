@@ -2162,103 +2162,136 @@ test "addChooseTreeEntry stores pane metadata" {
     try std.testing.expect(choose_state.items.items[0].pane != null);
 }
 
-test "if-shell executes success branch" {
-    const alloc = std.testing.allocator;
-    var server = try Server.init(alloc, "/tmp/agentmux-if-shell-success.sock");
+test "set-option updates session and server settings" {
+    var server = try Server.init(std.testing.allocator, "/tmp/agentmux-cmd-set.sock");
     defer server.deinit();
-
-    var reg = Registry.init(alloc);
+    var session = try Session.init(std.testing.allocator, "demo");
+    defer session.deinit();
+    var reg = Registry.init(std.testing.allocator);
     defer reg.deinit();
     try reg.registerBuiltins();
-
-    var fds: [2]std.c.fd_t = undefined;
-    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&fds));
-    defer _ = std.c.close(fds[0]);
-    defer _ = std.c.close(fds[1]);
-
-    var ctx = Context{
-        .server = &server,
-        .session = null,
-        .window = null,
-        .pane = null,
-        .allocator = alloc,
-        .reply_fd = fds[1],
-        .registry = &reg,
-    };
-
-    try reg.execute(&ctx, "if-shell", &.{ "true", "display-message success", "display-message failure" });
-
-    var msg = try protocol.recvMessageAlloc(alloc, fds[0]);
-    defer msg.deinit();
-    try std.testing.expectEqual(protocol.MessageType.output, msg.msg_type);
-    try std.testing.expectEqualStrings("success\n", msg.payload);
-}
-
-test "if-shell executes failure branch" {
-    const alloc = std.testing.allocator;
-    var server = try Server.init(alloc, "/tmp/agentmux-if-shell-failure.sock");
-    defer server.deinit();
-
-    var reg = Registry.init(alloc);
-    defer reg.deinit();
-    try reg.registerBuiltins();
-
-    var fds: [2]std.c.fd_t = undefined;
-    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&fds));
-    defer _ = std.c.close(fds[0]);
-    defer _ = std.c.close(fds[1]);
-
-    var ctx = Context{
-        .server = &server,
-        .session = null,
-        .window = null,
-        .pane = null,
-        .allocator = alloc,
-        .reply_fd = fds[1],
-        .registry = &reg,
-    };
-
-    try reg.execute(&ctx, "if-shell", &.{ "false", "display-message success", "display-message failure" });
-
-    var msg = try protocol.recvMessageAlloc(alloc, fds[0]);
-    defer msg.deinit();
-    try std.testing.expectEqual(protocol.MessageType.output, msg.msg_type);
-    try std.testing.expectEqualStrings("failure\n", msg.payload);
-}
-
-test "send-prefix writes configured prefix byte to active pane" {
-    const alloc = std.testing.allocator;
-    var server = try Server.init(alloc, "/tmp/agentmux-send-prefix.sock");
-    defer server.deinit();
-
-    var session = try Session.init(alloc, "demo");
-    try server.sessions.append(alloc, session);
-    server.default_session = session;
-
-    var window = try Window.init(alloc, "win", 80, 24);
-    const pane = try Pane.init(alloc, 80, 24);
-
-    var fds: [2]std.c.fd_t = undefined;
-    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&fds));
-    defer _ = std.c.close(fds[0]);
-    pane.fd = fds[1];
-
-    try window.addPane(pane);
-    try session.addWindow(window);
-    session.selectWindow(window);
-    session.options.prefix_key = 0x01;
 
     var ctx = Context{
         .server = &server,
         .session = session,
-        .window = window,
-        .pane = pane,
-        .allocator = alloc,
+        .window = null,
+        .pane = null,
+        .allocator = std.testing.allocator,
+        .registry = &reg,
     };
 
-    try cmdSendPrefix(&ctx, &.{});
+    const session_args = [_][]const u8{ "-g", "base-index", "3" };
+    try cmdSetOption(&ctx, &session_args);
+    try std.testing.expectEqual(@as(u32, 3), session.options.base_index);
 
-    var buf: [1]u8 = undefined;
-    try std.testing.expectEqual(@as(isize, 1), std.c.read(fds[0], &buf, buf.len));
-    try std.testing.expectEqual(@as(u8, 0x01), buf[0]);
+    const prefix_args = [_][]const u8{ "prefix", "C-a" };
+    try cmdSetOption(&ctx, &prefix_args);
+    try std.testing.expectEqualStrings("C-a", session.options.prefix_string);
+    try std.testing.expectEqual(@as(u21, 'a'), server.bindings.prefix_key);
+    try std.testing.expect(server.bindings.prefix_mods.ctrl);
+
+    const server_args = [_][]const u8{ "-s", "history-limit", "4096" };
+    try cmdSetOption(&ctx, &server_args);
+    try std.testing.expectEqual(@as(i64, 4096), server.options.history_limit);
+}
+
+test "bind-key and unbind-key update persistent tables" {
+    var server = try Server.init(std.testing.allocator, "/tmp/agentmux-cmd-bind.sock");
+    defer server.deinit();
+    var reg = Registry.init(std.testing.allocator);
+    defer reg.deinit();
+    try reg.registerBuiltins();
+
+    var ctx = Context{
+        .server = &server,
+        .session = null,
+        .window = null,
+        .pane = null,
+        .allocator = std.testing.allocator,
+        .registry = &reg,
+    };
+
+    const bind_args = [_][]const u8{ "-n", "C-a", "send-prefix" };
+    try cmdBindKey(&ctx, &bind_args);
+
+    const root = server.bindings.tables.get("root").?;
+    const action = root.lookup('a', .{ .ctrl = true }).?;
+    switch (action) {
+        .command => |command| try std.testing.expectEqualStrings("send-prefix", command),
+        .none => return error.ExpectedCommandBinding,
+    }
+
+    const unbind_args = [_][]const u8{ "-n", "C-a" };
+    try cmdUnbindKey(&ctx, &unbind_args);
+    try std.testing.expect(root.lookup('a', .{ .ctrl = true }) == null);
+}
+
+test "if-shell executes the matching command branch" {
+    var server = try Server.init(std.testing.allocator, "/tmp/agentmux-cmd-if.sock");
+    defer server.deinit();
+    var session = try Session.init(std.testing.allocator, "demo");
+    defer session.deinit();
+    var reg = Registry.init(std.testing.allocator);
+    defer reg.deinit();
+    try reg.registerBuiltins();
+
+    var ctx = Context{
+        .server = &server,
+        .session = session,
+        .window = null,
+        .pane = null,
+        .allocator = std.testing.allocator,
+        .registry = &reg,
+    };
+
+    const true_args = [_][]const u8{ "true", "set-option base-index 7", "set-option base-index 9" };
+    try cmdIfShell(&ctx, &true_args);
+    try std.testing.expectEqual(@as(u32, 7), session.options.base_index);
+
+    const false_args = [_][]const u8{ "false", "set-option base-index 11", "set-option base-index 13" };
+    try cmdIfShell(&ctx, &false_args);
+    try std.testing.expectEqual(@as(u32, 13), session.options.base_index);
+}
+
+test "source-file applies tmux-style config commands" {
+    var server = try Server.init(std.testing.allocator, "/tmp/agentmux-cmd-source.sock");
+    defer server.deinit();
+    var session = try Session.init(std.testing.allocator, "demo");
+    defer session.deinit();
+    var reg = Registry.init(std.testing.allocator);
+    defer reg.deinit();
+    try reg.registerBuiltins();
+
+    var ctx = Context{
+        .server = &server,
+        .session = session,
+        .window = null,
+        .pane = null,
+        .allocator = std.testing.allocator,
+        .registry = &reg,
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{
+        .sub_path = "agentmux.conf",
+        .data =
+        \\set -g base-index 5
+        \\bind-key -n C-a send-prefix
+        ,
+    });
+
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "agentmux.conf");
+    defer std.testing.allocator.free(path);
+
+    const args = [_][]const u8{path};
+    try cmdSourceFile(&ctx, &args);
+
+    try std.testing.expectEqual(@as(u32, 5), session.options.base_index);
+    const root = server.bindings.tables.get("root").?;
+    const action = root.lookup('a', .{ .ctrl = true }).?;
+    switch (action) {
+        .command => |command| try std.testing.expectEqualStrings("send-prefix", command),
+        .none => return error.ExpectedCommandBinding,
+    }
 }

@@ -581,7 +581,11 @@ fn commandErrorMessage(err: cmd.CmdError) []const u8 {
 
 const POLLIN: i16 = 0x0001;
 
-test "commandAllowsMissingSession includes if-shell" {
+test "commandAllowsMissingSession includes tmux-style config commands" {
+    try std.testing.expect(commandAllowsMissingSession("source-file"));
+    try std.testing.expect(commandAllowsMissingSession("set"));
+    try std.testing.expect(commandAllowsMissingSession("bind-key"));
     try std.testing.expect(commandAllowsMissingSession("if-shell"));
-    try std.testing.expect(!commandAllowsMissingSession("send-prefix"));
+    try std.testing.expect(commandAllowsMissingSession("list-keys"));
+    try std.testing.expect(!commandAllowsMissingSession("split-window"));
 }
