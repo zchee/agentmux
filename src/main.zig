@@ -326,8 +326,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer alloc.free(socket_path);
 
     if (flags.remaining.items.len == 0) {
-        try runServer(alloc, socket_path, !flags.no_daemon);
-        return;
+        // tmux-compatible default: create a new session and attach.
+        // The server is auto-started by runCommandMode if needed.
+        try flags.remaining.append(alloc, "new-session");
     }
 
     try runCommandMode(alloc, &flags, socket_path);
