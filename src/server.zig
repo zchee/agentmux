@@ -19,6 +19,7 @@ const signals = @import("signals.zig");
 const builtin = @import("builtin");
 const event_loop_mod = @import("core/event_loop.zig");
 const GcdEventLoop = @import("platform/darwin.zig").GcdEventLoop;
+const IoUringEventLoop = @import("platform/linux.zig").IoUringEventLoop;
 
 /// Server ACL entry.
 pub const AclEntry = struct {
@@ -48,6 +49,7 @@ pub const Server = struct {
     running: bool,
     allocator: std.mem.Allocator,
     gcd_loop: if (builtin.os.tag == .macos) ?GcdEventLoop else void,
+    uring_loop: if (builtin.os.tag == .linux) ?IoUringEventLoop else void,
 
     pub const ClientConnection = struct {
         fd: std.c.fd_t,
@@ -84,6 +86,7 @@ pub const Server = struct {
             .running = false,
             .allocator = alloc,
             .gcd_loop = if (builtin.os.tag == .macos) null else {},
+            .uring_loop = if (builtin.os.tag == .linux) null else {},
         };
     }
 
@@ -124,6 +127,9 @@ pub const Server = struct {
         self.messages.deinit(self.allocator);
         if (builtin.os.tag == .macos) {
             if (self.gcd_loop) |*loop| loop.deinit();
+        }
+        if (builtin.os.tag == .linux) {
+            if (self.uring_loop) |*loop| loop.deinit();
         }
         self.allocator.free(self.socket_path);
     }
@@ -261,6 +267,9 @@ pub const Server = struct {
         if (builtin.os.tag == .macos) {
             return self.runGcd();
         }
+        if (builtin.os.tag == .linux) {
+            return self.runIoUring();
+        }
         return self.runPoll();
     }
 
@@ -352,7 +361,92 @@ pub const Server = struct {
         try gcd.run();
     }
 
-    /// Traditional poll()-based event loop. Used as fallback on non-macOS platforms.
+    /// io_uring-based event loop for Linux. Uses kernel-level async I/O
+    /// instead of poll(), reducing syscall overhead.
+    fn runIoUring(self: *Server) !void {
+        if (builtin.os.tag != .linux) return self.runPoll();
+
+        self.uring_loop = IoUringEventLoop.init(self.allocator) catch return self.runPoll();
+        const uring: *IoUringEventLoop = &self.uring_loop.?;
+
+        const cb = event_loop_mod.Callback{
+            .context = @ptrCast(self),
+            .func = @ptrCast(&struct {
+                fn handleEvent(ctx: *anyopaque, fd: std.posix.fd_t, _: event_loop_mod.EventType) void {
+                    const server: *Server = @ptrCast(@alignCast(ctx));
+                    // Accept new clients on listen fd.
+                    if (fd == server.listen_fd) {
+                        server.acceptClient() catch {};
+                        // Register the new client fd with io_uring.
+                        if (server.clients.items.len > 0) {
+                            const new_client = server.clients.items[server.clients.items.len - 1];
+                            if (builtin.os.tag == .linux) {
+                                if (server.uring_loop) |*ul| {
+                                    const new_cb = event_loop_mod.Callback{
+                                        .context = @ptrCast(server),
+                                        .func = @ptrCast(&handleEvent),
+                                    };
+                                    ul.addFd(new_client.fd, .read, new_cb) catch {};
+                                }
+                            }
+                        }
+                        return;
+                    }
+                    // Client or PTY fd.
+                    if (server.findClientIndex(fd)) |client_idx| {
+                        server.handleClientReadable(client_idx) catch {};
+                    } else {
+                        server.handlePtyReadable(fd);
+                    }
+                }
+            }.handleEvent),
+        };
+
+        // Register listen fd.
+        if (self.listen_fd >= 0) {
+            try uring.addFd(self.listen_fd, .read, cb);
+        }
+
+        // Register existing pane fds.
+        for (self.sessions.items) |session| {
+            for (session.windows.items) |window| {
+                for (window.panes.items) |pane| {
+                    if (pane.fd >= 0) {
+                        uring.addFd(pane.fd, .read, cb) catch {};
+                    }
+                }
+            }
+        }
+
+        // Register existing client fds.
+        for (self.clients.items) |client| {
+            if (client.fd >= 0) {
+                uring.addFd(client.fd, .read, cb) catch {};
+            }
+        }
+
+        // Add signal check timer (100ms).
+        const signal_cb = event_loop_mod.TimerCallback{
+            .context = @ptrCast(self),
+            .func = @ptrCast(&struct {
+                fn check(ctx: *anyopaque) void {
+                    const server: *Server = @ptrCast(@alignCast(ctx));
+                    if (signals.SignalHandler.shouldExit()) {
+                        server.stop();
+                        if (builtin.os.tag == .linux) {
+                            if (server.uring_loop) |*ul| ul.stop();
+                        }
+                    }
+                }
+            }.check),
+        };
+        _ = try uring.addTimer(100, true, signal_cb);
+
+        // Block on the io_uring event loop.
+        try uring.run();
+    }
+
+    /// Traditional poll()-based event loop. Used as fallback when platform-specific loops unavailable.
     fn runPoll(self: *Server) !void {
         const max_fds = 256;
         var pollfds: [max_fds]std.c.pollfd = undefined;
@@ -825,32 +919,34 @@ pub const Server = struct {
 
     pub fn trackPane(self: *Server, pane: *Pane, cols: u32, rows: u32) !void {
         try self.session_loop.addPane(pane.id, pane.fd, cols, rows);
-        // Register with GCD event loop if active.
-        if (builtin.os.tag == .macos) {
-            if (self.gcd_loop) |*gcd| {
-                if (pane.fd >= 0) {
-                    const cb = event_loop_mod.Callback{
-                        .context = @ptrCast(self),
-                        .func = @ptrCast(&struct {
-                            fn handle(ctx: *anyopaque, fd: std.posix.fd_t, _: event_loop_mod.EventType) void {
-                                const server: *Server = @ptrCast(@alignCast(ctx));
-                                server.handlePtyReadable(fd);
-                            }
-                        }.handle),
-                    };
-                    gcd.addFd(pane.fd, .read, cb) catch {};
-                }
+        if (pane.fd >= 0) {
+            const cb = event_loop_mod.Callback{
+                .context = @ptrCast(self),
+                .func = @ptrCast(&struct {
+                    fn handle(ctx: *anyopaque, fd: std.posix.fd_t, _: event_loop_mod.EventType) void {
+                        const server: *Server = @ptrCast(@alignCast(ctx));
+                        server.handlePtyReadable(fd);
+                    }
+                }.handle),
+            };
+            // Register with platform event loop if active.
+            if (builtin.os.tag == .macos) {
+                if (self.gcd_loop) |*gcd| gcd.addFd(pane.fd, .read, cb) catch {};
+            }
+            if (builtin.os.tag == .linux) {
+                if (self.uring_loop) |*uring| uring.addFd(pane.fd, .read, cb) catch {};
             }
         }
     }
 
     pub fn untrackPane(self: *Server, pane_id: u32) void {
-        // Remove from GCD event loop if active.
-        if (builtin.os.tag == .macos) {
-            if (self.gcd_loop) |*gcd| {
-                if (self.session_loop.getPane(pane_id)) |ps| {
-                    gcd.removeFd(ps.pty_fd);
-                }
+        // Remove from platform event loop if active.
+        if (self.session_loop.getPane(pane_id)) |ps| {
+            if (builtin.os.tag == .macos) {
+                if (self.gcd_loop) |*gcd| gcd.removeFd(ps.pty_fd);
+            }
+            if (builtin.os.tag == .linux) {
+                if (self.uring_loop) |*uring| uring.removeFd(ps.pty_fd);
             }
         }
         self.session_loop.removePane(pane_id);
