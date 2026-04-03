@@ -182,7 +182,9 @@ pub const Server = struct {
     pub fn applySessionDefaults(self: *Server, session: *Session) void {
         if (self.options.get(.session, "base-index")) |value| {
             switch (value) {
-                .number => |number| if (number >= 0) session.options.base_index = @intCast(number),
+                .number => |number| {
+                    if (number >= 0) session.options.base_index = @intCast(number);
+                },
                 else => {},
             }
         }
@@ -200,10 +202,12 @@ pub const Server = struct {
         }
         if (self.options.get(.session, "prefix")) |value| {
             switch (value) {
-                .string => |binding| if (key_string.stringToKey(binding)) |parsed| {
-                    session.options.prefix_key = parsed.key;
-                    self.bindings.prefix_key = parsed.key;
-                    self.bindings.prefix_mods = parsed.mods;
+                .string => |binding| {
+                    if (key_string.stringToKey(binding)) |parsed| {
+                        session.options.prefix_key = parsed.key;
+                        self.bindings.prefix_key = parsed.key;
+                        self.bindings.prefix_mods = parsed.mods;
+                    }
                 },
                 else => {},
             }
