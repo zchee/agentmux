@@ -229,11 +229,12 @@ test "list-panes lists active window panes" {
 
     const line0 = try readReply(std.testing.allocator, pipes[0]);
     defer std.testing.allocator.free(line0);
-    try std.testing.expect(std.mem.indexOf(u8, line0, "0: pane") != null);
+    // Format: "0: [%N] [WxH] (active)"
+    try std.testing.expect(std.mem.indexOf(u8, line0, "0: [%") != null);
 
     const line1 = try readReply(std.testing.allocator, pipes[0]);
     defer std.testing.allocator.free(line1);
-    try std.testing.expect(std.mem.indexOf(u8, line1, "1: pane") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line1, "1: [%") != null);
 }
 
 test "list-panes -a includes all sessions" {

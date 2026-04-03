@@ -205,8 +205,11 @@ test "tmux-equivalent list-sessions alias emits summaries over the reply pipe" {
 
     try std.testing.expectEqual(protocol.MessageType.output, first.msg_type);
     try std.testing.expectEqual(protocol.MessageType.output, second.msg_type);
-    try std.testing.expect(std.mem.indexOf(u8, first.payload, "alpha: 1 windows (attached: 1)\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, second.payload, "beta: 1 windows (attached: 0)\n") != null);
+    // Format: "name: N windows (created <date>) [(attached)]"
+    try std.testing.expect(std.mem.indexOf(u8, first.payload, "alpha: 1 windows (created ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first.payload, "(attached)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, second.payload, "beta: 1 windows (created ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, second.payload, "(attached)") == null);
 }
 
 test "tmux-equivalent kill-pane alias removes panes and tears down an empty session" {

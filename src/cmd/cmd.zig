@@ -294,6 +294,20 @@ fn defaultShellFromContext(ctx: *const Context) [:0]const u8 {
     return "/bin/sh";
 }
 
+/// Get terminal dimensions from context: active window > client > 80x24.
+fn terminalSize(ctx: *const Context) struct { cols: u32, rows: u32 } {
+    if (ctx.session) |s| {
+        if (s.active_window) |w| return .{ .cols = w.sx, .rows = w.sy };
+    }
+    if (ctx.client_index) |ci| {
+        if (ci < ctx.server.clients.items.len) {
+            const client = &ctx.server.clients.items[ci];
+            return .{ .cols = client.cols, .rows = client.rows };
+        }
+    }
+    return .{ .cols = 80, .rows = 24 };
+}
+
 const ClockTm = extern struct {
     tm_sec: i32,
     tm_min: i32,
@@ -308,6 +322,7 @@ const ClockTm = extern struct {
 
 extern "c" fn time(timer: ?*i64) i64;
 extern "c" fn localtime(timer: *const i64) ?*ClockTm;
+extern "c" fn strftime(buf: [*]u8, maxsize: usize, format: [*:0]const u8, tm: *const ClockTm) usize;
 
 fn parseNamedOption(args: []const []const u8, flag: []const u8) ?[]const u8 {
     var i: usize = 0;
@@ -761,7 +776,13 @@ fn cmdRefreshClient(_: *Context, _: []const []const u8) CmdError!void {
 }
 
 fn cmdShowMessages(ctx: *Context, _: []const []const u8) CmdError!void {
-    try writeOutput(ctx, "no messages\n", .{});
+    if (ctx.server.messages.items.len == 0) {
+        try writeOutput(ctx, "no messages\n", .{});
+        return;
+    }
+    for (ctx.server.messages.items) |msg| {
+        try writeOutput(ctx, "{s}\n", .{msg});
+    }
 }
 
 fn cmdSuspendClient(_: *Context, _: []const []const u8) CmdError!void {
@@ -1814,15 +1835,39 @@ fn cmdSaveBuffer(ctx: *Context, args: []const []const u8) CmdError!void {
 
 fn cmdNewSession(ctx: *Context, args: []const []const u8) CmdError!void {
     var session_name: []const u8 = "0";
+    var window_name: ?[]const u8 = null;
+    var explicit_x: ?u32 = null;
+    var explicit_y: ?u32 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "-s") and i + 1 < args.len) {
             i += 1;
             session_name = args[i];
+        } else if (std.mem.eql(u8, args[i], "-n") and i + 1 < args.len) {
+            i += 1;
+            window_name = args[i];
+        } else if (std.mem.eql(u8, args[i], "-x") and i + 1 < args.len) {
+            i += 1;
+            explicit_x = std.fmt.parseInt(u32, args[i], 10) catch null;
+        } else if (std.mem.eql(u8, args[i], "-y") and i + 1 < args.len) {
+            i += 1;
+            explicit_y = std.fmt.parseInt(u32, args[i], 10) catch null;
+        } else if ((std.mem.eql(u8, args[i], "-c") or std.mem.eql(u8, args[i], "-e") or
+            std.mem.eql(u8, args[i], "-f") or std.mem.eql(u8, args[i], "-F") or
+            std.mem.eql(u8, args[i], "-t")) and i + 1 < args.len)
+        {
+            i += 1; // consume value
         }
+        // -A/-d/-D/-E/-P/-X: boolean flags, noted
     }
 
-    const session = ctx.server.createSession(session_name, defaultShellFromContext(ctx), 80, 24) catch return CmdError.CommandFailed;
+    const ts = terminalSize(ctx);
+    const cols = explicit_x orelse ts.cols;
+    const rows = explicit_y orelse ts.rows;
+    const session = ctx.server.createSession(session_name, defaultShellFromContext(ctx), cols, rows) catch return CmdError.CommandFailed;
+    if (window_name) |wn| {
+        if (session.active_window) |w| w.rename(wn) catch {};
+    }
     ctx.session = session;
 }
 
@@ -1890,10 +1935,11 @@ fn cmdNewWindow(ctx: *Context, args: []const []const u8) CmdError!void {
         }
     }
 
-    const window = Window.init(ctx.allocator, name, 80, 24) catch return CmdError.OutOfMemory;
+    const ts = terminalSize(ctx);
+    const window = Window.init(ctx.allocator, name, ts.cols, ts.rows) catch return CmdError.OutOfMemory;
     errdefer window.deinit();
 
-    const pane = spawnWindowPane(ctx.allocator, defaultShellFromContext(ctx), 80, 24) catch |err| switch (err) {
+    const pane = spawnWindowPane(ctx.allocator, defaultShellFromContext(ctx), ts.cols, ts.rows) catch |err| switch (err) {
         CmdError.OutOfMemory => return CmdError.OutOfMemory,
         else => return CmdError.CommandFailed,
     };
@@ -1912,7 +1958,7 @@ fn cmdSplitWindow(ctx: *Context, args: []const []const u8) CmdError!void {
     const session = ctx.session orelse return CmdError.SessionNotFound;
     const window = session.active_window orelse return CmdError.WindowNotFound;
 
-    var direction: CellType = .horizontal;
+    var direction: CellType = .vertical; // tmux default: top-bottom split
     var percent: u32 = 50;
     var no_select = false;
     var zoom_after = false;
@@ -2102,11 +2148,27 @@ fn cmdDetachClient(ctx: *Context, args: []const []const u8) CmdError!void {
 
 fn cmdListSessions(ctx: *Context, _: []const []const u8) CmdError!void {
     for (ctx.server.sessions.items) |session| {
-        try writeOutput(ctx, "{s}: {d} windows (attached: {d})\n", .{
-            session.name,
-            session.windowCount(),
-            session.attached,
-        });
+        // Format creation time like tmux: "Mon Jan  2 15:04:05 2006"
+        var time_buf: [64]u8 = undefined;
+        var time_str: []const u8 = "";
+        const tm_ptr = localtime(&session.created_at);
+        if (tm_ptr) |tm| {
+            const len = strftime(&time_buf, time_buf.len, "%c", tm);
+            if (len > 0) time_str = time_buf[0..len];
+        }
+        if (session.attached > 0) {
+            try writeOutput(ctx, "{s}: {d} windows (created {s}) (attached)\n", .{
+                session.name,
+                session.windowCount(),
+                time_str,
+            });
+        } else {
+            try writeOutput(ctx, "{s}: {d} windows (created {s})\n", .{
+                session.name,
+                session.windowCount(),
+                time_str,
+            });
+        }
     }
 }
 
@@ -2400,9 +2462,24 @@ fn cmdKillPane(ctx: *Context, args: []const []const u8) CmdError!void {
 }
 
 fn cmdRenameSession(ctx: *Context, args: []const []const u8) CmdError!void {
-    const session = ctx.session orelse return CmdError.SessionNotFound;
     if (args.len == 0) return CmdError.InvalidArgs;
-    session.rename(args[args.len - 1]) catch return CmdError.OutOfMemory;
+    var target: ?[]const u8 = null;
+    var new_name: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "-t") and i + 1 < args.len) {
+            i += 1;
+            target = args[i];
+        } else if (args[i].len > 0 and args[i][0] != '-') {
+            new_name = args[i];
+        }
+    }
+    const name = new_name orelse return CmdError.InvalidArgs;
+    const session = if (target) |t|
+        ctx.server.findSession(t) orelse return CmdError.SessionNotFound
+    else
+        ctx.session orelse return CmdError.SessionNotFound;
+    session.rename(name) catch return CmdError.OutOfMemory;
 }
 
 fn cmdRenameWindow(ctx: *Context, args: []const []const u8) CmdError!void {
@@ -2783,11 +2860,15 @@ fn cmdListWindows(ctx: *Context, args: []const []const u8) CmdError!void {
     if (all_sessions) {
         for (ctx.server.sessions.items) |sess| {
             for (sess.windows.items, 0..) |window, idx| {
-                try writeOutput(ctx, "{s}:{d}: {s} ({d} panes)\n", .{
+                const marker: []const u8 = if (sess.active_window == window) "*" else "-";
+                try writeOutput(ctx, "{s}:{d}: {s}{s} ({d} panes) [{d}x{d}]\n", .{
                     sess.name,
                     sess.options.base_index + @as(u32, @intCast(idx)),
                     window.name,
+                    marker,
                     window.paneCount(),
+                    window.sx,
+                    window.sy,
                 });
             }
         }
@@ -2800,10 +2881,14 @@ fn cmdListWindows(ctx: *Context, args: []const []const u8) CmdError!void {
         ctx.session orelse return CmdError.SessionNotFound;
 
     for (session.windows.items, 0..) |window, idx| {
-        try writeOutput(ctx, "{d}: {s} ({d} panes)\n", .{
+        const marker: []const u8 = if (session.active_window == window) "*" else "-";
+        try writeOutput(ctx, "{d}: {s}{s} ({d} panes) [{d}x{d}]\n", .{
             session.options.base_index + @as(u32, @intCast(idx)),
             window.name,
+            marker,
             window.paneCount(),
+            window.sx,
+            window.sy,
         });
     }
 }
@@ -2827,8 +2912,9 @@ fn cmdListPanes(ctx: *Context, args: []const []const u8) CmdError!void {
         for (ctx.server.sessions.items) |session| {
             for (session.windows.items, 0..) |window, wi| {
                 for (window.panes.items, 0..) |pane, pi| {
-                    try writeOutput(ctx, "{s}:{d}.{d}: pane {d} [{d}x{d}]\n", .{
-                        session.name, wi, pi, pane.id, pane.sx, pane.sy,
+                    const active_mark: []const u8 = if (window.active_pane == pane) " (active)" else "";
+                    try writeOutput(ctx, "{s}:{d}.{d}: [%{d}] [{d}x{d}]{s}\n", .{
+                        session.name, wi, pi, pane.id, pane.sx, pane.sy, active_mark,
                     });
                 }
             }
@@ -2841,7 +2927,8 @@ fn cmdListPanes(ctx: *Context, args: []const []const u8) CmdError!void {
     if (session_level) {
         for (session.windows.items, 0..) |window, wi| {
             for (window.panes.items, 0..) |pane, pi| {
-                try writeOutput(ctx, "{d}.{d}: pane {d} [{d}x{d}]\n", .{ wi, pi, pane.id, pane.sx, pane.sy });
+                const active_mark: []const u8 = if (window.active_pane == pane) " (active)" else "";
+                try writeOutput(ctx, "{d}.{d}: [%{d}] [{d}x{d}]{s}\n", .{ wi, pi, pane.id, pane.sx, pane.sy, active_mark });
             }
         }
         return;
@@ -2849,7 +2936,8 @@ fn cmdListPanes(ctx: *Context, args: []const []const u8) CmdError!void {
 
     const window = session.active_window orelse return CmdError.WindowNotFound;
     for (window.panes.items, 0..) |pane, pi| {
-        try writeOutput(ctx, "{d}: pane {d} [{d}x{d}]\n", .{ pi, pane.id, pane.sx, pane.sy });
+        const active_mark: []const u8 = if (window.active_pane == pane) " (active)" else "";
+        try writeOutput(ctx, "{d}: [%{d}] [{d}x{d}]{s}\n", .{ pi, pane.id, pane.sx, pane.sy, active_mark });
     }
 }
 

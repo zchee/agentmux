@@ -5,9 +5,12 @@ const Environ = @import("core/environ.zig").Environ;
 const Style = @import("status/style.zig").Style;
 
 /// An agentmux session. Contains windows and tracks attached clients.
+extern "c" fn time(timer: ?*i64) i64;
+
 pub const Session = struct {
     id: u32,
     name: []const u8,
+    created_at: i64,
 
     windows: std.ArrayListAligned(*Window, null),
     active_window: ?*Window,
@@ -61,9 +64,13 @@ pub const Session = struct {
         const status_right = try alloc.dupe(u8, "#H");
         errdefer alloc.free(status_right);
 
+        var now: i64 = 0;
+        _ = time(&now);
+
         s.* = .{
             .id = next_id,
             .name = owned_name,
+            .created_at = now,
             .windows = .empty,
             .active_window = null,
             .last_window = null,
