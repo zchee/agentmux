@@ -266,33 +266,9 @@ pub const Registry = struct {
             .name = "set-option",
             .alias = "set",
             .min_args = 2,
-            .max_args = 8,
+            .max_args = 4,
             .usage = "set-option [-g] option value",
             .handler = cmdSetOption,
-        });
-        try self.register(.{
-            .name = "set-window-option",
-            .alias = "setw",
-            .min_args = 2,
-            .max_args = 8,
-            .usage = "set-window-option option value",
-            .handler = cmdSetWindowOption,
-        });
-        try self.register(.{
-            .name = "bind-key",
-            .alias = "bind",
-            .min_args = 2,
-            .max_args = 16,
-            .usage = "bind-key [-T table|-n] key command",
-            .handler = cmdBindKey,
-        });
-        try self.register(.{
-            .name = "unbind-key",
-            .alias = "unbind",
-            .min_args = 1,
-            .max_args = 8,
-            .usage = "unbind-key [-T table|-n] key",
-            .handler = cmdUnbindKey,
         });
         try self.register(.{
             .name = "source-file",
@@ -597,39 +573,15 @@ fn parseNamedOption(args: []const []const u8, flag: []const u8) ?[]const u8 {
     return null;
 }
 
-fn joinArgs(alloc: std.mem.Allocator, parts: []const []const u8) ![]u8 {
-    if (parts.len == 0) return try alloc.dupe(u8, "");
-
-    var total: usize = 0;
-    for (parts, 0..) |part, i| {
-        total += part.len;
-        if (i + 1 < parts.len) total += 1;
-    }
-
-    var out = try alloc.alloc(u8, total);
-    var pos: usize = 0;
-    for (parts, 0..) |part, i| {
-        @memcpy(out[pos .. pos + part.len], part);
-        pos += part.len;
-        if (i + 1 < parts.len) {
-            out[pos] = ' ';
-            pos += 1;
-        }
-    }
-    return out;
-}
-
-fn parseBoolValue(value: []const u8) ?bool {
+fn parseBooleanValue(value: []const u8) ?bool {
     if (std.ascii.eqlIgnoreCase(value, "on") or
         std.ascii.eqlIgnoreCase(value, "yes") or
-        std.ascii.eqlIgnoreCase(value, "true") or
         std.mem.eql(u8, value, "1"))
     {
         return true;
     }
     if (std.ascii.eqlIgnoreCase(value, "off") or
         std.ascii.eqlIgnoreCase(value, "no") or
-        std.ascii.eqlIgnoreCase(value, "false") or
         std.mem.eql(u8, value, "0"))
     {
         return false;
@@ -637,70 +589,15 @@ fn parseBoolValue(value: []const u8) ?bool {
     return null;
 }
 
-fn executeCommandText(ctx: *Context, text: []const u8) CmdError!void {
-    const registry = ctx.registry orelse return CmdError.CommandFailed;
-    var parser = config_parser.ConfigParser.init(ctx.allocator, text);
-    var commands = parser.parseAll() catch return CmdError.CommandFailed;
-    defer {
-        for (commands.items) |*command| command.deinit(ctx.allocator);
-        commands.deinit(ctx.allocator);
-    }
+fn parsePrefixValue(value: []const u8) ?u21 {
+    const parsed = key_string.stringToKey(value) orelse return null;
+    if (parsed.mods.meta or parsed.mods.shift) return null;
+    if (!parsed.mods.ctrl) return parsed.key;
 
-    if (std.mem.eql(u8, option_name, "status")) {
-        switch (value) {
-            .boolean => |enabled| {
-                for (server.sessions.items) |session| session.options.status = enabled;
-            },
-            else => {},
-        }
-        return;
-    }
-
-    if (std.mem.eql(u8, option_name, "mouse")) {
-        switch (value) {
-            .boolean => |enabled| {
-                for (server.sessions.items) |session| session.options.mouse = enabled;
-            },
-            else => {},
-        }
-        return;
-    }
-
-    if (std.mem.eql(u8, option_name, "prefix")) {
-        switch (value) {
-            .string => |binding| if (key_string.stringToKey(binding)) |parsed| {
-                server.bindings.prefix_key = parsed.key;
-                server.bindings.prefix_mods = parsed.mods;
-                for (server.sessions.items) |session| session.options.prefix_key = parsed.key;
-            },
-            else => {},
-        }
-    }
-}
-
-fn runShellCommand(command: []const u8) CmdError!i32 {
-    var cmd_buf: [4096]u8 = .{0} ** 4096;
-    if (command.len >= cmd_buf.len) return CmdError.CommandFailed;
-    @memcpy(cmd_buf[0..command.len], command);
-    const command_z: [*:0]const u8 = @ptrCast(cmd_buf[0..command.len :0]);
-
-    const pid = std.c.fork();
-    if (pid < 0) return CmdError.CommandFailed;
-    if (pid == 0) {
-        const sh: [*:0]const u8 = "/bin/sh";
-        const c_flag: [*:0]const u8 = "-c";
-        const argv = [_:null]?[*:0]const u8{ sh, c_flag, command_z };
-        _ = execvp(sh, &argv);
-        std.c.exit(127);
-    }
-
-    var status: i32 = 0;
-    while (true) {
-        const waited = std.c.waitpid(pid, &status, 0);
-        if (waited == pid) break;
-        if (waited < 0) return CmdError.CommandFailed;
-    }
-    return @divTrunc(status, 256);
+    if (parsed.key == ' ') return 0;
+    if (parsed.key >= 'a' and parsed.key <= 'z') return parsed.key - 'a' + 1;
+    if (parsed.key >= 'A' and parsed.key <= 'Z') return parsed.key - 'A' + 1;
+    return null;
 }
 
 fn resolvePasteBuffer(ctx: *Context, name: ?[]const u8) CmdError!*paste_mod.PasteBuffer {
