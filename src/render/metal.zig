@@ -104,13 +104,31 @@ pub const MetalRenderer = if (builtin.os.tag == .macos) struct {
         .getCellSize = @ptrCast(&getCellSizeVt),
     };
 
-    fn deinitVt(self: *MetalRenderer) void { self.deinit(); }
-    fn resizeVt(self: *MetalRenderer, w: u32, h: u32) void { self.resize(w, h); }
-    fn beginFrameVt(self: *MetalRenderer) void { self.beginFrame(); }
-    fn endFrameVt(self: *MetalRenderer) void { self.endFrame(); }
-    fn drawCellVt(self: *MetalRenderer, x: u32, y: u32, cell: *const grid.Cell) void { self.drawCell(x, y, cell); }
-    fn drawRectVt(self: *MetalRenderer, x: u32, y: u32, w: u32, h: u32, c: colour.Colour) void { self.drawRect(x, y, w, h, c); }
-    fn drawImageVt(self: *MetalRenderer, x: u32, y: u32, w: u32, h: u32, px: []const u8) void { self.drawImage(x, y, w, h, px); }
-    fn presentVt(self: *MetalRenderer) void { self.present(); }
-    fn getCellSizeVt(self: *MetalRenderer) renderer.Renderer.CellSize { return self.getCellSize(); }
+    fn deinitVt(self: *MetalRenderer) void {
+        self.deinit();
+    }
+    fn resizeVt(self: *MetalRenderer, w: u32, h: u32) void {
+        self.resize(w, h);
+    }
+    fn beginFrameVt(self: *MetalRenderer) void {
+        self.beginFrame();
+    }
+    fn endFrameVt(self: *MetalRenderer) void {
+        self.endFrame();
+    }
+    fn drawCellVt(self: *MetalRenderer, x: u32, y: u32, cell: *const grid.Cell) void {
+        self.drawCell(x, y, cell);
+    }
+    fn drawRectVt(self: *MetalRenderer, x: u32, y: u32, w: u32, h: u32, c: colour.Colour) void {
+        self.drawRect(x, y, w, h, c);
+    }
+    fn drawImageVt(self: *MetalRenderer, x: u32, y: u32, w: u32, h: u32, px: []const u8) void {
+        self.drawImage(x, y, w, h, px);
+    }
+    fn presentVt(self: *MetalRenderer) void {
+        self.present();
+    }
+    fn getCellSizeVt(self: *MetalRenderer) renderer.Renderer.CellSize {
+        return self.getCellSize();
+    }
 } else void;

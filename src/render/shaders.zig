@@ -144,8 +144,14 @@ test "ortho projection" {
 test "cell quad vertices" {
     if (builtin.os.tag != .macos) return;
     const quad = MetalShaders.cellQuad(
-        0, 0, 8, 16,
-        0, 0, 0.1, 0.1,
+        0,
+        0,
+        8,
+        16,
+        0,
+        0,
+        0.1,
+        0.1,
         .{ 1, 1, 1, 1 },
         .{ 0, 0, 0, 1 },
         true,

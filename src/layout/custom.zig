@@ -121,8 +121,14 @@ const Parser = struct {
                     return err;
                 };
                 const sep = self.peek() orelse return error.InvalidFormat;
-                if (sep == '}') { self.advance(); break; }
-                if (sep == ',') { self.advance(); continue; }
+                if (sep == '}') {
+                    self.advance();
+                    break;
+                }
+                if (sep == ',') {
+                    self.advance();
+                    continue;
+                }
                 return error.InvalidFormat;
             }
             return cell;
@@ -137,8 +143,14 @@ const Parser = struct {
                     return err;
                 };
                 const sep = self.peek() orelse return error.InvalidFormat;
-                if (sep == ']') { self.advance(); break; }
-                if (sep == ',') { self.advance(); continue; }
+                if (sep == ']') {
+                    self.advance();
+                    break;
+                }
+                if (sep == ',') {
+                    self.advance();
+                    continue;
+                }
                 return error.InvalidFormat;
             }
             return cell;
