@@ -17,13 +17,13 @@ A terminal multiplexer written in [Zig](https://ziglang.org/), feature-compatibl
 - Custom layout serialization (tmux-compatible checksum format)
 - Key binding engine with prefix key (default: `C-b`) and key tables
 - tmux-compatible configuration file syntax (`.tmux.conf`)
-- 24 built-in commands with aliases (`new-session`, `split-window`, `select-pane`, etc.)
+- 34 built-in tmux-equivalent commands with 28 aliases (`new-session`, `split-window`, `select-pane`, etc.)
 - Status bar with format string expansion (`#S`, `#W`, `#{pane_current_path}`, etc.)
 - Style parsing (`fg=red,bg=blue,bold`)
 - Copy mode with vi and emacs key bindings, incremental search, visual selection
 - Paste buffer stack
 - Hooks system (19 event types: `after-new-session`, `client-attached`, etc.)
-- Background job management (`run-shell`, `if-shell`)
+- Background job management (`run-shell`) plus hook-triggered shell jobs
 - Control mode for programmatic integration
 - Options system with scoped inheritance (server -> session -> window -> pane)
 
@@ -164,7 +164,7 @@ src/
     options_table.zig      Default options
 
   cmd/
-    cmd.zig                Command registry + 24 commands
+    cmd.zig                Command registry + 34 tmux-equivalent commands
 
   keybind/
     bindings.zig           Key tables, prefix key
@@ -232,6 +232,28 @@ bind-key '%' split-window -h
 # vi copy mode
 set -g mode-keys vi
 ```
+
+## Implemented tmux-equivalent commands
+
+These commands are currently wired into `src/cmd/cmd.zig` and can be invoked
+directly or through tmux-style aliases.
+
+- **Server and session management:** `new-session` (`new`), `kill-server`,
+  `kill-session`, `list-sessions` (`ls`), `detach-client` (`detach`),
+  `rename-session`
+- **Window and pane control:** `new-window` (`neww`), `split-window`
+  (`splitw`), `select-window` (`selectw`), `select-pane`, `next-window`
+  (`next`), `previous-window` (`prev`), `last-window` (`last`),
+  `kill-window` (`killw`), `kill-pane` (`killp`), `rename-window`
+  (`renamew`), `resize-pane` (`resizep`), `swap-pane` (`swapp`),
+  `list-windows` (`lsw`), `list-panes`
+- **Buffers and copy mode:** `set-buffer` (`setb`), `paste-buffer`
+  (`pasteb`), `copy-mode` (`copy`), `list-buffers` (`lsb`), `show-buffer`
+  (`showb`), `delete-buffer` (`deleteb`)
+- **Shell, prompts, and inspection:** `send-keys` (`send`),
+  `display-message` (`display`), `source-file` (`source`),
+  `command-prompt` (`prompt`), `list-keys` (`lsk`), `choose-tree`,
+  `clock-mode` (`clock`), `run-shell` (`run`)
 
 ## Differences from tmux
 

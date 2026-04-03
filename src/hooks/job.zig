@@ -7,7 +7,7 @@ pub const JobStatus = enum {
     signaled,
 };
 
-/// A background job (run-shell, if-shell).
+/// A background job used by run-shell and hook execution.
 pub const Job = struct {
     pid: std.c.pid_t,
     read_fd: std.c.fd_t, // pipe to read stdout from child

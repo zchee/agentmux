@@ -1365,14 +1365,60 @@ extern "c" fn execvp(
     argv: [*:null]const ?[*:0]const u8,
 ) i32;
 
+const documented_builtin_commands = [_]struct {
+    name: []const u8,
+    alias: ?[]const u8 = null,
+}{
+    .{ .name = "new-session", .alias = "new" },
+    .{ .name = "kill-server" },
+    .{ .name = "kill-session" },
+    .{ .name = "new-window", .alias = "neww" },
+    .{ .name = "split-window", .alias = "splitw" },
+    .{ .name = "select-pane" },
+    .{ .name = "select-window", .alias = "selectw" },
+    .{ .name = "detach-client", .alias = "detach" },
+    .{ .name = "list-sessions", .alias = "ls" },
+    .{ .name = "send-keys", .alias = "send" },
+    .{ .name = "next-window", .alias = "next" },
+    .{ .name = "previous-window", .alias = "prev" },
+    .{ .name = "last-window", .alias = "last" },
+    .{ .name = "kill-window", .alias = "killw" },
+    .{ .name = "kill-pane", .alias = "killp" },
+    .{ .name = "rename-session" },
+    .{ .name = "rename-window", .alias = "renamew" },
+    .{ .name = "resize-pane", .alias = "resizep" },
+    .{ .name = "swap-pane", .alias = "swapp" },
+    .{ .name = "display-message", .alias = "display" },
+    .{ .name = "source-file", .alias = "source" },
+    .{ .name = "list-windows", .alias = "lsw" },
+    .{ .name = "list-panes" },
+    .{ .name = "set-buffer", .alias = "setb" },
+    .{ .name = "paste-buffer", .alias = "pasteb" },
+    .{ .name = "copy-mode", .alias = "copy" },
+    .{ .name = "command-prompt", .alias = "prompt" },
+    .{ .name = "list-buffers", .alias = "lsb" },
+    .{ .name = "show-buffer", .alias = "showb" },
+    .{ .name = "delete-buffer", .alias = "deleteb" },
+    .{ .name = "list-keys", .alias = "lsk" },
+    .{ .name = "choose-tree" },
+    .{ .name = "clock-mode", .alias = "clock" },
+    .{ .name = "run-shell", .alias = "run" },
+};
+
 test "registry register and find" {
     var reg = Registry.init(std.testing.allocator);
     defer reg.deinit();
     try reg.registerBuiltins();
 
-    try std.testing.expect(reg.find("new-session") != null);
-    try std.testing.expect(reg.find("new") != null);
-    try std.testing.expect(reg.find("kill-server") != null);
+    var alias_count: usize = 0;
+    for (documented_builtin_commands) |command| {
+        try std.testing.expect(reg.find(command.name) != null);
+        if (command.alias) |alias| {
+            alias_count += 1;
+            try std.testing.expect(reg.find(alias) != null);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, documented_builtin_commands.len + alias_count), reg.commands.count());
     try std.testing.expect(reg.find("nonexistent") == null);
 }
 
