@@ -75,6 +75,30 @@ pub const Registry = struct {
         return self.commands.get(name);
     }
 
+    /// Return a sorted, deduplicated list of all commands (aliases excluded).
+    pub fn listAll(self: *const Registry, alloc: std.mem.Allocator) ![]CommandDef {
+        var seen = std.StringHashMap(void).init(alloc);
+        defer seen.deinit();
+        var list: std.ArrayListAligned(CommandDef, null) = .empty;
+        defer list.deinit(alloc);
+
+        var iter = self.commands.iterator();
+        while (iter.next()) |entry| {
+            const def = entry.value_ptr.*;
+            if (seen.contains(def.name)) continue;
+            try seen.put(def.name, {});
+            try list.append(alloc, def);
+        }
+
+        const items = try alloc.dupe(CommandDef, list.items);
+        std.mem.sort(CommandDef, items, {}, struct {
+            fn lessThan(_: void, a: CommandDef, b: CommandDef) bool {
+                return std.mem.order(u8, a.name, b.name) == .lt;
+            }
+        }.lessThan);
+        return items;
+    }
+
     /// Execute a command by name with arguments.
     pub fn execute(self: *const Registry, ctx: *Context, name: []const u8, args: []const []const u8) CmdError!void {
         const def = self.find(name) orelse return CmdError.CommandFailed;
@@ -90,302 +114,125 @@ pub const Registry = struct {
 
     /// Register all built-in commands.
     pub fn registerBuiltins(self: *Registry) !void {
-        try self.register(.{
-            .name = "new-session",
-            .alias = "new",
-            .min_args = 0,
-            .max_args = 10,
-            .usage = "new-session [-d] [-s session-name] [-n window-name]",
-            .handler = cmdNewSession,
-        });
-        try self.register(.{
-            .name = "kill-server",
-            .alias = null,
-            .min_args = 0,
-            .max_args = 0,
-            .usage = "kill-server",
-            .handler = cmdKillServer,
-        });
-        try self.register(.{
-            .name = "kill-session",
-            .alias = null,
-            .min_args = 0,
-            .max_args = 2,
-            .usage = "kill-session [-t target-session]",
-            .handler = cmdKillSession,
-        });
-        try self.register(.{
-            .name = "new-window",
-            .alias = "neww",
-            .min_args = 0,
-            .max_args = 10,
-            .usage = "new-window [-d] [-n name]",
-            .handler = cmdNewWindow,
-        });
-        try self.register(.{
-            .name = "split-window",
-            .alias = "splitw",
-            .min_args = 0,
-            .max_args = 10,
-            .usage = "split-window [-h|-v] [-p percentage]",
-            .handler = cmdSplitWindow,
-        });
-        try self.register(.{
-            .name = "select-pane",
-            .alias = null,
-            .min_args = 0,
-            .max_args = 4,
-            .usage = "select-pane [-U|-D|-L|-R] [-t target-pane]",
-            .handler = cmdSelectPane,
-        });
-        try self.register(.{
-            .name = "select-window",
-            .alias = "selectw",
-            .min_args = 0,
-            .max_args = 2,
-            .usage = "select-window [-t target-window]",
-            .handler = cmdSelectWindow,
-        });
-        try self.register(.{
-            .name = "detach-client",
-            .alias = "detach",
-            .min_args = 0,
-            .max_args = 2,
-            .usage = "detach-client",
-            .handler = cmdDetachClient,
-        });
-        try self.register(.{
-            .name = "list-sessions",
-            .alias = "ls",
-            .min_args = 0,
-            .max_args = 0,
-            .usage = "list-sessions",
-            .handler = cmdListSessions,
-        });
-        try self.register(.{
-            .name = "send-keys",
-            .alias = "send",
-            .min_args = 1,
-            .max_args = 20,
-            .usage = "send-keys key ...",
-            .handler = cmdSendKeys,
-        });
-        try self.register(.{
-            .name = "send-prefix",
-            .alias = null,
-            .min_args = 0,
-            .max_args = 0,
-            .usage = "send-prefix",
-            .handler = cmdSendPrefix,
-        });
-        try self.register(.{
-            .name = "next-window",
-            .alias = "next",
-            .min_args = 0,
-            .max_args = 0,
-            .usage = "next-window",
-            .handler = cmdNextWindow,
-        });
-        try self.register(.{
-            .name = "previous-window",
-            .alias = "prev",
-            .min_args = 0,
-            .max_args = 0,
-            .usage = "previous-window",
-            .handler = cmdPrevWindow,
-        });
-        try self.register(.{
-            .name = "last-window",
-            .alias = "last",
-            .min_args = 0,
-            .max_args = 0,
-            .usage = "last-window",
-            .handler = cmdLastWindow,
-        });
-        try self.register(.{
-            .name = "kill-window",
-            .alias = "killw",
-            .min_args = 0,
-            .max_args = 2,
-            .usage = "kill-window [-t target-window]",
-            .handler = cmdKillWindow,
-        });
-        try self.register(.{
-            .name = "kill-pane",
-            .alias = "killp",
-            .min_args = 0,
-            .max_args = 2,
-            .usage = "kill-pane [-t target-pane]",
-            .handler = cmdKillPane,
-        });
-        try self.register(.{
-            .name = "rename-session",
-            .alias = null,
-            .min_args = 1,
-            .max_args = 2,
-            .usage = "rename-session new-name",
-            .handler = cmdRenameSession,
-        });
-        try self.register(.{
-            .name = "rename-window",
-            .alias = "renamew",
-            .min_args = 1,
-            .max_args = 2,
-            .usage = "rename-window new-name",
-            .handler = cmdRenameWindow,
-        });
-        try self.register(.{
-            .name = "resize-pane",
-            .alias = "resizep",
-            .min_args = 0,
-            .max_args = 4,
-            .usage = "resize-pane [-U|-D|-L|-R] [amount]",
-            .handler = cmdResizePane,
-        });
-        try self.register(.{
-            .name = "swap-pane",
-            .alias = "swapp",
-            .min_args = 0,
-            .max_args = 4,
-            .usage = "swap-pane [-U|-D]",
-            .handler = cmdSwapPane,
-        });
-        try self.register(.{
-            .name = "display-message",
-            .alias = "display",
-            .min_args = 0,
-            .max_args = 10,
-            .usage = "display-message [message]",
-            .handler = cmdDisplayMessage,
-        });
-        try self.register(.{
-            .name = "set-option",
-            .alias = "set",
-            .min_args = 2,
-            .max_args = 4,
-            .usage = "set-option [-g] option value",
-            .handler = cmdSetOption,
-        });
-        try self.register(.{
-            .name = "source-file",
-            .alias = "source",
-            .min_args = 1,
-            .max_args = 1,
-            .usage = "source-file path",
-            .handler = cmdSourceFile,
-        });
-        try self.register(.{
-            .name = "list-windows",
-            .alias = "lsw",
-            .min_args = 0,
-            .max_args = 0,
-            .usage = "list-windows",
-            .handler = cmdListWindows,
-        });
-        try self.register(.{
-            .name = "list-panes",
-            .alias = null,
-            .min_args = 0,
-            .max_args = 0,
-            .usage = "list-panes",
-            .handler = cmdListPanes,
-        });
-        try self.register(.{
-            .name = "set-buffer",
-            .alias = "setb",
-            .min_args = 1,
-            .max_args = 3,
-            .usage = "set-buffer [-b name] data",
-            .handler = cmdSetBuffer,
-        });
-        try self.register(.{
-            .name = "paste-buffer",
-            .alias = "pasteb",
-            .min_args = 0,
-            .max_args = 2,
-            .usage = "paste-buffer [-b name]",
-            .handler = cmdPasteBuffer,
-        });
-        try self.register(.{
-            .name = "copy-mode",
-            .alias = "copy",
-            .min_args = 0,
-            .max_args = 1,
-            .usage = "copy-mode",
-            .handler = cmdCopyMode,
-        });
-        try self.register(.{
-            .name = "command-prompt",
-            .alias = "prompt",
-            .min_args = 0,
-            .max_args = 8,
-            .usage = "command-prompt [initial-command]",
-            .handler = cmdCommandPrompt,
-        });
-        try self.register(.{
-            .name = "list-buffers",
-            .alias = "lsb",
-            .min_args = 0,
-            .max_args = 0,
-            .usage = "list-buffers",
-            .handler = cmdListBuffers,
-        });
-        try self.register(.{
-            .name = "show-buffer",
-            .alias = "showb",
-            .min_args = 0,
-            .max_args = 2,
-            .usage = "show-buffer [-b name]",
-            .handler = cmdShowBuffer,
-        });
-        try self.register(.{
-            .name = "delete-buffer",
-            .alias = "deleteb",
-            .min_args = 0,
-            .max_args = 2,
-            .usage = "delete-buffer [-b name]",
-            .handler = cmdDeleteBuffer,
-        });
-        try self.register(.{
-            .name = "list-keys",
-            .alias = "lsk",
-            .min_args = 0,
-            .max_args = 0,
-            .usage = "list-keys",
-            .handler = cmdListKeys,
-        });
-        try self.register(.{
-            .name = "choose-tree",
-            .alias = null,
-            .min_args = 0,
-            .max_args = 2,
-            .usage = "choose-tree [-s|-w]",
-            .handler = cmdChooseTree,
-        });
-        try self.register(.{
-            .name = "clock-mode",
-            .alias = "clock",
-            .min_args = 0,
-            .max_args = 0,
-            .usage = "clock-mode",
-            .handler = cmdClockMode,
-        });
-        try self.register(.{
-            .name = "run-shell",
-            .alias = "run",
-            .min_args = 1,
-            .max_args = 2,
-            .usage = "run-shell command",
-            .handler = cmdRunShell,
-        });
-        try self.register(.{
-            .name = "if-shell",
-            .alias = "if",
-            .min_args = 2,
-            .max_args = 3,
-            .usage = "if-shell shell-command command [command]",
-            .handler = cmdIfShell,
-        });
+        // -- Session commands --
+        try self.register(.{ .name = "attach-session", .alias = "attach", .min_args = 0, .max_args = 10, .usage = "attach-session (attach) [-dErx] [-c working-directory] [-f flags] [-t target-session]", .handler = cmdAttachSession });
+        try self.register(.{ .name = "detach-client", .alias = "detach", .min_args = 0, .max_args = 8, .usage = "detach-client (detach) [-aP] [-E shell-command] [-s target-session] [-t target-client]", .handler = cmdDetachClient });
+        try self.register(.{ .name = "has-session", .alias = "has", .min_args = 0, .max_args = 2, .usage = "has-session (has) [-t target-session]", .handler = cmdHasSession });
+        try self.register(.{ .name = "kill-server", .alias = null, .min_args = 0, .max_args = 0, .usage = "kill-server", .handler = cmdKillServer });
+        try self.register(.{ .name = "kill-session", .alias = null, .min_args = 0, .max_args = 4, .usage = "kill-session [-aC] [-t target-session]", .handler = cmdKillSession });
+        try self.register(.{ .name = "list-clients", .alias = "lsc", .min_args = 0, .max_args = 8, .usage = "list-clients (lsc) [-F format] [-f filter] [-O order] [-t target-session]", .handler = cmdListClients });
+        try self.register(.{ .name = "list-commands", .alias = "lscm", .min_args = 0, .max_args = 4, .usage = "list-commands (lscm) [-F format] [command]", .handler = cmdListCommands });
+        try self.register(.{ .name = "list-sessions", .alias = "ls", .min_args = 0, .max_args = 8, .usage = "list-sessions (ls) [-r] [-F format] [-f filter] [-O order]", .handler = cmdListSessions });
+        try self.register(.{ .name = "lock-client", .alias = "lockc", .min_args = 0, .max_args = 2, .usage = "lock-client (lockc) [-t target-client]", .handler = cmdNotImplemented });
+        try self.register(.{ .name = "lock-server", .alias = "lock", .min_args = 0, .max_args = 0, .usage = "lock-server (lock)", .handler = cmdNotImplemented });
+        try self.register(.{ .name = "lock-session", .alias = "locks", .min_args = 0, .max_args = 2, .usage = "lock-session (locks) [-t target-session]", .handler = cmdNotImplemented });
+        try self.register(.{ .name = "new-session", .alias = "new", .min_args = 0, .max_args = 20, .usage = "new-session (new) [-AdDEPX] [-c start-directory] [-e environment] [-F format] [-f flags] [-n window-name] [-s session-name] [-t target-session] [-x width] [-y height] [shell-command [argument ...]]", .handler = cmdNewSession });
+        try self.register(.{ .name = "refresh-client", .alias = "refresh", .min_args = 0, .max_args = 20, .usage = "refresh-client (refresh) [-cDlLRSU] [-A pane:state] [-B name:what:format] [-C XxY] [-f flags] [-r pane:report] [-t target-client] [adjustment]", .handler = cmdNotImplemented });
+        try self.register(.{ .name = "rename-session", .alias = "rename", .min_args = 1, .max_args = 4, .usage = "rename-session (rename) [-t target-session] new-name", .handler = cmdRenameSession });
+        try self.register(.{ .name = "show-messages", .alias = "showmsgs", .min_args = 0, .max_args = 4, .usage = "show-messages (showmsgs) [-JT] [-t target-client]", .handler = cmdNotImplemented });
+        try self.register(.{ .name = "start-server", .alias = "start", .min_args = 0, .max_args = 0, .usage = "start-server (start)", .handler = cmdStartServer });
+        try self.register(.{ .name = "suspend-client", .alias = "suspendc", .min_args = 0, .max_args = 2, .usage = "suspend-client (suspendc) [-t target-client]", .handler = cmdNotImplemented });
+        try self.register(.{ .name = "switch-client", .alias = "switchc", .min_args = 0, .max_args = 14, .usage = "switch-client (switchc) [-ElnprZ] [-c target-client] [-t target-session] [-T key-table] [-O order]", .handler = cmdNotImplemented });
+
+        // -- Window commands --
+        try self.register(.{ .name = "choose-tree", .alias = null, .min_args = 0, .max_args = 14, .usage = "choose-tree [-GNrswZ] [-F format] [-f filter] [-K key-format] [-O sort-order] [-t target-pane] [template]", .handler = cmdChooseTree });
+        try self.register(.{ .name = "find-window", .alias = "findw", .min_args = 1, .max_args = 10, .usage = "find-window (findw) [-CiNrTZ] [-t target-pane] match-string", .handler = cmdNotImplemented });
+        try self.register(.{ .name = "kill-window", .alias = "killw", .min_args = 0, .max_args = 4, .usage = "kill-window (killw) [-a] [-t target-window]", .handler = cmdKillWindow });
+        try self.register(.{ .name = "last-window", .alias = "last", .min_args = 0, .max_args = 2, .usage = "last-window (last) [-t target-session]", .handler = cmdLastWindow });
+        try self.register(.{ .name = "link-window", .alias = "linkw", .min_args = 0, .max_args = 8, .usage = "link-window (linkw) [-abdk] [-s src-window] [-t dst-window]", .handler = cmdNotImplemented });
+        try self.register(.{ .name = "list-windows", .alias = "lsw", .min_args = 0, .max_args = 8, .usage = "list-windows (lsw) [-ar] [-F format] [-f filter] [-O order] [-t target-session]", .handler = cmdListWindows });
+        try self.register(.{ .name = "move-window", .alias = "movew", .min_args = 0, .max_args = 10, .usage = "move-window (movew) [-abdkr] [-s src-window] [-t dst-window]", .handler = cmdNotImplemented });
+        try self.register(.{ .name = "new-window", .alias = "neww", .min_args = 0, .max_args = 20, .usage = "new-window (neww) [-abdkPS] [-c start-directory] [-e environment] [-F format] [-n window-name] [-t target-window] [shell-command [argument ...]]", .handler = cmdNewWindow });
+        try self.register(.{ .name = "next-layout", .alias = "nextl", .min_args = 0, .max_args = 2, .usage = "next-layout (nextl) [-t target-window]", .handler = cmdNextLayout });
+        try self.register(.{ .name = "next-window", .alias = "next", .min_args = 0, .max_args = 4, .usage = "next-window (next) [-a] [-t target-session]", .handler = cmdNextWindow });
+        try self.register(.{ .name = "previous-layout", .alias = "prevl", .min_args = 0, .max_args = 2, .usage = "previous-layout (prevl) [-t target-window]", .handler = cmdPrevLayout });
+        try self.register(.{ .name = "previous-window", .alias = "prev", .min_args = 0, .max_args = 4, .usage = "previous-window (prev) [-a] [-t target-session]", .handler = cmdPrevWindow });
+        try self.register(.{ .name = "rename-window", .alias = "renamew", .min_args = 1, .max_args = 4, .usage = "rename-window (renamew) [-t target-window] new-name", .handler = cmdRenameWindow });
+        try self.register(.{ .name = "resize-window", .alias = "resizew", .min_args = 0, .max_args = 10, .usage = "resize-window (resizew) [-aADLRU] [-x width] [-y height] [-t target-window] [adjustment]", .handler = cmdNotImplemented });
+        try self.register(.{ .name = "respawn-window", .alias = "respawnw", .min_args = 0, .max_args = 10, .usage = "respawn-window (respawnw) [-k] [-c start-directory] [-e environment] [-t target-window] [shell-command [argument ...]]", .handler = cmdNotImplemented });
+        try self.register(.{ .name = "rotate-window", .alias = "rotatew", .min_args = 0, .max_args = 4, .usage = "rotate-window (rotatew) [-DUZ] [-t target-window]", .handler = cmdRotateWindow });
+        try self.register(.{ .name = "select-layout", .alias = "selectl", .min_args = 0, .max_args = 6, .usage = "select-layout (selectl) [-Enop] [-t target-pane] [layout-name]", .handler = cmdSelectLayout });
+        try self.register(.{ .name = "select-window", .alias = "selectw", .min_args = 0, .max_args = 4, .usage = "select-window (selectw) [-lnpT] [-t target-window]", .handler = cmdSelectWindow });
+        try self.register(.{ .name = "split-window", .alias = "splitw", .min_args = 0, .max_args = 20, .usage = "split-window (splitw) [-bdefhIPvZ] [-c start-directory] [-e environment] [-F format] [-l size] [-t target-pane] [shell-command [argument ...]]", .handler = cmdSplitWindow });
+        try self.register(.{ .name = "swap-window", .alias = "swapw", .min_args = 0, .max_args = 6, .usage = "swap-window (swapw) [-d] [-s src-window] [-t dst-window]", .handler = cmdSwapWindow });
+        try self.register(.{ .name = "unlink-window", .alias = "unlinkw", .min_args = 0, .max_args = 4, .usage = "unlink-window (unlinkw) [-k] [-t target-window]", .handler = cmdNotImplemented });
+
+        // -- Pane commands --
+        try self.register(.{ .name = "break-pane", .alias = "breakp", .min_args = 0, .max_args = 10, .usage = "break-pane (breakp) [-abdP] [-F format] [-n window-name] [-s src-pane] [-t dst-window]", .handler = cmdNotImplemented });
+        try self.register(.{ .name = "capture-pane", .alias = "capturep", .min_args = 0, .max_args = 12, .usage = "capture-pane (capturep) [-aCeJMNpPqT] [-b buffer-name] [-E end-line] [-S start-line] [-t target-pane]", .handler = cmdNotImplemented });
+        try self.register(.{ .name = "display-panes", .alias = "displayp", .min_args = 0, .max_args = 6, .usage = "display-panes (displayp) [-bN] [-d duration] [-t target-client] [template]", .handler = cmdNotImplemented });
+        try self.register(.{ .name = "join-pane", .alias = "joinp", .min_args = 0, .max_args = 10, .usage = "join-pane (joinp) [-bdfhv] [-l size] [-s src-pane] [-t dst-pane]", .handler = cmdNotImplemented });
+        try self.register(.{ .name = "kill-pane", .alias = "killp", .min_args = 0, .max_args = 4, .usage = "kill-pane (killp) [-a] [-t target-pane]", .handler = cmdKillPane });
+        try self.register(.{ .name = "last-pane", .alias = "lastp", .min_args = 0, .max_args = 4, .usage = "last-pane (lastp) [-deZ] [-t target-window]", .handler = cmdLastPane });
+        try self.register(.{ .name = "list-panes", .alias = "lsp", .min_args = 0, .max_args = 8, .usage = "list-panes (lsp) [-asr] [-F format] [-f filter] [-O order] [-t target-window]", .handler = cmdListPanes });
+        try self.register(.{ .name = "move-pane", .alias = "movep", .min_args = 0, .max_args = 10, .usage = "move-pane (movep) [-bdfhv] [-l size] [-s src-pane] [-t dst-pane]", .handler = cmdNotImplemented });
+        try self.register(.{ .name = "pipe-pane", .alias = "pipep", .min_args = 0, .max_args = 6, .usage = "pipe-pane (pipep) [-IOo] [-t target-pane] [shell-command]", .handler = cmdNotImplemented });
+        try self.register(.{ .name = "resize-pane", .alias = "resizep", .min_args = 0, .max_args = 10, .usage = "resize-pane (resizep) [-DLMRTUZ] [-x width] [-y height] [-t target-pane] [adjustment]", .handler = cmdResizePane });
+        try self.register(.{ .name = "respawn-pane", .alias = "respawnp", .min_args = 0, .max_args = 10, .usage = "respawn-pane (respawnp) [-k] [-c start-directory] [-e environment] [-t target-pane] [shell-command [argument ...]]", .handler = cmdNotImplemented });
+        try self.register(.{ .name = "select-pane", .alias = "selectp", .min_args = 0, .max_args = 10, .usage = "select-pane (selectp) [-DdeLlMmRUZ] [-T title] [-t target-pane]", .handler = cmdSelectPane });
+        try self.register(.{ .name = "swap-pane", .alias = "swapp", .min_args = 0, .max_args = 6, .usage = "swap-pane (swapp) [-dDUZ] [-s src-pane] [-t dst-pane]", .handler = cmdSwapPane });
+
+        // -- Key binding commands --
+        try self.register(.{ .name = "bind-key", .alias = "bind", .min_args = 1, .max_args = 20, .usage = "bind-key (bind) [-nr] [-T key-table] [-N note] key [command [argument ...]]", .handler = cmdBindKey });
+        try self.register(.{ .name = "list-keys", .alias = "lsk", .min_args = 0, .max_args = 8, .usage = "list-keys (lsk) [-1aNr] [-F format] [-O order] [-P prefix-string] [-T key-table] [key]", .handler = cmdListKeys });
+        try self.register(.{ .name = "send-keys", .alias = "send", .min_args = 1, .max_args = 20, .usage = "send-keys (send) [-FHKlMRX] [-c target-client] [-N repeat-count] [-t target-pane] [key ...]", .handler = cmdSendKeys });
+        try self.register(.{ .name = "send-prefix", .alias = null, .min_args = 0, .max_args = 4, .usage = "send-prefix [-2] [-t target-pane]", .handler = cmdSendPrefix });
+        try self.register(.{ .name = "unbind-key", .alias = "unbind", .min_args = 1, .max_args = 6, .usage = "unbind-key (unbind) [-anq] [-T key-table] key", .handler = cmdUnbindKey });
+
+        // -- Options commands --
+        try self.register(.{ .name = "set-option", .alias = "set", .min_args = 1, .max_args = 10, .usage = "set-option (set) [-aFgopqsuUw] [-t target-pane] option [value]", .handler = cmdSetOption });
+        try self.register(.{ .name = "set-window-option", .alias = "setw", .min_args = 1, .max_args = 8, .usage = "set-window-option (setw) [-aFgoqu] [-t target-window] option [value]", .handler = cmdSetWindowOption });
+        try self.register(.{ .name = "show-options", .alias = "show", .min_args = 0, .max_args = 8, .usage = "show-options (show) [-AgHpqsvw] [-t target-pane] [option]", .handler = cmdShowOptions });
+        try self.register(.{ .name = "show-window-options", .alias = "showw", .min_args = 0, .max_args = 6, .usage = "show-window-options (showw) [-gv] [-t target-window] [option]", .handler = cmdShowWindowOptions });
+
+        // -- Environment commands --
+        try self.register(.{ .name = "set-environment", .alias = "setenv", .min_args = 1, .max_args = 8, .usage = "set-environment (setenv) [-Fhgru] [-t target-session] variable [value]", .handler = cmdSetEnvironment });
+        try self.register(.{ .name = "show-environment", .alias = "showenv", .min_args = 0, .max_args = 6, .usage = "show-environment (showenv) [-hgs] [-t target-session] [variable]", .handler = cmdShowEnvironment });
+
+        // -- Hook commands --
+        try self.register(.{ .name = "set-hook", .alias = null, .min_args = 0, .max_args = 10, .usage = "set-hook [-agpRuw] [-t target-pane] hook [command]", .handler = cmdNotImplemented });
+        try self.register(.{ .name = "show-hooks", .alias = null, .min_args = 0, .max_args = 6, .usage = "show-hooks [-gpw] [-t target-pane] [hook]", .handler = cmdNotImplemented });
+
+        // -- Display commands --
+        try self.register(.{ .name = "clock-mode", .alias = null, .min_args = 0, .max_args = 2, .usage = "clock-mode [-t target-pane]", .handler = cmdClockMode });
+        try self.register(.{ .name = "display-menu", .alias = "menu", .min_args = 0, .max_args = 30, .usage = "display-menu (menu) [-MO] [-b border-lines] [-c target-client] [-C starting-choice] [-H selected-style] [-s style] [-S border-style] [-t target-pane] [-T title] [-x position] [-y position] name [key] [command] ...", .handler = cmdNotImplemented });
+        try self.register(.{ .name = "display-message", .alias = "display", .min_args = 0, .max_args = 12, .usage = "display-message (display) [-aCIlNpv] [-c target-client] [-d delay] [-F format] [-t target-pane] [message]", .handler = cmdDisplayMessage });
+        try self.register(.{ .name = "display-popup", .alias = "popup", .min_args = 0, .max_args = 30, .usage = "display-popup (popup) [-BCEkN] [-b border-lines] [-c target-client] [-d start-directory] [-e environment] [-h height] [-s style] [-S border-style] [-t target-pane] [-T title] [-w width] [-x position] [-y position] [shell-command [argument ...]]", .handler = cmdNotImplemented });
+
+        // -- Buffer commands --
+        try self.register(.{ .name = "choose-buffer", .alias = null, .min_args = 0, .max_args = 12, .usage = "choose-buffer [-NrZ] [-F format] [-f filter] [-K key-format] [-O sort-order] [-t target-pane] [template]", .handler = cmdNotImplemented });
+        try self.register(.{ .name = "clear-history", .alias = "clearhist", .min_args = 0, .max_args = 4, .usage = "clear-history (clearhist) [-H] [-t target-pane]", .handler = cmdClearHistory });
+        try self.register(.{ .name = "delete-buffer", .alias = "deleteb", .min_args = 0, .max_args = 2, .usage = "delete-buffer (deleteb) [-b buffer-name]", .handler = cmdDeleteBuffer });
+        try self.register(.{ .name = "list-buffers", .alias = "lsb", .min_args = 0, .max_args = 6, .usage = "list-buffers (lsb) [-F format] [-f filter] [-O order]", .handler = cmdListBuffers });
+        try self.register(.{ .name = "load-buffer", .alias = "loadb", .min_args = 1, .max_args = 6, .usage = "load-buffer (loadb) [-b buffer-name] [-t target-client] path", .handler = cmdLoadBuffer });
+        try self.register(.{ .name = "paste-buffer", .alias = "pasteb", .min_args = 0, .max_args = 8, .usage = "paste-buffer (pasteb) [-dprS] [-s separator] [-b buffer-name] [-t target-pane]", .handler = cmdPasteBuffer });
+        try self.register(.{ .name = "save-buffer", .alias = "saveb", .min_args = 1, .max_args = 6, .usage = "save-buffer (saveb) [-a] [-b buffer-name] path", .handler = cmdSaveBuffer });
+        try self.register(.{ .name = "set-buffer", .alias = "setb", .min_args = 1, .max_args = 8, .usage = "set-buffer (setb) [-aw] [-b buffer-name] [-n new-buffer-name] [-t target-client] [data]", .handler = cmdSetBuffer });
+        try self.register(.{ .name = "show-buffer", .alias = "showb", .min_args = 0, .max_args = 2, .usage = "show-buffer (showb) [-b buffer-name]", .handler = cmdShowBuffer });
+
+        // -- Copy/paste commands --
+        try self.register(.{ .name = "copy-mode", .alias = null, .min_args = 0, .max_args = 8, .usage = "copy-mode [-deHMqSu] [-s src-pane] [-t target-pane]", .handler = cmdCopyMode });
+
+        // -- Interactive/mode commands --
+        try self.register(.{ .name = "choose-client", .alias = null, .min_args = 0, .max_args = 12, .usage = "choose-client [-NrZ] [-F format] [-f filter] [-K key-format] [-O sort-order] [-t target-pane] [template]", .handler = cmdNotImplemented });
+        try self.register(.{ .name = "command-prompt", .alias = null, .min_args = 0, .max_args = 12, .usage = "command-prompt [-1beFiklN] [-I inputs] [-p prompts] [-t target-client] [-T prompt-type] [template]", .handler = cmdCommandPrompt });
+        try self.register(.{ .name = "confirm-before", .alias = "confirm", .min_args = 1, .max_args = 10, .usage = "confirm-before (confirm) [-by] [-c confirm-key] [-p prompt] [-t target-client] command", .handler = cmdNotImplemented });
+        try self.register(.{ .name = "customize-mode", .alias = null, .min_args = 0, .max_args = 8, .usage = "customize-mode [-NZ] [-F format] [-f filter] [-t target-pane]", .handler = cmdNotImplemented });
+
+        // -- Config commands --
+        try self.register(.{ .name = "source-file", .alias = "source", .min_args = 1, .max_args = 8, .usage = "source-file (source) [-Fnqv] [-t target-pane] path ...", .handler = cmdSourceFile });
+
+        // -- Shell/job commands --
+        try self.register(.{ .name = "if-shell", .alias = "if", .min_args = 2, .max_args = 8, .usage = "if-shell (if) [-bF] [-t target-pane] shell-command command [command]", .handler = cmdIfShell });
+        try self.register(.{ .name = "run-shell", .alias = "run", .min_args = 0, .max_args = 10, .usage = "run-shell (run) [-bCE] [-c start-directory] [-d delay] [-t target-pane] [shell-command]", .handler = cmdRunShell });
+        try self.register(.{ .name = "wait-for", .alias = "wait", .min_args = 1, .max_args = 4, .usage = "wait-for (wait) [-L|-S|-U] channel", .handler = cmdNotImplemented });
+
+        // -- Prompt history --
+        try self.register(.{ .name = "clear-prompt-history", .alias = "clearphist", .min_args = 0, .max_args = 2, .usage = "clear-prompt-history (clearphist) [-T prompt-type]", .handler = cmdNotImplemented });
+        try self.register(.{ .name = "show-prompt-history", .alias = "showphist", .min_args = 0, .max_args = 2, .usage = "show-prompt-history (showphist) [-T prompt-type]", .handler = cmdNotImplemented });
+
+        // -- Access control --
+        try self.register(.{ .name = "server-access", .alias = null, .min_args = 0, .max_args = 8, .usage = "server-access [-adlrw] [-t target-pane] [user]", .handler = cmdNotImplemented });
     }
 };
 
@@ -869,7 +716,258 @@ fn childExitCode(status: i32) i32 {
     return @divTrunc(status, 256);
 }
 
-// -- Command implementations --
+// -- Stub for unimplemented commands --
+
+fn cmdNotImplemented(ctx: *Context, _: []const []const u8) CmdError!void {
+    try writeReplyMessage(ctx, .error_msg, "command not yet implemented\n");
+    return CmdError.CommandFailed;
+}
+
+// -- New command implementations --
+
+fn cmdAttachSession(ctx: *Context, args: []const []const u8) CmdError!void {
+    const target: ?[]const u8 = parseNamedOption(args, "-t");
+    if (target) |name| {
+        const session = ctx.server.findSession(name) orelse return CmdError.SessionNotFound;
+        ctx.session = session;
+        ctx.server.default_session = session;
+    } else if (ctx.server.sessions.items.len == 1) {
+        ctx.session = ctx.server.sessions.items[0];
+        ctx.server.default_session = ctx.session;
+    } else if (ctx.server.default_session) |session| {
+        ctx.session = session;
+    } else {
+        return CmdError.SessionNotFound;
+    }
+}
+
+fn cmdHasSession(ctx: *Context, args: []const []const u8) CmdError!void {
+    const target = parseNamedOption(args, "-t") orelse {
+        if (ctx.session != null) return;
+        return CmdError.SessionNotFound;
+    };
+    if (ctx.server.findSession(target) == null) return CmdError.SessionNotFound;
+}
+
+fn cmdStartServer(_: *Context, _: []const []const u8) CmdError!void {
+    // No-op: server is already running if this command was received.
+}
+
+fn cmdListClients(ctx: *Context, _: []const []const u8) CmdError!void {
+    for (ctx.server.clients.items, 0..) |client, i| {
+        const session_name = if (client.session) |s| s.name else "(none)";
+        try writeOutput(ctx, "{d}: {s}\n", .{ i, session_name });
+    }
+}
+
+fn cmdListCommands(ctx: *Context, args: []const []const u8) CmdError!void {
+    const registry = ctx.registry orelse return CmdError.CommandFailed;
+
+    // Single command lookup.
+    if (args.len > 0) {
+        const name = args[args.len - 1];
+        if (name.len > 0 and name[0] != '-') {
+            const def = registry.find(name) orelse {
+                try writeReplyMessage(ctx, .error_msg, "unknown command\n");
+                return CmdError.CommandFailed;
+            };
+            try writeOutput(ctx, "{s}\n", .{def.usage});
+            return;
+        }
+    }
+
+    // List all commands.
+    const all = registry.listAll(ctx.allocator) catch return CmdError.OutOfMemory;
+    defer ctx.allocator.free(all);
+    for (all) |def| {
+        try writeOutput(ctx, "{s}\n", .{def.usage});
+    }
+}
+
+fn cmdLastPane(ctx: *Context, _: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    const window = session.active_window orelse return CmdError.WindowNotFound;
+    window.prevPane();
+}
+
+fn cmdNextLayout(ctx: *Context, _: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    const window = session.active_window orelse return CmdError.WindowNotFound;
+    if (window.layout_root) |root| {
+        root.resize(window.sx, window.sy);
+    }
+}
+
+fn cmdPrevLayout(ctx: *Context, _: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    const window = session.active_window orelse return CmdError.WindowNotFound;
+    if (window.layout_root) |root| {
+        root.resize(window.sx, window.sy);
+    }
+}
+
+fn cmdSelectLayout(ctx: *Context, args: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    const window = session.active_window orelse return CmdError.WindowNotFound;
+    _ = args;
+    if (window.layout_root) |root| {
+        root.resize(window.sx, window.sy);
+    }
+}
+
+fn cmdRotateWindow(ctx: *Context, args: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    const window = session.active_window orelse return CmdError.WindowNotFound;
+    var direction: Window.SwapDirection = .next;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "-U")) direction = .prev;
+    }
+    window.swapActivePane(direction);
+}
+
+fn cmdSwapWindow(ctx: *Context, args: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    const src_name = parseNamedOption(args, "-s");
+    const dst_name = parseNamedOption(args, "-t");
+
+    const src_idx: usize = if (src_name) |name| blk: {
+        const num = std.fmt.parseInt(u32, name, 10) catch return CmdError.InvalidArgs;
+        const base = session.options.base_index;
+        break :blk if (num >= base) @intCast(num - base) else return CmdError.WindowNotFound;
+    } else if (session.active_window) |aw| blk: {
+        for (session.windows.items, 0..) |w, i| {
+            if (w == aw) break :blk i;
+        }
+        return CmdError.WindowNotFound;
+    } else return CmdError.WindowNotFound;
+
+    const dst_idx: usize = if (dst_name) |name| blk: {
+        const num = std.fmt.parseInt(u32, name, 10) catch return CmdError.InvalidArgs;
+        const base = session.options.base_index;
+        break :blk if (num >= base) @intCast(num - base) else return CmdError.WindowNotFound;
+    } else return CmdError.InvalidArgs;
+
+    if (src_idx >= session.windows.items.len or dst_idx >= session.windows.items.len) return CmdError.WindowNotFound;
+    const tmp = session.windows.items[src_idx];
+    session.windows.items[src_idx] = session.windows.items[dst_idx];
+    session.windows.items[dst_idx] = tmp;
+}
+
+fn cmdClearHistory(ctx: *Context, _: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    const window = session.active_window orelse return CmdError.WindowNotFound;
+    const pane = window.active_pane orelse return CmdError.PaneNotFound;
+    const pane_state = ctx.server.session_loop.getPane(pane.id) orelse return CmdError.CommandFailed;
+    pane_state.screen.grid.hsize = 0;
+}
+
+fn cmdBindKey(ctx: *Context, _: []const []const u8) CmdError!void {
+    // Requires binding_manager on Server (not yet wired).
+    try writeReplyMessage(ctx, .error_msg, "bind-key: not yet implemented\n");
+    return CmdError.CommandFailed;
+}
+
+fn cmdUnbindKey(ctx: *Context, _: []const []const u8) CmdError!void {
+    // Requires binding_manager on Server (not yet wired).
+    try writeReplyMessage(ctx, .error_msg, "unbind-key: not yet implemented\n");
+    return CmdError.CommandFailed;
+}
+
+fn cmdSetWindowOption(ctx: *Context, args: []const []const u8) CmdError!void {
+    return cmdSetOption(ctx, args);
+}
+
+fn cmdShowOptions(ctx: *Context, args: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    if (args.len > 0) {
+        const name = args[args.len - 1];
+        if (name.len > 0 and name[0] != '-') {
+            if (std.mem.eql(u8, name, "base-index")) {
+                try writeOutput(ctx, "base-index {d}\n", .{session.options.base_index});
+            } else if (std.mem.eql(u8, name, "mouse")) {
+                try writeOutput(ctx, "mouse {s}\n", .{if (session.options.mouse) "on" else "off"});
+            } else if (std.mem.eql(u8, name, "status")) {
+                try writeOutput(ctx, "status {s}\n", .{if (session.options.status) "on" else "off"});
+            } else if (std.mem.eql(u8, name, "prefix")) {
+                try writeOutput(ctx, "prefix C-{c}\n", .{@as(u8, @intCast(session.options.prefix_key + 'a' - 1))});
+            } else {
+                return CmdError.CommandFailed;
+            }
+            return;
+        }
+    }
+    try writeOutput(ctx, "base-index {d}\n", .{session.options.base_index});
+    try writeOutput(ctx, "mouse {s}\n", .{if (session.options.mouse) "on" else "off"});
+    try writeOutput(ctx, "status {s}\n", .{if (session.options.status) "on" else "off"});
+}
+
+fn cmdShowWindowOptions(ctx: *Context, args: []const []const u8) CmdError!void {
+    return cmdShowOptions(ctx, args);
+}
+
+fn cmdSetEnvironment(ctx: *Context, _: []const []const u8) CmdError!void {
+    try writeReplyMessage(ctx, .error_msg, "set-environment: not yet implemented\n");
+    return CmdError.CommandFailed;
+}
+
+fn cmdShowEnvironment(ctx: *Context, _: []const []const u8) CmdError!void {
+    try writeReplyMessage(ctx, .error_msg, "show-environment: not yet implemented\n");
+    return CmdError.CommandFailed;
+}
+
+fn cmdLoadBuffer(ctx: *Context, args: []const []const u8) CmdError!void {
+    if (args.len == 0) return CmdError.InvalidArgs;
+    const path = args[args.len - 1];
+    const buffer_name = parseNamedOption(args, "-b");
+
+    var path_buf: [4096]u8 = .{0} ** 4096;
+    if (path.len >= path_buf.len) return CmdError.CommandFailed;
+    @memcpy(path_buf[0..path.len], path);
+    const cpath: [*:0]const u8 = @ptrCast(path_buf[0..path.len :0]);
+    const fd = std.c.open(cpath, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    if (fd < 0) return CmdError.CommandFailed;
+    defer _ = std.c.close(fd);
+
+    var content_buf: [65536]u8 = undefined;
+    var total: usize = 0;
+    while (total < content_buf.len) {
+        const n = std.c.read(fd, content_buf[total..].ptr, content_buf.len - total);
+        if (n <= 0) break;
+        total += @intCast(n);
+    }
+    if (total == 0) return;
+
+    ctx.server.paste_stack.push(content_buf[0..total], buffer_name) catch return CmdError.OutOfMemory;
+}
+
+fn cmdSaveBuffer(ctx: *Context, args: []const []const u8) CmdError!void {
+    if (args.len == 0) return CmdError.InvalidArgs;
+    const path = args[args.len - 1];
+    const buffer = try resolvePasteBuffer(ctx, parseNamedOption(args, "-b"));
+
+    var append = false;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "-a")) append = true;
+    }
+
+    var path_buf: [4096]u8 = .{0} ** 4096;
+    if (path.len >= path_buf.len) return CmdError.CommandFailed;
+    @memcpy(path_buf[0..path.len], path);
+    const cpath: [*:0]const u8 = @ptrCast(path_buf[0..path.len :0]);
+
+    const flags: std.c.O = if (append)
+        .{ .ACCMODE = .WRONLY, .APPEND = true, .CREAT = true }
+    else
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true };
+
+    const fd = std.c.open(cpath, flags, @as(std.c.mode_t, 0o644));
+    if (fd < 0) return CmdError.CommandFailed;
+    defer _ = std.c.close(fd);
+
+    _ = std.c.write(fd, buffer.data.ptr, buffer.data.len);
+}
+
+// -- Original command implementations --
 
 fn cmdNewSession(ctx: *Context, args: []const []const u8) CmdError!void {
     var session_name: []const u8 = "0";
