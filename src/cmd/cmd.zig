@@ -175,6 +175,14 @@ pub const Registry = struct {
             .handler = cmdSendKeys,
         });
         try self.register(.{
+            .name = "send-prefix",
+            .alias = null,
+            .min_args = 0,
+            .max_args = 0,
+            .usage = "send-prefix",
+            .handler = cmdSendPrefix,
+        });
+        try self.register(.{
             .name = "next-window",
             .alias = "next",
             .min_args = 0,
@@ -434,8 +442,8 @@ pub const Registry = struct {
             .name = "if-shell",
             .alias = "if",
             .min_args = 2,
-            .max_args = 4,
-            .usage = "if-shell shell-command command [else-command]",
+            .max_args = 3,
+            .usage = "if-shell shell-command command [command]",
             .handler = cmdIfShell,
         });
     }
@@ -835,12 +843,8 @@ fn appendPromptBytes(state: *PromptState, bytes: []const u8) void {
     state.len += copy_len;
 }
 
-fn executePromptBuffer(ctx: *Context, pane: *Pane) CmdError!void {
-    const prompt_state = pane.prompt_state orelse return;
+fn executeCommandString(ctx: *Context, command_text: []const u8) CmdError!void {
     const registry = ctx.registry orelse return CmdError.CommandFailed;
-    const command_text = prompt_state.buffer[0..prompt_state.len];
-
-    pane.prompt_state = null;
     if (command_text.len == 0) return;
 
     var parser = config_parser.ConfigParser.init(ctx.allocator, command_text);
@@ -854,6 +858,14 @@ fn executePromptBuffer(ctx: *Context, pane: *Pane) CmdError!void {
     for (commands.items) |*command| {
         try registry.executeParsed(ctx, command);
     }
+}
+
+fn executePromptBuffer(ctx: *Context, pane: *Pane) CmdError!void {
+    const prompt_state = pane.prompt_state orelse return;
+    const command_text = prompt_state.buffer[0..prompt_state.len];
+
+    pane.prompt_state = null;
+    try executeCommandString(ctx, command_text);
 }
 
 fn handlePromptKey(ctx: *Context, pane: *Pane, key_arg: []const u8) CmdError!bool {
@@ -1040,33 +1052,34 @@ fn formatBindingKey(buf: []u8, key: u21, mods: binding_mod.Modifiers) []const u8
     return buf[0 .. pos + rendered.len];
 }
 
-fn writeKeyArgToPane(pane: *Pane, key_str: []const u8) void {
-    if (pane.fd < 0) return;
+fn spawnShellChild(command: []const u8) CmdError!std.c.pid_t {
+    var cmd_buf: [4096]u8 = .{0} ** 4096;
+    if (command.len >= cmd_buf.len) return CmdError.CommandFailed;
+    @memcpy(cmd_buf[0..command.len], command);
 
-    if (std.mem.eql(u8, key_str, "Enter")) {
-        _ = std.c.write(pane.fd, "\n", 1);
-    } else if (std.mem.eql(u8, key_str, "Escape")) {
-        _ = std.c.write(pane.fd, "\x1b", 1);
-    } else if (std.mem.eql(u8, key_str, "Tab")) {
-        _ = std.c.write(pane.fd, "\t", 1);
-    } else if (std.mem.eql(u8, key_str, "Space")) {
-        _ = std.c.write(pane.fd, " ", 1);
-    } else if (std.mem.eql(u8, key_str, "BSpace")) {
-        _ = std.c.write(pane.fd, "\x7f", 1);
-    } else if (key_str.len == 3 and key_str[0] == 'C' and key_str[1] == '-') {
-        const ch = key_str[2];
-        if (ch >= 'a' and ch <= 'z') {
-            const ctrl: [1]u8 = .{ch - 'a' + 1};
-            _ = std.c.write(pane.fd, &ctrl, 1);
-        } else if (ch >= 'A' and ch <= 'Z') {
-            const ctrl: [1]u8 = .{ch - 'A' + 1};
-            _ = std.c.write(pane.fd, &ctrl, 1);
-        } else {
-            _ = std.c.write(pane.fd, key_str.ptr, key_str.len);
-        }
-    } else {
-        _ = std.c.write(pane.fd, key_str.ptr, key_str.len);
+    const pid = std.c.fork();
+    if (pid < 0) return CmdError.CommandFailed;
+
+    if (pid == 0) {
+        const sh: [*:0]const u8 = "/bin/sh";
+        const c_flag: [*:0]const u8 = "-c";
+        const cmd_z: [*:0]const u8 = @ptrCast(cmd_buf[0..command.len :0]);
+        const argv = [_:null]?[*:0]const u8{ sh, c_flag, cmd_z };
+        _ = execvp(sh, &argv);
+        std.c.exit(127);
     }
+
+    return pid;
+}
+
+fn waitForChildExit(pid: std.c.pid_t) CmdError!i32 {
+    var status: i32 = 0;
+    if (std.c.waitpid(pid, &status, 0) < 0) return CmdError.CommandFailed;
+    return status;
+}
+
+fn childExitCode(status: i32) i32 {
+    return @divTrunc(status, 256);
 }
 
 // -- Command implementations --
@@ -1252,6 +1265,16 @@ fn cmdSendKeys(ctx: *Context, args: []const []const u8) CmdError!void {
         }
         writeKeyArgToPane(pane, key_str);
     }
+}
+
+fn cmdSendPrefix(ctx: *Context, _: []const []const u8) CmdError!void {
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    const window = session.active_window orelse return CmdError.WindowNotFound;
+    const pane = window.active_pane orelse return CmdError.PaneNotFound;
+    if (pane.fd < 0 or session.options.prefix_key > 0xff) return CmdError.CommandFailed;
+
+    const prefix: [1]u8 = .{@intCast(session.options.prefix_key)};
+    _ = std.c.write(pane.fd, &prefix, 1);
 }
 
 fn cmdNextWindow(ctx: *Context, _: []const []const u8) CmdError!void {
@@ -1627,7 +1650,8 @@ fn cmdSourceFile(ctx: *Context, args: []const []const u8) CmdError!void {
         total += @intCast(n);
     }
     if (total == 0) return;
-    try executeCommandText(ctx, content_buf[0..total]);
+
+    try executeCommandString(ctx, content_buf[0..total]);
 }
 
 fn cmdListWindows(ctx: *Context, _: []const []const u8) CmdError!void {
@@ -1808,55 +1832,26 @@ fn cmdClockMode(ctx: *Context, _: []const []const u8) CmdError!void {
     try writeOutput(ctx, "└──────────┘\n", .{});
 }
 
-fn cmdSendPrefix(ctx: *Context, _: []const []const u8) CmdError!void {
-    const session = ctx.session orelse return CmdError.SessionNotFound;
-    const window = session.active_window orelse return CmdError.WindowNotFound;
-    const pane = window.active_pane orelse return CmdError.PaneNotFound;
-    writeKeyArgToPane(pane, session.options.prefix_string);
-}
-
-fn runShellCommandAndWait(command: []const u8) CmdError!i32 {
-    var cmd_buf: [4096]u8 = .{0} ** 4096;
-    if (command.len >= cmd_buf.len) return CmdError.CommandFailed;
-    @memcpy(cmd_buf[0..command.len], command);
-
-    const pid = std.c.fork();
-    if (pid < 0) return CmdError.CommandFailed;
-
-    if (pid == 0) {
-        const sh: [*:0]const u8 = "/bin/sh";
-        const c_flag: [*:0]const u8 = "-c";
-        const cmd_z: [*:0]const u8 = @ptrCast(cmd_buf[0..command.len :0]);
-        const argv = [_:null]?[*:0]const u8{ sh, c_flag, cmd_z };
-        _ = execvp(sh, &argv);
-        std.c.exit(127);
-    }
-
-    var status: i32 = 0;
-    _ = std.c.waitpid(pid, &status, 0);
-    return status;
-}
-
 fn cmdRunShell(_: *Context, args: []const []const u8) CmdError!void {
     if (args.len == 0) return CmdError.InvalidArgs;
     const command = args[args.len - 1];
-    _ = try runShellCommandAndWait(command);
+    const pid = try spawnShellChild(command);
+    _ = try waitForChildExit(pid);
 }
 
 fn cmdIfShell(ctx: *Context, args: []const []const u8) CmdError!void {
     if (args.len < 2) return CmdError.InvalidArgs;
 
-    const condition = args[0];
-    const if_command = args[1];
-    const else_command = if (args.len >= 3) args[2] else null;
-    const status = try runShellCommandAndWait(condition);
-    const exited = @as(u8, @truncate(@as(u32, @bitCast(status)) >> 8));
+    const pid = try spawnShellChild(args[0]);
+    const status = try waitForChildExit(pid);
+    const next_command = if (childExitCode(status) == 0)
+        args[1]
+    else if (args.len >= 3)
+        args[2]
+    else
+        return;
 
-    if (exited == 0) {
-        try executeCommandText(ctx, if_command);
-    } else if (else_command) |fallback| {
-        try executeCommandText(ctx, fallback);
-    }
+    try executeCommandString(ctx, next_command);
 }
 
 extern "c" fn execvp(
@@ -1978,9 +1973,9 @@ test "registry register and find" {
     try std.testing.expect(reg.find("new-session") != null);
     try std.testing.expect(reg.find("new") != null);
     try std.testing.expect(reg.find("kill-server") != null);
-    try std.testing.expect(reg.find("set") != null);
-    try std.testing.expect(reg.find("bind-key") != null);
+    try std.testing.expect(reg.find("send-prefix") != null);
     try std.testing.expect(reg.find("if-shell") != null);
+    try std.testing.expect(reg.find("if") != null);
     try std.testing.expect(reg.find("nonexistent") == null);
 }
 
@@ -2165,4 +2160,105 @@ test "addChooseTreeEntry stores pane metadata" {
     try addChooseTreeEntry(&choose_state, "pane", 2, false, session, window, pane);
     try std.testing.expectEqual(@as(usize, 1), choose_state.items.items.len);
     try std.testing.expect(choose_state.items.items[0].pane != null);
+}
+
+test "if-shell executes success branch" {
+    const alloc = std.testing.allocator;
+    var server = try Server.init(alloc, "/tmp/agentmux-if-shell-success.sock");
+    defer server.deinit();
+
+    var reg = Registry.init(alloc);
+    defer reg.deinit();
+    try reg.registerBuiltins();
+
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    var ctx = Context{
+        .server = &server,
+        .session = null,
+        .window = null,
+        .pane = null,
+        .allocator = alloc,
+        .reply_fd = fds[1],
+        .registry = &reg,
+    };
+
+    try reg.execute(&ctx, "if-shell", &.{ "true", "display-message success", "display-message failure" });
+
+    var msg = try protocol.recvMessageAlloc(alloc, fds[0]);
+    defer msg.deinit();
+    try std.testing.expectEqual(protocol.MessageType.output, msg.msg_type);
+    try std.testing.expectEqualStrings("success\n", msg.payload);
+}
+
+test "if-shell executes failure branch" {
+    const alloc = std.testing.allocator;
+    var server = try Server.init(alloc, "/tmp/agentmux-if-shell-failure.sock");
+    defer server.deinit();
+
+    var reg = Registry.init(alloc);
+    defer reg.deinit();
+    try reg.registerBuiltins();
+
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    var ctx = Context{
+        .server = &server,
+        .session = null,
+        .window = null,
+        .pane = null,
+        .allocator = alloc,
+        .reply_fd = fds[1],
+        .registry = &reg,
+    };
+
+    try reg.execute(&ctx, "if-shell", &.{ "false", "display-message success", "display-message failure" });
+
+    var msg = try protocol.recvMessageAlloc(alloc, fds[0]);
+    defer msg.deinit();
+    try std.testing.expectEqual(protocol.MessageType.output, msg.msg_type);
+    try std.testing.expectEqualStrings("failure\n", msg.payload);
+}
+
+test "send-prefix writes configured prefix byte to active pane" {
+    const alloc = std.testing.allocator;
+    var server = try Server.init(alloc, "/tmp/agentmux-send-prefix.sock");
+    defer server.deinit();
+
+    var session = try Session.init(alloc, "demo");
+    try server.sessions.append(alloc, session);
+    server.default_session = session;
+
+    var window = try Window.init(alloc, "win", 80, 24);
+    const pane = try Pane.init(alloc, 80, 24);
+
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    pane.fd = fds[1];
+
+    try window.addPane(pane);
+    try session.addWindow(window);
+    session.selectWindow(window);
+    session.options.prefix_key = 0x01;
+
+    var ctx = Context{
+        .server = &server,
+        .session = session,
+        .window = window,
+        .pane = pane,
+        .allocator = alloc,
+    };
+
+    try cmdSendPrefix(&ctx, &.{});
+
+    var buf: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 1), std.c.read(fds[0], &buf, buf.len));
+    try std.testing.expectEqual(@as(u8, 0x01), buf[0]);
 }
