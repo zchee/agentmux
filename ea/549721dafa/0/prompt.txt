@@ -1,0 +1,5 @@
+/autopilot "When running `agentmux new -s test`, freeze. Fix it"
+
+---
+
+/autopilot
