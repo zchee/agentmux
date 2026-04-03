@@ -342,14 +342,20 @@ pub const ModeTree = struct {
         var buf: std.ArrayListAligned(u8, null) = .empty;
         errdefer buf.deinit(alloc);
 
+        const order = try self.orderedVisibleIndices(alloc);
+        defer alloc.free(order);
+
         if (self.filter_len > 0 or self.filtering) {
             try buf.append(alloc, '/');
             try buf.appendSlice(alloc, self.filter[0..self.filter_len]);
+            if (self.filtering) {
+                try buf.appendSlice(alloc, " (typing)");
+            }
+            var info_buf: [64]u8 = undefined;
+            const info = std.fmt.bufPrint(&info_buf, " [{d} results]", .{order.len}) catch " [results]";
+            try buf.appendSlice(alloc, info);
             try buf.append(alloc, '\n');
         }
-
-        const order = try self.orderedVisibleIndices(alloc);
-        defer alloc.free(order);
 
         var rendered_any = false;
         const start = @min(self.offset, order.len);
@@ -875,4 +881,18 @@ test "mode tree filtered render highlights direct subsequence span" {
     defer std.testing.allocator.free(rendered);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "\x1b[1m") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "\x1b[22m") != null);
+}
+
+test "mode tree filter header shows typing state and result count" {
+    var tree = ModeTree.init(std.testing.allocator, 10);
+    defer tree.deinit();
+
+    try tree.addItem(.{ .label = "plancheck", .depth = 0, .expanded = true, .has_children = false, .tag = 0 });
+    try tree.addItem(.{ .label = "extra", .depth = 0, .expanded = true, .has_children = false, .tag = 1 });
+
+    _ = tree.handleKey('/');
+    _ = tree.handleKey('p');
+    const rendered = try tree.render(std.testing.allocator);
+    defer std.testing.allocator.free(rendered);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "/p (typing) [1 results]") != null);
 }
