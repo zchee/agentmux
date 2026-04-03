@@ -150,6 +150,10 @@ pub const ModeTree = struct {
 
     fn moveDown(self: *ModeTree) void {
         if (self.items.items.len == 0) return;
+        if (self.filter_len > 0) {
+            self.moveFiltered(1);
+            return;
+        }
         var idx = self.selected + 1;
         while (idx < self.items.items.len) : (idx += 1) {
             if (self.isVisibleIndex(idx)) {
@@ -162,6 +166,10 @@ pub const ModeTree = struct {
 
     fn moveUp(self: *ModeTree) void {
         if (self.items.items.len == 0 or self.selected == 0) return;
+        if (self.filter_len > 0) {
+            self.moveFiltered(-1);
+            return;
+        }
         var idx = self.selected;
         while (idx > 0) {
             idx -= 1;
@@ -223,6 +231,27 @@ pub const ModeTree = struct {
         return false;
     }
 
+    fn moveFiltered(self: *ModeTree, delta: i32) void {
+        const order = self.orderedVisibleIndices(self.allocator) catch return;
+        defer self.allocator.free(order);
+        if (order.len == 0) return;
+
+        var current_pos: usize = 0;
+        for (order, 0..) |idx, pos| {
+            if (idx == self.selected) {
+                current_pos = pos;
+                break;
+            }
+        }
+
+        if (delta > 0) {
+            if (current_pos + 1 < order.len) self.selected = order[current_pos + 1];
+        } else if (current_pos > 0) {
+            self.selected = order[current_pos - 1];
+        }
+        self.ensureSelectionVisible();
+    }
+
     fn hasMatchingDescendant(self: *const ModeTree, index: usize) bool {
         const depth = self.items.items[index].depth;
         var i = index + 1;
@@ -235,15 +264,15 @@ pub const ModeTree = struct {
     }
 
     fn ensureSelectionVisible(self: *ModeTree) void {
-        var visible_idx: usize = 0;
+        const order = self.orderedVisibleIndices(self.allocator) catch return;
+        defer self.allocator.free(order);
+
         var selected_visible_idx: ?usize = null;
-        for (self.items.items, 0..) |_, idx| {
-            if (!self.isVisibleIndex(idx)) continue;
+        for (order, 0..) |idx, pos| {
             if (idx == self.selected) {
-                selected_visible_idx = visible_idx;
+                selected_visible_idx = pos;
                 break;
             }
-            visible_idx += 1;
         }
 
         const selected_row = selected_visible_idx orelse 0;
@@ -274,10 +303,10 @@ pub const ModeTree = struct {
     }
 
     fn firstVisibleIndex(self: *const ModeTree) ?usize {
-        for (self.items.items, 0..) |_, idx| {
-            if (self.isVisibleIndex(idx)) return idx;
-        }
-        return null;
+        const order = self.orderedVisibleIndices(self.allocator) catch return null;
+        defer self.allocator.free(order);
+        if (order.len == 0) return null;
+        return order[0];
     }
 
     fn bestDirectMatchIndex(self: *const ModeTree) ?usize {
@@ -319,15 +348,14 @@ pub const ModeTree = struct {
             try buf.append(alloc, '\n');
         }
 
-        var visible_seen: usize = 0;
+        const order = try self.orderedVisibleIndices(alloc);
+        defer alloc.free(order);
+
         var rendered_any = false;
-        for (self.items.items, 0..) |item, actual_idx| {
-            if (!self.isVisibleIndex(actual_idx)) continue;
-            if (visible_seen < self.offset) {
-                visible_seen += 1;
-                continue;
-            }
-            if (visible_seen >= self.offset + self.visible_rows) break;
+        const start = @min(self.offset, order.len);
+        const end = @min(self.offset + self.visible_rows, order.len);
+        for (order[start..end]) |actual_idx| {
+            const item = self.items.items[actual_idx];
 
             const is_selected = actual_idx == self.selected;
 
@@ -360,7 +388,6 @@ pub const ModeTree = struct {
                 try buf.appendSlice(alloc, "\x1b[0m"); // reset
             }
             try buf.append(alloc, '\n');
-            visible_seen += 1;
             rendered_any = true;
         }
 
@@ -369,6 +396,91 @@ pub const ModeTree = struct {
         }
 
         return try buf.toOwnedSlice(alloc);
+    }
+
+    fn orderedVisibleIndices(self: *const ModeTree, alloc: std.mem.Allocator) ![]usize {
+        var out: std.ArrayListAligned(usize, null) = .empty;
+        errdefer out.deinit(alloc);
+
+        if (self.filter_len == 0) {
+            for (self.items.items, 0..) |_, idx| {
+                if (self.isExpandedVisibleIndex(idx)) {
+                    try out.append(alloc, idx);
+                }
+            }
+        } else {
+            try self.appendFilteredOrderedChildren(alloc, &out, null);
+        }
+        return try out.toOwnedSlice(alloc);
+    }
+
+    fn appendFilteredOrderedChildren(self: *const ModeTree, alloc: std.mem.Allocator, out: *std.ArrayListAligned(usize, null), parent_index: ?usize) !void {
+        var siblings: std.ArrayListAligned(usize, null) = .empty;
+        defer siblings.deinit(alloc);
+
+        const child_depth: u8 = if (parent_index) |idx| self.items.items[idx].depth + 1 else 0;
+        const end_index: usize = if (parent_index) |idx| self.subtreeEnd(idx) else self.items.items.len;
+        var i: usize = if (parent_index) |idx| idx + 1 else 0;
+
+        while (i < end_index) {
+            const item = self.items.items[i];
+            if (item.depth < child_depth) break;
+            if (item.depth == child_depth) {
+                if (self.isFilterVisibleIndex(i)) {
+                    try siblings.append(alloc, i);
+                }
+                i = self.subtreeEnd(i);
+            } else {
+                i += 1;
+            }
+        }
+
+        var a: usize = 0;
+        while (a < siblings.items.len) : (a += 1) {
+            var best = a;
+            var b = a + 1;
+            while (b < siblings.items.len) : (b += 1) {
+                if (self.shouldSiblingComeFirst(siblings.items[b], siblings.items[best])) {
+                    best = b;
+                }
+            }
+            if (best != a) std.mem.swap(usize, &siblings.items[a], &siblings.items[best]);
+        }
+
+        for (siblings.items) |idx| {
+            try out.append(alloc, idx);
+            try self.appendFilteredOrderedChildren(alloc, out, idx);
+        }
+    }
+
+    fn subtreeEnd(self: *const ModeTree, index: usize) usize {
+        const depth = self.items.items[index].depth;
+        var i = index + 1;
+        while (i < self.items.items.len) : (i += 1) {
+            if (self.items.items[i].depth <= depth) break;
+        }
+        return i;
+    }
+
+    fn bestSubtreeScore(self: *const ModeTree, index: usize) ?FuzzyScore {
+        var best: ?FuzzyScore = null;
+        const end = self.subtreeEnd(index);
+        var i = index;
+        while (i < end) : (i += 1) {
+            var score = fuzzyMatchScore(self.items.items[i].label, self.filter[0..self.filter_len]) orelse continue;
+            score.depth = self.items.items[i].depth;
+            if (best == null or score.betterThan(best.?)) best = score;
+        }
+        return best;
+    }
+
+    fn shouldSiblingComeFirst(self: *const ModeTree, lhs: usize, rhs: usize) bool {
+        const lscore = self.bestSubtreeScore(lhs);
+        const rscore = self.bestSubtreeScore(rhs);
+        if (lscore == null and rscore == null) return lhs < rhs;
+        if (lscore != null and rscore == null) return true;
+        if (lscore == null and rscore != null) return false;
+        return lscore.?.betterThan(rscore.?);
     }
 };
 
@@ -657,6 +769,27 @@ test "mode tree filter selection prefers direct match over ancestor visibility" 
     _ = tree.handleKey('a');
 
     try std.testing.expectEqual(@as(usize, 2), tree.selected);
+}
+
+test "mode tree filtered render hides weaker non-matching sibling branch" {
+    var tree = ModeTree.init(std.testing.allocator, 10);
+    defer tree.deinit();
+
+    try tree.addItem(.{ .label = "plancheck", .depth = 0, .expanded = true, .has_children = true, .tag = 0 });
+    try tree.addItem(.{ .label = "0: plancheck (1 panes)", .depth = 1, .expanded = false, .has_children = false, .tag = 1 });
+    try tree.addItem(.{ .label = "1: extra (2 panes)", .depth = 1, .expanded = false, .has_children = false, .tag = 2 });
+
+    _ = tree.handleKey('/');
+    _ = tree.handleKey('e');
+    _ = tree.handleKey('x');
+    _ = tree.handleKey('t');
+    _ = tree.handleKey('r');
+    _ = tree.handleKey('a');
+
+    const rendered = try tree.render(std.testing.allocator);
+    defer std.testing.allocator.free(rendered);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "1: extra") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "0: plancheck") == null);
 }
 
 test "mode tree typo-tolerant filter matches near token" {
