@@ -558,7 +558,7 @@ fn defaultShell(_: ?*Session) [:0]const u8 {
 fn sessionDefaultShell(session: ?*Session) [:0]const u8 {
     if (session) |current| {
         if (current.options.default_shell.len > 0) {
-            return @ptrCast(current.options.default_shell.ptr);
+            return current.options.default_shell;
         }
     }
     return defaultShell(session);
@@ -1081,7 +1081,7 @@ fn cmdNewSession(ctx: *Context, args: []const []const u8) CmdError!void {
         }
     }
 
-    const session = ctx.server.createSession(session_name, defaultShell(ctx.session), 80, 24) catch return CmdError.CommandFailed;
+    const session = ctx.server.createSession(session_name, sessionDefaultShell(ctx.session), 80, 24) catch return CmdError.CommandFailed;
     ctx.session = session;
 }
 
@@ -1124,7 +1124,7 @@ fn cmdNewWindow(ctx: *Context, args: []const []const u8) CmdError!void {
     const window = Window.init(ctx.allocator, name, 80, 24) catch return CmdError.OutOfMemory;
     errdefer window.deinit();
 
-    const pane = spawnWindowPane(ctx.allocator, defaultShell(ctx.session), 80, 24) catch |err| switch (err) {
+    const pane = spawnWindowPane(ctx.allocator, sessionDefaultShell(ctx.session), 80, 24) catch |err| switch (err) {
         CmdError.OutOfMemory => return CmdError.OutOfMemory,
         else => return CmdError.CommandFailed,
     };
@@ -1154,7 +1154,7 @@ fn cmdSplitWindow(ctx: *Context, args: []const []const u8) CmdError!void {
         }
     }
 
-    const new_pane = spawnWindowPane(ctx.allocator, defaultShell(ctx.session), window.sx, window.sy) catch |err| switch (err) {
+    const new_pane = spawnWindowPane(ctx.allocator, sessionDefaultShell(ctx.session), window.sx, window.sy) catch |err| switch (err) {
         CmdError.OutOfMemory => return CmdError.OutOfMemory,
         else => return CmdError.CommandFailed,
     };
@@ -1489,10 +1489,11 @@ fn cmdSetOption(ctx: *Context, args: []const []const u8) CmdError!void {
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "-g") or std.mem.eql(u8, args[i], "-s")) {
+        if (std.mem.eql(u8, args[i], "-s")) {
             target_server = true;
             continue;
         }
+        if (std.mem.eql(u8, args[i], "-g")) continue;
         if (args[i].len > 0 and args[i][0] == '-') continue;
         option_index = i;
         break;
@@ -1626,96 +1627,7 @@ fn cmdSourceFile(ctx: *Context, args: []const []const u8) CmdError!void {
         total += @intCast(n);
     }
     if (total == 0) return;
-
-    try executeCommandSource(ctx, content_buf[0..total]);
-}
-
-fn cmdSetOption(ctx: *Context, args: []const []const u8) CmdError!void {
-    var option_name: ?[]const u8 = null;
-    var value_start: ?usize = null;
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-        if (std.mem.eql(u8, arg, "-g") or
-            std.mem.eql(u8, arg, "-s") or
-            std.mem.eql(u8, arg, "-w") or
-            std.mem.eql(u8, arg, "-p"))
-        {
-            continue;
-        }
-        option_name = arg;
-        value_start = i + 1;
-        break;
-    }
-
-    const resolved_name = option_name orelse return CmdError.InvalidArgs;
-    const start = value_start orelse return CmdError.InvalidArgs;
-    if (start >= args.len) return CmdError.InvalidArgs;
-
-    const def = findOptionDef(resolved_name) orelse return CmdError.CommandFailed;
-    const scope = scopeFromSetArgs(args, def.scope);
-    if (args.len - start > 1) {
-        const joined = try joinArgs(ctx.allocator, args[start..]);
-        defer ctx.allocator.free(joined);
-        const parsed_value = try parseOptionValue(def.option_type, joined);
-        try ctx.server.options.set(scope, resolved_name, parsed_value);
-        if (scope == .session) applySessionOption(ctx.server, resolved_name, parsed_value);
-        return;
-    }
-
-    const raw_value = args[start];
-    const parsed = try parseOptionValue(def.option_type, raw_value);
-    try ctx.server.options.set(scope, resolved_name, parsed);
-    if (scope == .session) applySessionOption(ctx.server, resolved_name, parsed);
-}
-
-fn cmdBindKey(ctx: *Context, args: []const []const u8) CmdError!void {
-    var table_name: []const u8 = "prefix";
-    var key_name: ?[]const u8 = null;
-    var command_start: usize = 0;
-
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-        if (std.mem.eql(u8, arg, "-n")) {
-            table_name = "root";
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "-T")) {
-            if (i + 1 >= args.len) return CmdError.InvalidArgs;
-            table_name = args[i + 1];
-            i += 1;
-            continue;
-        }
-        key_name = arg;
-        command_start = i + 1;
-        break;
-    }
-
-    const resolved_key = key_name orelse return CmdError.InvalidArgs;
-    if (command_start >= args.len) return CmdError.InvalidArgs;
-
-    const parsed_key = key_string.stringToKey(resolved_key) orelse return CmdError.InvalidArgs;
-    const command = if (args.len - command_start == 1)
-        args[command_start]
-    else
-        try joinArgs(ctx.allocator, args[command_start..]);
-    defer if (args.len - command_start > 1) ctx.allocator.free(command);
-
-    const table = ctx.server.bindings.getOrCreateTable(table_name) catch return CmdError.OutOfMemory;
-    table.bind(parsed_key.key, parsed_key.mods, command) catch return CmdError.OutOfMemory;
-}
-
-fn cmdIfShell(ctx: *Context, args: []const []const u8) CmdError!void {
-    if (args.len < 2) return CmdError.InvalidArgs;
-    const exit_code = try runShellCommand(args[0]);
-    if (exit_code == 0) {
-        try executeCommandSource(ctx, args[1]);
-        return;
-    }
-    if (args.len >= 3) {
-        try executeCommandSource(ctx, args[2]);
-    }
+    try executeCommandText(ctx, content_buf[0..total]);
 }
 
 fn cmdListWindows(ctx: *Context, _: []const []const u8) CmdError!void {

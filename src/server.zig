@@ -559,7 +559,19 @@ fn commandAllowsMissingSession(name: []const u8) bool {
     return std.mem.eql(u8, name, "new-session") or
         std.mem.eql(u8, name, "list-sessions") or
         std.mem.eql(u8, name, "kill-server") or
-        std.mem.eql(u8, name, "display-message");
+        std.mem.eql(u8, name, "display-message") or
+        std.mem.eql(u8, name, "source-file") or
+        std.mem.eql(u8, name, "source") or
+        std.mem.eql(u8, name, "set-option") or
+        std.mem.eql(u8, name, "set") or
+        std.mem.eql(u8, name, "bind-key") or
+        std.mem.eql(u8, name, "bind") or
+        std.mem.eql(u8, name, "unbind-key") or
+        std.mem.eql(u8, name, "unbind") or
+        std.mem.eql(u8, name, "if-shell") or
+        std.mem.eql(u8, name, "if") or
+        std.mem.eql(u8, name, "list-keys") or
+        std.mem.eql(u8, name, "lsk");
 }
 
 fn commandErrorMessage(err: cmd.CmdError) []const u8 {

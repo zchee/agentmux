@@ -28,7 +28,7 @@ pub const Session = struct {
 
     pub const Options = struct {
         base_index: u32 = 0,
-        default_shell: []u8,
+        default_shell: [:0]u8,
         status: bool = true,
         mouse: bool = false,
         prefix_key: u21 = 0x02, // C-b
@@ -51,7 +51,7 @@ pub const Session = struct {
 
         const owned_name = try alloc.dupe(u8, name);
         errdefer alloc.free(owned_name);
-        const default_shell = try alloc.dupe(u8, "/bin/sh");
+        const default_shell = try alloc.dupeZ(u8, "/bin/sh");
         errdefer alloc.free(default_shell);
         const prefix_string = try alloc.dupe(u8, "C-b");
         errdefer alloc.free(prefix_string);
@@ -209,7 +209,7 @@ pub const Session = struct {
     }
 
     pub fn setDefaultShell(self: *Session, shell: []const u8) !void {
-        const owned = try self.allocator.dupe(u8, shell);
+        const owned = try self.allocator.dupeZ(u8, shell);
         self.allocator.free(self.options.default_shell);
         self.options.default_shell = owned;
     }
