@@ -154,6 +154,62 @@ pub const Window = struct {
         }
     }
 
+    /// Remove and destroy a pane. Returns true if the window has no panes left.
+    pub fn removePane(self: *Window, pane: *Pane) bool {
+        for (self.panes.items, 0..) |p, i| {
+            if (p == pane) {
+                _ = self.panes.orderedRemove(i);
+                break;
+            }
+        }
+
+        // If active pane was removed, select another
+        if (self.active_pane == pane) {
+            self.active_pane = if (self.panes.items.len > 0) self.panes.items[0] else null;
+        }
+
+        pane.deinit();
+        return self.panes.items.len == 0;
+    }
+
+    pub const SwapDirection = enum { next, prev };
+
+    /// Swap the active pane with the next or previous pane.
+    pub fn swapActivePane(self: *Window, direction: SwapDirection) void {
+        if (self.panes.items.len < 2) return;
+        const active = self.active_pane orelse return;
+
+        for (self.panes.items, 0..) |p, i| {
+            if (p == active) {
+                const other_idx = switch (direction) {
+                    .next => (i + 1) % self.panes.items.len,
+                    .prev => if (i == 0) self.panes.items.len - 1 else i - 1,
+                };
+                // Swap pane pointers in the list
+                self.panes.items[i] = self.panes.items[other_idx];
+                self.panes.items[other_idx] = active;
+
+                // Swap positions
+                const tmp_xoff = active.xoff;
+                const tmp_yoff = active.yoff;
+                const tmp_sx = active.sx;
+                const tmp_sy = active.sy;
+                active.xoff = self.panes.items[i].xoff;
+                active.yoff = self.panes.items[i].yoff;
+                active.sx = self.panes.items[i].sx;
+                active.sy = self.panes.items[i].sy;
+                self.panes.items[i].xoff = tmp_xoff;
+                self.panes.items[i].yoff = tmp_yoff;
+                self.panes.items[i].sx = tmp_sx;
+                self.panes.items[i].sy = tmp_sy;
+
+                active.flags.redraw = true;
+                self.panes.items[i].flags.redraw = true;
+                return;
+            }
+        }
+    }
+
     /// Resize the window and all panes.
     pub fn resize(self: *Window, new_sx: u32, new_sy: u32) void {
         self.sx = new_sx;

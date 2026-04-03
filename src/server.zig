@@ -229,6 +229,43 @@ pub const Server = struct {
         return null;
     }
 
+    /// Remove and destroy a session.
+    pub fn removeSession(self: *Server, session: *Session) void {
+        // Detach all clients attached to this session
+        for (self.clients.items) |*client| {
+            if (client.session == session) {
+                client.session = null;
+            }
+        }
+        // Remove from sessions list
+        for (self.sessions.items, 0..) |s, i| {
+            if (s == session) {
+                _ = self.sessions.orderedRemove(i);
+                break;
+            }
+        }
+        session.deinit();
+    }
+
+    /// Send a detach message to a client fd.
+    pub fn detachClient(self: *Server, client_idx: usize) void {
+        if (client_idx >= self.clients.items.len) return;
+        const client = &self.clients.items[client_idx];
+        if (client.session) |session| {
+            if (session.attached > 0) session.attached -= 1;
+        }
+        protocol.sendMessage(client.fd, .detach, &.{}) catch {};
+        client.session = null;
+    }
+
+    /// Find a client by fd.
+    pub fn findClientIndex(self: *const Server, fd: std.c.fd_t) ?usize {
+        for (self.clients.items, 0..) |client, i| {
+            if (client.fd == fd) return i;
+        }
+        return null;
+    }
+
     fn ensureSocketDir(self: *Server) !void {
         // Extract directory from socket path
         if (std.mem.lastIndexOfScalar(u8, self.socket_path, '/')) |sep| {

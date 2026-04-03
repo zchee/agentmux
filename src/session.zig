@@ -9,6 +9,7 @@ pub const Session = struct {
 
     windows: std.ArrayListAligned(*Window, null),
     active_window: ?*Window,
+    last_window: ?*Window,
 
     attached: u32,
     flags: Flags,
@@ -41,6 +42,7 @@ pub const Session = struct {
             .name = owned_name,
             .windows = .empty,
             .active_window = null,
+            .last_window = null,
             .attached = 0,
             .flags = .{},
             .options = .{},
@@ -109,6 +111,54 @@ pub const Session = struct {
                 }
             }
         }
+    }
+
+    /// Select a specific window, tracking the previous one.
+    pub fn selectWindow(self: *Session, window: *Window) void {
+        if (self.active_window) |current| {
+            if (current != window) {
+                self.last_window = current;
+            }
+        }
+        self.active_window = window;
+    }
+
+    /// Switch to the last active window.
+    pub fn lastWindow(self: *Session) bool {
+        if (self.last_window) |last| {
+            // Verify it's still in the window list
+            for (self.windows.items) |w| {
+                if (w == last) {
+                    self.selectWindow(last);
+                    return true;
+                }
+            }
+            self.last_window = null;
+        }
+        return false;
+    }
+
+    /// Remove and destroy a window. Returns true if the session has no windows left.
+    pub fn removeWindow(self: *Session, window: *Window) bool {
+        // If this was the last_window, clear it
+        if (self.last_window == window) {
+            self.last_window = null;
+        }
+
+        for (self.windows.items, 0..) |w, i| {
+            if (w == window) {
+                _ = self.windows.orderedRemove(i);
+                break;
+            }
+        }
+
+        // If active window was removed, select another
+        if (self.active_window == window) {
+            self.active_window = if (self.windows.items.len > 0) self.windows.items[0] else null;
+        }
+
+        window.deinit();
+        return self.windows.items.len == 0;
     }
 
     /// Rename the session.
