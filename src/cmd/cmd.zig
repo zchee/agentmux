@@ -758,6 +758,27 @@ fn formatBindingKey(buf: []u8, key: u21, mods: binding_mod.Modifiers) []const u8
     return buf[0 .. pos + rendered.len];
 }
 
+/// Map F-key names to escape sequences.
+fn namedFKey(name: []const u8) ?[]const u8 {
+    if (name.len < 2 or name[0] != 'F') return null;
+    const num = std.fmt.parseInt(u8, name[1..], 10) catch return null;
+    return switch (num) {
+        1 => "\x1bOP",
+        2 => "\x1bOQ",
+        3 => "\x1bOR",
+        4 => "\x1bOS",
+        5 => "\x1b[15~",
+        6 => "\x1b[17~",
+        7 => "\x1b[18~",
+        8 => "\x1b[19~",
+        9 => "\x1b[20~",
+        10 => "\x1b[21~",
+        11 => "\x1b[23~",
+        12 => "\x1b[24~",
+        else => null,
+    };
+}
+
 fn spawnShellChild(command: []const u8) CmdError!std.c.pid_t {
     var cmd_buf: [4096]u8 = .{0} ** 4096;
     if (command.len >= cmd_buf.len) return CmdError.CommandFailed;
@@ -1968,12 +1989,47 @@ fn cmdKillServer(ctx: *Context, _: []const []const u8) CmdError!void {
 
 fn cmdKillSession(ctx: *Context, args: []const []const u8) CmdError!void {
     var target: ?[]const u8 = null;
+    var kill_all_others = false;
+    var clear_alerts = false;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "-t") and i + 1 < args.len) {
             i += 1;
             target = args[i];
+        } else if (std.mem.eql(u8, args[i], "-a")) {
+            kill_all_others = true;
+        } else if (std.mem.eql(u8, args[i], "-C")) {
+            clear_alerts = true;
         }
+    }
+
+    if (kill_all_others) {
+        // Kill all sessions except the target (or current).
+        const keep = if (target) |name|
+            ctx.server.findSession(name) orelse return CmdError.SessionNotFound
+        else
+            ctx.session orelse return CmdError.SessionNotFound;
+        var to_kill: std.ArrayListAligned(*Session, null) = .empty;
+        defer to_kill.deinit(ctx.allocator);
+        for (ctx.server.sessions.items) |s| {
+            if (s != keep) to_kill.append(ctx.allocator, s) catch return CmdError.OutOfMemory;
+        }
+        for (to_kill.items) |s| ctx.server.removeSession(s);
+        return;
+    }
+
+    if (clear_alerts) {
+        // Clear alert flags on all windows in the target session.
+        const session = if (target) |name|
+            ctx.server.findSession(name) orelse return CmdError.SessionNotFound
+        else
+            ctx.session orelse return CmdError.SessionNotFound;
+        for (session.windows.items) |w| {
+            w.flags.bell = false;
+            w.flags.activity = false;
+            w.flags.silence = false;
+        }
+        return;
     }
 
     if (target) |name| {
@@ -2345,7 +2401,7 @@ fn cmdSendKeys(ctx: *Context, args: []const []const u8) CmdError!void {
                 const buf: [1]u8 = .{byte};
                 _ = std.c.write(pane.fd, &buf, 1);
             } else if (std.mem.eql(u8, key_str, "Enter")) {
-                _ = std.c.write(pane.fd, "\n", 1);
+                _ = std.c.write(pane.fd, "\r", 1); // CR, not LF
             } else if (std.mem.eql(u8, key_str, "Escape")) {
                 _ = std.c.write(pane.fd, "\x1b", 1);
             } else if (std.mem.eql(u8, key_str, "Tab")) {
@@ -2354,6 +2410,28 @@ fn cmdSendKeys(ctx: *Context, args: []const []const u8) CmdError!void {
                 _ = std.c.write(pane.fd, " ", 1);
             } else if (std.mem.eql(u8, key_str, "BSpace")) {
                 _ = std.c.write(pane.fd, "\x7f", 1);
+            } else if (std.mem.eql(u8, key_str, "Up")) {
+                _ = std.c.write(pane.fd, "\x1b[A", 3);
+            } else if (std.mem.eql(u8, key_str, "Down")) {
+                _ = std.c.write(pane.fd, "\x1b[B", 3);
+            } else if (std.mem.eql(u8, key_str, "Right")) {
+                _ = std.c.write(pane.fd, "\x1b[C", 3);
+            } else if (std.mem.eql(u8, key_str, "Left")) {
+                _ = std.c.write(pane.fd, "\x1b[D", 3);
+            } else if (std.mem.eql(u8, key_str, "Home")) {
+                _ = std.c.write(pane.fd, "\x1b[H", 3);
+            } else if (std.mem.eql(u8, key_str, "End")) {
+                _ = std.c.write(pane.fd, "\x1b[F", 3);
+            } else if (std.mem.eql(u8, key_str, "PPage")) {
+                _ = std.c.write(pane.fd, "\x1b[5~", 4);
+            } else if (std.mem.eql(u8, key_str, "NPage")) {
+                _ = std.c.write(pane.fd, "\x1b[6~", 4);
+            } else if (std.mem.eql(u8, key_str, "IC")) {
+                _ = std.c.write(pane.fd, "\x1b[2~", 4);
+            } else if (std.mem.eql(u8, key_str, "DC")) {
+                _ = std.c.write(pane.fd, "\x1b[3~", 4);
+            } else if (namedFKey(key_str)) |seq| {
+                _ = std.c.write(pane.fd, seq.ptr, seq.len);
             } else if (key_str.len == 3 and key_str[0] == 'C' and key_str[1] == '-') {
                 const ch = key_str[2];
                 if (ch >= 'a' and ch <= 'z') {
@@ -3116,8 +3194,8 @@ fn cmdPasteBuffer(ctx: *Context, args: []const []const u8) CmdError!void {
     if (raw) {
         _ = std.c.write(pane.fd, buffer.data.ptr, buffer.data.len);
     } else {
-        // Replace newlines with separator (default: space).
-        const sep: []const u8 = separator orelse " ";
+        // Replace newlines with separator (default: CR, matching tmux).
+        const sep: []const u8 = separator orelse "\r";
         var start: usize = 0;
         for (buffer.data, 0..) |ch, idx| {
             if (ch == '\n') {

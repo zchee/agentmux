@@ -209,10 +209,10 @@ test "paste-buffer -r sends newlines verbatim" {
 }
 
 // ---------------------------------------------------------------------------
-// paste-buffer: default replaces newlines with space
+// paste-buffer: default replaces newlines with CR (matching tmux)
 // ---------------------------------------------------------------------------
 
-test "paste-buffer default replaces newlines with space" {
+test "paste-buffer default replaces newlines with CR" {
     var server = try initServer();
     defer server.deinit();
     const session = try makeSession(&server, "demo");
@@ -235,7 +235,7 @@ test "paste-buffer default replaces newlines with space" {
 
     var buf: [16]u8 = undefined;
     const n = std.c.read(fds[0], &buf, buf.len);
-    try std.testing.expectEqualStrings("a b", buf[0..@intCast(n)]);
+    try std.testing.expectEqualStrings("a\rb", buf[0..@intCast(n)]);
 }
 
 // ---------------------------------------------------------------------------
