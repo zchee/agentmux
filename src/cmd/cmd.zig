@@ -16,6 +16,8 @@ const PromptState = @import("../window.zig").PromptState;
 const ChooseTreeState = @import("../window.zig").ChooseTreeState;
 const ChooseTreeItem = @import("../window.zig").ChooseTreeItem;
 const CellType = @import("../layout/layout.zig").CellType;
+const layout_set = @import("../layout/set.zig");
+const format_mod = @import("../status/format.zig");
 const Server = @import("../server.zig").Server;
 
 /// Command execution context.
@@ -306,6 +308,35 @@ fn terminalSize(ctx: *const Context) struct { cols: u32, rows: u32 } {
         }
     }
     return .{ .cols = 80, .rows = 24 };
+}
+
+/// Build a FormatContext from the current command context.
+fn makeFormatContext(ctx: *const Context) format_mod.FormatContext {
+    var fc = format_mod.FormatContext{};
+    if (ctx.session) |s| {
+        fc.session_name = s.name;
+        fc.session_id = s.id;
+        if (s.active_window) |w| {
+            fc.window_name = w.name;
+            for (s.windows.items, 0..) |win, idx| {
+                if (win == w) {
+                    fc.window_index = s.options.base_index + @as(u32, @intCast(idx));
+                    fc.window_active = true;
+                    break;
+                }
+            }
+            if (w.active_pane) |p| {
+                for (w.panes.items, 0..) |pane, idx| {
+                    if (pane == p) {
+                        fc.pane_index = @intCast(idx);
+                        break;
+                    }
+                }
+                fc.pane_pid = p.pid;
+            }
+        }
+    }
+    return fc;
 }
 
 const ClockTm = extern struct {
@@ -771,8 +802,14 @@ fn cmdLockSession(ctx: *Context, _: []const []const u8) CmdError!void {
     try writeOutput(ctx, "session locked\n", .{});
 }
 
-fn cmdRefreshClient(_: *Context, _: []const []const u8) CmdError!void {
-    // Accept all flags silently; full sub-modes not yet wired.
+fn cmdRefreshClient(ctx: *Context, _: []const []const u8) CmdError!void {
+    // Trigger a full screen redraw by marking all pane lines dirty.
+    const session = ctx.session orelse return;
+    const window = session.active_window orelse return;
+    const pane = window.active_pane orelse return;
+    if (ctx.server.session_loop.getPane(pane.id)) |ps| {
+        ps.dirty.markAllDirty();
+    }
 }
 
 fn cmdShowMessages(ctx: *Context, _: []const []const u8) CmdError!void {
@@ -785,8 +822,18 @@ fn cmdShowMessages(ctx: *Context, _: []const []const u8) CmdError!void {
     }
 }
 
-fn cmdSuspendClient(_: *Context, _: []const []const u8) CmdError!void {
-    // Would send SIGTSTP to the client process; no-op for now.
+fn cmdSuspendClient(ctx: *Context, args: []const []const u8) CmdError!void {
+    // Resolve target client index.
+    var target_idx: ?usize = ctx.client_index;
+    if (parseNamedOption(args, "-t")) |t| {
+        target_idx = std.fmt.parseInt(usize, t, 10) catch null;
+    }
+    const idx = target_idx orelse return CmdError.CommandFailed;
+    if (idx >= ctx.server.clients.items.len) return CmdError.CommandFailed;
+    const pid = ctx.server.clients.items[idx].pid;
+    if (pid > 0) {
+        _ = std.c.kill(pid, .TSTP);
+    }
 }
 
 fn cmdSwitchClient(ctx: *Context, args: []const []const u8) CmdError!void {
@@ -1355,21 +1402,53 @@ fn cmdPrevLayout(ctx: *Context, args: []const []const u8) CmdError!void {
 fn cmdSelectLayout(ctx: *Context, args: []const []const u8) CmdError!void {
     const session = ctx.session orelse return CmdError.SessionNotFound;
     var window = session.active_window orelse return CmdError.WindowNotFound;
+    var layout_name: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "-t") and i + 1 < args.len) {
             i += 1;
             const num = std.fmt.parseInt(u32, args[i], 10) catch return CmdError.InvalidArgs;
             window = session.findWindowByNumber(num) orelse return CmdError.WindowNotFound;
-        } else if (std.mem.eql(u8, args[i], "-n") or std.mem.eql(u8, args[i], "-o")) {
-            // next / last layout — cycle (resize triggers re-layout)
-        } else if (std.mem.eql(u8, args[i], "-p")) {
-            // previous layout — cycle
         } else if (std.mem.eql(u8, args[i], "-E")) {
-            // spread panes evenly; handled by resize below
+            layout_name = "tiled";
+        } else if (std.mem.eql(u8, args[i], "-n") or std.mem.eql(u8, args[i], "-o") or
+            std.mem.eql(u8, args[i], "-p"))
+        {
+            // next/previous/last layout: cycle through presets
+        } else if (args[i].len > 0 and args[i][0] != '-') {
+            layout_name = args[i];
         }
-        // layout-name positional arg: ignore for now (no named layout support)
     }
+
+    if (layout_name) |name| {
+        const preset: ?layout_set.LayoutPreset = if (std.mem.eql(u8, name, "even-horizontal"))
+            .even_horizontal
+        else if (std.mem.eql(u8, name, "even-vertical"))
+            .even_vertical
+        else if (std.mem.eql(u8, name, "main-horizontal"))
+            .main_horizontal
+        else if (std.mem.eql(u8, name, "main-vertical"))
+            .main_vertical
+        else if (std.mem.eql(u8, name, "tiled"))
+            .tiled
+        else
+            null;
+
+        if (preset) |p| {
+            // Collect pane IDs
+            var pane_ids_buf: [64]u32 = undefined;
+            const count = @min(window.panes.items.len, pane_ids_buf.len);
+            for (window.panes.items[0..count], 0..) |pane, idx| {
+                pane_ids_buf[idx] = pane.id;
+            }
+            const new_root = layout_set.applyPreset(ctx.allocator, p, pane_ids_buf[0..count], window.sx, window.sy) catch return CmdError.CommandFailed;
+            if (window.layout_root) |old| old.deinit();
+            window.layout_root = new_root;
+            window.syncPanesFromLayout();
+            return;
+        }
+    }
+
     if (window.layout_root) |root| {
         root.resize(window.sx, window.sy);
     }
@@ -2683,10 +2762,14 @@ fn cmdDisplayMessage(ctx: *Context, args: []const []const u8) CmdError!void {
     }
 
     if (message) |msg| {
+        // Expand format strings (#S, #W, #{session_name}, etc.)
+        const fc = makeFormatContext(ctx);
+        const expanded = format_mod.expand(ctx.allocator, msg, &fc) catch msg;
+        defer if (expanded.ptr != msg.ptr) ctx.allocator.free(expanded);
         if (verbose) {
-            try writeOutput(ctx, "[display-message] {s}\n", .{msg});
+            try writeOutput(ctx, "[display-message] {s}\n", .{expanded});
         } else {
-            try writeOutput(ctx, "{s}\n", .{msg});
+            try writeOutput(ctx, "{s}\n", .{expanded});
         }
     }
 }

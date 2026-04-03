@@ -354,7 +354,7 @@ pub const Window = struct {
         }
     }
 
-    fn syncPanesFromLayout(self: *Window) void {
+    pub fn syncPanesFromLayout(self: *Window) void {
         const root = self.layout_root orelse return;
         for (self.panes.items) |pane| {
             if (root.findPane(pane.id)) |cell| {
