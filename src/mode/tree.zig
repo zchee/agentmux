@@ -260,6 +260,12 @@ pub const ModeTree = struct {
             self.offset = 0;
             return;
         }
+        if (self.filter_len > 0) {
+            if (self.bestDirectMatchIndex()) |idx| {
+                self.selected = idx;
+                return;
+            }
+        }
         if (!self.isVisibleIndex(self.selected)) {
             if (self.firstVisibleIndex()) |idx| {
                 self.selected = idx;
@@ -272,6 +278,21 @@ pub const ModeTree = struct {
             if (self.isVisibleIndex(idx)) return idx;
         }
         return null;
+    }
+
+    fn bestDirectMatchIndex(self: *const ModeTree) ?usize {
+        var best_idx: ?usize = null;
+        var best_score: ?FuzzyScore = null;
+
+        for (self.items.items, 0..) |_, idx| {
+            if (!self.isVisibleIndex(idx)) continue;
+            const score = directMatchScore(self.items.items[idx].label, self.filter[0..self.filter_len]) orelse continue;
+            if (best_score == null or score.betterThan(best_score.?)) {
+                best_idx = idx;
+                best_score = score;
+            }
+        }
+        return best_idx;
     }
 
     fn findParentIndex(self: *const ModeTree, index: usize) ?usize {
@@ -351,17 +372,56 @@ pub const ModeTree = struct {
     }
 };
 
-fn fuzzyContainsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return true;
+const FuzzyScore = struct {
+    gaps: usize,
+    start: usize,
+    span: usize,
+    len: usize,
+    depth: u8,
 
+    fn betterThan(self: FuzzyScore, other: FuzzyScore) bool {
+        if (self.gaps != other.gaps) return self.gaps < other.gaps;
+        if (self.start != other.start) return self.start < other.start;
+        if (self.span != other.span) return self.span < other.span;
+        if (self.len != other.len) return self.len < other.len;
+        return self.depth < other.depth;
+    }
+};
+
+fn fuzzyContainsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    return directMatchScore(haystack, needle) != null;
+}
+
+fn directMatchScore(haystack: []const u8, needle: []const u8) ?FuzzyScore {
+    if (needle.len == 0) {
+        return .{ .gaps = 0, .start = 0, .span = 0, .len = haystack.len, .depth = 0 };
+    }
+
+    var first_idx: ?usize = null;
+    var last_idx: usize = 0;
+    var prev_idx: ?usize = null;
+    var gaps: usize = 0;
     var needle_index: usize = 0;
-    for (haystack) |ch| {
-        if (std.ascii.toLower(ch) == std.ascii.toLower(needle[needle_index])) {
-            needle_index += 1;
-            if (needle_index == needle.len) return true;
+
+    for (haystack, 0..) |ch, idx| {
+        if (std.ascii.toLower(ch) != std.ascii.toLower(needle[needle_index])) continue;
+        if (first_idx == null) first_idx = idx;
+        if (prev_idx) |prev| gaps += idx - prev - 1;
+        prev_idx = idx;
+        last_idx = idx;
+        needle_index += 1;
+        if (needle_index == needle.len) {
+            const start = first_idx.?;
+            return .{
+                .gaps = gaps,
+                .start = start,
+                .span = last_idx - start + 1,
+                .len = haystack.len,
+                .depth = 0,
+            };
         }
     }
-    return needle_index == needle.len;
+    return null;
 }
 
 test "mode tree navigation" {
@@ -489,4 +549,38 @@ test "mode tree fuzzy filter matches subsequence" {
     defer std.testing.allocator.free(rendered);
     try std.testing.expect(fuzzyContainsIgnoreCase(rendered, "plancheck"));
     try std.testing.expect(!fuzzyContainsIgnoreCase(rendered, "extra"));
+}
+
+test "mode tree best direct match prefers tighter match" {
+    var tree = ModeTree.init(std.testing.allocator, 10);
+    defer tree.deinit();
+
+    try tree.addItem(.{ .label = "plancheck", .depth = 0, .expanded = true, .has_children = false, .tag = 0 });
+    try tree.addItem(.{ .label = "0: plancheck (1 panes)", .depth = 1, .expanded = true, .has_children = false, .tag = 1 });
+    try tree.addItem(.{ .label = "1: extra (1 panes)", .depth = 1, .expanded = true, .has_children = false, .tag = 2 });
+
+    _ = tree.handleKey('/');
+    _ = tree.handleKey('p');
+    _ = tree.handleKey('l');
+    _ = tree.handleKey('n');
+
+    try std.testing.expectEqual(@as(usize, 0), tree.selected);
+}
+
+test "mode tree filter selection prefers direct match over ancestor visibility" {
+    var tree = ModeTree.init(std.testing.allocator, 10);
+    defer tree.deinit();
+
+    try tree.addItem(.{ .label = "plancheck", .depth = 0, .expanded = true, .has_children = true, .tag = 0 });
+    try tree.addItem(.{ .label = "0: plancheck (1 panes)", .depth = 1, .expanded = false, .has_children = false, .tag = 1 });
+    try tree.addItem(.{ .label = "1: extra (1 panes)", .depth = 1, .expanded = false, .has_children = false, .tag = 2 });
+
+    _ = tree.handleKey('/');
+    _ = tree.handleKey('e');
+    _ = tree.handleKey('x');
+    _ = tree.handleKey('t');
+    _ = tree.handleKey('r');
+    _ = tree.handleKey('a');
+
+    try std.testing.expectEqual(@as(usize, 2), tree.selected);
 }
