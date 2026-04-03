@@ -1838,6 +1838,8 @@ fn cmdNewSession(ctx: *Context, args: []const []const u8) CmdError!void {
     var window_name: ?[]const u8 = null;
     var explicit_x: ?u32 = null;
     var explicit_y: ?u32 = null;
+    var detached = false;
+    var print_info = false;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "-s") and i + 1 < args.len) {
@@ -1857,8 +1859,12 @@ fn cmdNewSession(ctx: *Context, args: []const []const u8) CmdError!void {
             std.mem.eql(u8, args[i], "-t")) and i + 1 < args.len)
         {
             i += 1; // consume value
+        } else if (std.mem.eql(u8, args[i], "-d")) {
+            detached = true;
+        } else if (std.mem.eql(u8, args[i], "-P")) {
+            print_info = true;
         }
-        // -A/-d/-D/-E/-P/-X: boolean flags, noted
+        // -A/-D/-E/-X: boolean flags, noted
     }
 
     const ts = terminalSize(ctx);
@@ -1868,7 +1874,13 @@ fn cmdNewSession(ctx: *Context, args: []const []const u8) CmdError!void {
     if (window_name) |wn| {
         if (session.active_window) |w| w.rename(wn) catch {};
     }
-    ctx.session = session;
+    // In tmux, new-session attaches the client unless -d is given.
+    if (!detached) {
+        ctx.session = session;
+    }
+    if (print_info) {
+        try writeOutput(ctx, "{s}:\n", .{session.name});
+    }
 }
 
 fn cmdKillServer(ctx: *Context, _: []const []const u8) CmdError!void {

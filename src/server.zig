@@ -577,9 +577,12 @@ pub const Server = struct {
         const prev_session = client.session;
         self.setClientSession(client_idx, ctx.session);
 
-        // If the client became attached to a session, send ready instead of
-        // exit_ack so the client enters interactive mode.
-        if (prev_session == null and ctx.session != null) {
+        // Send ready (enter interactive mode) when the command attached the
+        // client to a (possibly different) session. This covers:
+        //   - new-session: prev was null or different session
+        //   - attach-session: prev was null or different session
+        // Send exit_ack for non-attaching commands (list-sessions, etc.).
+        if (ctx.session != null and (prev_session == null or prev_session != ctx.session)) {
             try protocol.sendMessage(client.fd, .ready, &.{});
         } else {
             try protocol.sendMessageWithFlags(client.fd, .exit_ack, 0, &.{});
