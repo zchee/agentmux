@@ -27,6 +27,8 @@ pub const Server = struct {
     paste_stack: PasteStack,
     session_loop: SessionLoop,
     binding_manager: binding_mod.BindingManager,
+    global_default_shell: ?[:0]u8,
+    config_file: ?[]const u8,
     running: bool,
     allocator: std.mem.Allocator,
 
@@ -51,6 +53,8 @@ pub const Server = struct {
             .paste_stack = PasteStack.init(alloc),
             .session_loop = SessionLoop.init(alloc),
             .binding_manager = bm,
+            .global_default_shell = null,
+            .config_file = null,
             .running = false,
             .allocator = alloc,
         };
@@ -75,6 +79,7 @@ pub const Server = struct {
         self.paste_stack.deinit();
         self.session_loop.deinit();
         self.binding_manager.deinit();
+        if (self.global_default_shell) |shell| self.allocator.free(shell);
         self.allocator.free(self.socket_path);
     }
 
@@ -104,6 +109,65 @@ pub const Server = struct {
 
         self.running = true;
         log.info("server listening on {s}", .{self.socket_path});
+    }
+
+    /// Load a configuration file by executing it as commands.
+    pub fn loadConfigFile(self: *Server, path: []const u8) void {
+        var path_buf: [4096]u8 = .{0} ** 4096;
+        if (path.len >= path_buf.len) return;
+        @memcpy(path_buf[0..path.len], path);
+        const cpath: [*:0]const u8 = @ptrCast(path_buf[0..path.len :0]);
+        const fd = std.c.open(cpath, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+        if (fd < 0) return;
+        defer _ = std.c.close(fd);
+
+        var content_buf: [65536]u8 = undefined;
+        var total: usize = 0;
+        while (total < content_buf.len) {
+            const n = std.c.read(fd, content_buf[total..].ptr, content_buf.len - total);
+            if (n <= 0) break;
+            total += @intCast(n);
+        }
+        if (total == 0) return;
+
+        var registry = cmd.Registry.init(self.allocator);
+        defer registry.deinit();
+        registry.registerBuiltins() catch return;
+
+        var ctx = cmd.Context{
+            .server = self,
+            .session = self.default_session,
+            .window = if (self.default_session) |s| s.active_window else null,
+            .pane = if (self.default_session) |s| if (s.active_window) |w| w.active_pane else null else null,
+            .allocator = self.allocator,
+            .registry = &registry,
+            .binding_manager = &self.binding_manager,
+        };
+
+        var parser = config_parser.ConfigParser.init(self.allocator, content_buf[0..total]);
+        var commands = parser.parseAll() catch return;
+        defer {
+            for (commands.items) |*command| command.deinit(self.allocator);
+            commands.deinit(self.allocator);
+        }
+
+        for (commands.items) |*command| {
+            registry.executeParsed(&ctx, command) catch {};
+        }
+    }
+
+    /// Load config from the standard paths.
+    pub fn loadDefaultConfig(self: *Server) void {
+        if (self.config_file) |path| {
+            self.loadConfigFile(path);
+            return;
+        }
+        // Try ~/.config/agentmux/agentmux.conf
+        const home = std.c.getenv("HOME") orelse return;
+        const home_slice = std.mem.sliceTo(home, 0);
+        var buf: [4096]u8 = undefined;
+        const path = std.fmt.bufPrint(&buf, "{s}/.config/agentmux/agentmux.conf", .{home_slice}) catch return;
+        self.loadConfigFile(path);
     }
 
     pub fn createSession(self: *Server, name: []const u8, shell: [:0]const u8, cols: u32, rows: u32) !*Session {

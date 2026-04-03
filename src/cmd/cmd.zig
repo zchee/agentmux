@@ -282,7 +282,14 @@ fn parseTargetWindow(args: []const []const u8) ?u32 {
     return null;
 }
 
-fn defaultShell(_: ?*Session) [:0]const u8 {
+fn defaultShell(session: ?*Session) [:0]const u8 {
+    if (session) |s| return s.options.default_shell;
+    return "/bin/sh";
+}
+
+fn defaultShellFromContext(ctx: *const Context) [:0]const u8 {
+    if (ctx.session) |s| return s.options.default_shell;
+    if (ctx.server.global_default_shell) |shell| return shell;
     return "/bin/sh";
 }
 
@@ -1058,7 +1065,7 @@ fn cmdNewSession(ctx: *Context, args: []const []const u8) CmdError!void {
         }
     }
 
-    const session = ctx.server.createSession(session_name, defaultShell(ctx.session), 80, 24) catch return CmdError.CommandFailed;
+    const session = ctx.server.createSession(session_name, defaultShellFromContext(ctx), 80, 24) catch return CmdError.CommandFailed;
     ctx.session = session;
 }
 
@@ -1101,7 +1108,7 @@ fn cmdNewWindow(ctx: *Context, args: []const []const u8) CmdError!void {
     const window = Window.init(ctx.allocator, name, 80, 24) catch return CmdError.OutOfMemory;
     errdefer window.deinit();
 
-    const pane = spawnWindowPane(ctx.allocator, defaultShell(ctx.session), 80, 24) catch |err| switch (err) {
+    const pane = spawnWindowPane(ctx.allocator, defaultShellFromContext(ctx), 80, 24) catch |err| switch (err) {
         CmdError.OutOfMemory => return CmdError.OutOfMemory,
         else => return CmdError.CommandFailed,
     };
@@ -1131,7 +1138,7 @@ fn cmdSplitWindow(ctx: *Context, args: []const []const u8) CmdError!void {
         }
     }
 
-    const new_pane = spawnWindowPane(ctx.allocator, defaultShell(ctx.session), window.sx, window.sy) catch |err| switch (err) {
+    const new_pane = spawnWindowPane(ctx.allocator, defaultShellFromContext(ctx), window.sx, window.sy) catch |err| switch (err) {
         CmdError.OutOfMemory => return CmdError.OutOfMemory,
         else => return CmdError.CommandFailed,
     };
@@ -1394,36 +1401,66 @@ fn cmdDisplayMessage(ctx: *Context, args: []const []const u8) CmdError!void {
 }
 
 fn cmdSetOption(ctx: *Context, args: []const []const u8) CmdError!void {
-    const session = ctx.session orelse return CmdError.SessionNotFound;
     if (args.len < 2) return CmdError.InvalidArgs;
 
+    var is_global = false;
     var index: usize = 0;
     while (index < args.len and args[index].len > 0 and args[index][0] == '-') : (index += 1) {
-        if (!std.mem.eql(u8, args[index], "-g")) return CmdError.InvalidArgs;
+        if (std.mem.eql(u8, args[index], "-g")) {
+            is_global = true;
+        }
     }
     if (index + 2 != args.len) return CmdError.InvalidArgs;
 
     const name = args[index];
     const value = args[index + 1];
 
-    if (std.mem.eql(u8, name, "base-index")) {
-        session.options.base_index = std.fmt.parseInt(u32, value, 10) catch return CmdError.InvalidArgs;
-        return;
-    }
-    if (std.mem.eql(u8, name, "mouse")) {
-        session.options.mouse = parseBooleanValue(value) orelse return CmdError.InvalidArgs;
-        return;
-    }
-    if (std.mem.eql(u8, name, "status")) {
-        session.options.status = parseBooleanValue(value) orelse return CmdError.InvalidArgs;
-        return;
-    }
-    if (std.mem.eql(u8, name, "prefix")) {
-        session.options.prefix_key = parsePrefixValue(value) orelse return CmdError.InvalidArgs;
+    // Global options are applied to all existing sessions and stored as
+    // server defaults for future sessions.
+    if (is_global) {
+        applyGlobalOption(ctx.server, name, value) catch return CmdError.CommandFailed;
         return;
     }
 
-    return CmdError.CommandFailed;
+    const session = ctx.session orelse return CmdError.SessionNotFound;
+    applySessionOption(session, name, value) catch return CmdError.CommandFailed;
+}
+
+fn applySessionOption(session: *Session, name: []const u8, value: []const u8) !void {
+    if (std.mem.eql(u8, name, "base-index")) {
+        session.options.base_index = std.fmt.parseInt(u32, value, 10) catch return error.InvalidArgs;
+        return;
+    }
+    if (std.mem.eql(u8, name, "mouse")) {
+        session.options.mouse = parseBooleanValue(value) orelse return error.InvalidArgs;
+        return;
+    }
+    if (std.mem.eql(u8, name, "status")) {
+        session.options.status = parseBooleanValue(value) orelse return error.InvalidArgs;
+        return;
+    }
+    if (std.mem.eql(u8, name, "prefix")) {
+        session.options.prefix_key = parsePrefixValue(value) orelse return error.InvalidArgs;
+        return;
+    }
+    if (std.mem.eql(u8, name, "default-shell")) {
+        try session.setDefaultShell(value);
+        return;
+    }
+    return error.CommandFailed;
+}
+
+fn applyGlobalOption(server: *Server, name: []const u8, value: []const u8) !void {
+    // Apply to all existing sessions.
+    for (server.sessions.items) |session| {
+        applySessionOption(session, name, value) catch {};
+    }
+    // Store for future sessions by updating the server's global default shell.
+    if (std.mem.eql(u8, name, "default-shell")) {
+        const owned = try server.allocator.dupeZ(u8, value);
+        if (server.global_default_shell) |old| server.allocator.free(old);
+        server.global_default_shell = owned;
+    }
 }
 
 fn cmdSourceFile(ctx: *Context, args: []const []const u8) CmdError!void {

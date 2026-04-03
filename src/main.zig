@@ -194,14 +194,16 @@ fn determineTerminalName() []const u8 {
     return getenv("TERM") orelse "xterm-256color";
 }
 
-fn runServer(alloc: std.mem.Allocator, socket_path: []const u8, daemonize_server: bool) !void {
+fn runServer(alloc: std.mem.Allocator, socket_path: []const u8, daemonize_server: bool, config_file: ?[:0]const u8) !void {
     if (daemonize_server) {
         try signals.daemonize();
     }
     signals.SignalHandler.install();
     var server = try server_mod.Server.init(alloc, socket_path);
     defer server.deinit();
+    if (config_file) |cf| server.config_file = cf;
     try server.listen();
+    server.loadDefaultConfig();
     try server.run();
 }
 
@@ -223,12 +225,12 @@ fn waitForServer(alloc: std.mem.Allocator, socket_path: []const u8) !void {
     return error.ServerStartTimeout;
 }
 
-fn autostartServer(alloc: std.mem.Allocator, socket_path: []const u8) !void {
+fn autostartServer(alloc: std.mem.Allocator, socket_path: []const u8, config_file: ?[:0]const u8) !void {
     const pid = std.c.fork();
     if (pid < 0) return error.ForkFailed;
     if (pid == 0) {
         detachStdio();
-        runServer(std.heap.c_allocator, socket_path, false) catch {};
+        runServer(std.heap.c_allocator, socket_path, false, config_file) catch {};
         std.c.exit(0);
     }
     try waitForServer(alloc, socket_path);
@@ -253,7 +255,7 @@ fn runCommandMode(alloc: std.mem.Allocator, flags: *const Flags, socket_path: []
     var client = client_mod.Client.init(alloc, socket_path);
     client.connect() catch |err| switch (err) {
         error.ConnectFailed => {
-            try autostartServer(alloc, socket_path);
+            try autostartServer(alloc, socket_path, flags.config_file);
             try client.connect();
         },
         else => return err,
