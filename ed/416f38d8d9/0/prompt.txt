@@ -1,0 +1,5 @@
+/autopilot "Review and implements whether it behaves the same as `tmux`"
+
+---
+
+/commit

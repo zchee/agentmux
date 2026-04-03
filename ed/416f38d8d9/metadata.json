@@ -1,0 +1,25 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "ed416f38d8d9",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "src/render/metal.zig"
+  ],
+  "sessions": [
+    {
+      "metadata": "/ed/416f38d8d9/0/metadata.json",
+      "transcript": "/ed/416f38d8d9/0/full.jsonl",
+      "content_hash": "/ed/416f38d8d9/0/content_hash.txt",
+      "prompt": "/ed/416f38d8d9/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 443,
+    "cache_creation_tokens": 719357,
+    "cache_read_tokens": 26750820,
+    "output_tokens": 40000,
+    "api_call_count": 148
+  }
+}

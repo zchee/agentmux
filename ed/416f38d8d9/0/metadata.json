@@ -1,0 +1,37 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "ed416f38d8d9",
+  "session_id": "cf4618ba-7f51-4a75-bef9-5fa32a9f003b",
+  "strategy": "manual-commit",
+  "created_at": "2026-04-03T22:06:52.812792Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "src/render/metal.zig"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-6[1m]",
+  "turn_id": "83e7676029a8",
+  "token_usage": {
+    "input_tokens": 443,
+    "cache_creation_tokens": 719357,
+    "cache_read_tokens": 26750820,
+    "output_tokens": 40000,
+    "api_call_count": 148
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-04-03T22:06:50.76167Z",
+    "agent_lines": 382,
+    "agent_removed": 25,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 382,
+    "total_lines_changed": 407,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
+}
