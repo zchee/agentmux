@@ -27,6 +27,7 @@ pub const Context = struct {
     allocator: std.mem.Allocator,
     reply_fd: ?std.c.fd_t = null,
     registry: ?*const Registry = null,
+    binding_manager: ?*binding_mod.BindingManager = null,
 };
 
 /// Command handler function type.
@@ -861,16 +862,94 @@ fn cmdClearHistory(ctx: *Context, _: []const []const u8) CmdError!void {
     pane_state.screen.grid.hsize = 0;
 }
 
-fn cmdBindKey(ctx: *Context, _: []const []const u8) CmdError!void {
-    // Requires binding_manager on Server (not yet wired).
-    try writeReplyMessage(ctx, .error_msg, "bind-key: not yet implemented\n");
-    return CmdError.CommandFailed;
+fn cmdBindKey(ctx: *Context, args: []const []const u8) CmdError!void {
+    const manager = ctx.binding_manager orelse {
+        try writeReplyMessage(ctx, .error_msg, "bind-key: no binding manager available\n");
+        return CmdError.CommandFailed;
+    };
+
+    var table_name: []const u8 = "prefix";
+    var i: usize = 0;
+
+    // Parse flags: -T table_name, -n (root table)
+    while (i < args.len) {
+        if (std.mem.eql(u8, args[i], "-T")) {
+            i += 1;
+            if (i >= args.len) return CmdError.InvalidArgs;
+            table_name = args[i];
+        } else if (std.mem.eql(u8, args[i], "-n")) {
+            table_name = "root";
+        } else {
+            break;
+        }
+        i += 1;
+    }
+
+    // Next arg is the key string
+    if (i >= args.len) return CmdError.InvalidArgs;
+    const kr = key_string.stringToKey(args[i]) orelse {
+        try writeReplyMessage(ctx, .error_msg, "bind-key: unknown key\n");
+        return CmdError.CommandFailed;
+    };
+    i += 1;
+
+    // Remaining args form the command
+    if (i >= args.len) return CmdError.InvalidArgs;
+    const cmd_parts = args[i..];
+
+    // Join command parts with spaces
+    var total_len: usize = 0;
+    for (cmd_parts, 0..) |part, idx| {
+        total_len += part.len;
+        if (idx < cmd_parts.len - 1) total_len += 1;
+    }
+    const cmd_str = ctx.allocator.alloc(u8, total_len) catch return CmdError.OutOfMemory;
+    defer ctx.allocator.free(cmd_str);
+    var pos: usize = 0;
+    for (cmd_parts, 0..) |part, idx| {
+        @memcpy(cmd_str[pos..][0..part.len], part);
+        pos += part.len;
+        if (idx < cmd_parts.len - 1) {
+            cmd_str[pos] = ' ';
+            pos += 1;
+        }
+    }
+
+    const table = manager.getOrCreateTable(table_name) catch return CmdError.OutOfMemory;
+    table.bind(kr.key, kr.mods, cmd_str) catch return CmdError.OutOfMemory;
 }
 
-fn cmdUnbindKey(ctx: *Context, _: []const []const u8) CmdError!void {
-    // Requires binding_manager on Server (not yet wired).
-    try writeReplyMessage(ctx, .error_msg, "unbind-key: not yet implemented\n");
-    return CmdError.CommandFailed;
+fn cmdUnbindKey(ctx: *Context, args: []const []const u8) CmdError!void {
+    const manager = ctx.binding_manager orelse {
+        try writeReplyMessage(ctx, .error_msg, "unbind-key: no binding manager available\n");
+        return CmdError.CommandFailed;
+    };
+
+    var table_name: []const u8 = "prefix";
+    var i: usize = 0;
+
+    // Parse flags: -T table_name, -n (root table)
+    while (i < args.len) {
+        if (std.mem.eql(u8, args[i], "-T")) {
+            i += 1;
+            if (i >= args.len) return CmdError.InvalidArgs;
+            table_name = args[i];
+        } else if (std.mem.eql(u8, args[i], "-n")) {
+            table_name = "root";
+        } else {
+            break;
+        }
+        i += 1;
+    }
+
+    if (i >= args.len) return CmdError.InvalidArgs;
+    const kr = key_string.stringToKey(args[i]) orelse {
+        try writeReplyMessage(ctx, .error_msg, "unbind-key: unknown key\n");
+        return CmdError.CommandFailed;
+    };
+
+    const table = manager.getOrCreateTable(table_name) catch return CmdError.OutOfMemory;
+    table.unbind(kr.key, kr.mods);
 }
 
 fn cmdSetWindowOption(ctx: *Context, args: []const []const u8) CmdError!void {
@@ -1469,9 +1548,10 @@ fn cmdDeleteBuffer(ctx: *Context, args: []const []const u8) CmdError!void {
 }
 
 fn cmdListKeys(ctx: *Context, _: []const []const u8) CmdError!void {
-    var manager = binding_mod.BindingManager.init(ctx.allocator);
-    defer manager.deinit();
-    try manager.setupDefaults();
+    const manager = ctx.binding_manager orelse {
+        try writeReplyMessage(ctx, .error_msg, "list-keys: no binding manager available\n");
+        return CmdError.CommandFailed;
+    };
 
     var iter = manager.tables.iterator();
     while (iter.next()) |entry| {

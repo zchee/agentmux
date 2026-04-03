@@ -5,10 +5,14 @@ const Pane = @import("window.zig").Pane;
 const ChooseTreeState = @import("window.zig").ChooseTreeState;
 const Pty = @import("pane.zig").Pty;
 const PasteStack = @import("copy/paste.zig").PasteStack;
-const SessionLoop = @import("server_loop.zig").SessionLoop;
+const server_loop = @import("server_loop.zig");
+const SessionLoop = server_loop.SessionLoop;
 const protocol = @import("protocol.zig");
 const cmd = @import("cmd/cmd.zig");
 const config_parser = @import("config/parser.zig");
+const binding_mod = @import("keybind/bindings.zig");
+const output_mod = @import("terminal/output.zig");
+const status_fmt = @import("status/format.zig");
 const log = @import("core/log.zig");
 const signals = @import("signals.zig");
 
@@ -22,6 +26,7 @@ pub const Server = struct {
     choose_tree_state: ?ChooseTreeState,
     paste_stack: PasteStack,
     session_loop: SessionLoop,
+    binding_manager: binding_mod.BindingManager,
     running: bool,
     allocator: std.mem.Allocator,
 
@@ -33,6 +38,9 @@ pub const Server = struct {
     };
 
     pub fn init(alloc: std.mem.Allocator, socket_path: []const u8) !Server {
+        var bm = binding_mod.BindingManager.init(alloc);
+        try bm.setupDefaults();
+
         return .{
             .listen_fd = -1,
             .socket_path = try alloc.dupe(u8, socket_path),
@@ -42,6 +50,7 @@ pub const Server = struct {
             .choose_tree_state = null,
             .paste_stack = PasteStack.init(alloc),
             .session_loop = SessionLoop.init(alloc),
+            .binding_manager = bm,
             .running = false,
             .allocator = alloc,
         };
@@ -65,6 +74,7 @@ pub const Server = struct {
         }
         self.paste_stack.deinit();
         self.session_loop.deinit();
+        self.binding_manager.deinit();
         self.allocator.free(self.socket_path);
     }
 
@@ -297,6 +307,7 @@ pub const Server = struct {
             .allocator = self.allocator,
             .reply_fd = client.fd,
             .registry = &registry,
+            .binding_manager = &self.binding_manager,
         };
 
         if (std.mem.indexOfScalar(u8, payload, 0) != null) {
@@ -364,8 +375,63 @@ pub const Server = struct {
         const session = client.session orelse return;
         const window = session.active_window orelse return;
         const pane = window.active_pane orelse return;
-        if (pane.fd >= 0 and payload.len > 0) {
+        if (pane.fd < 0 or payload.len == 0) return;
+
+        // Pass escape sequences (multi-byte starting with ESC) directly to the PTY.
+        if (payload.len > 1 and payload[0] == 0x1b) {
             _ = std.c.write(pane.fd, payload.ptr, payload.len);
+            return;
+        }
+
+        for (payload) |byte| {
+            var key: u21 = undefined;
+            var mods = binding_mod.Modifiers{};
+
+            if (byte < 32) {
+                // Control character: derive the letter and set ctrl modifier.
+                key = @as(u21, byte) + '@';
+                mods.ctrl = true;
+            } else {
+                key = byte;
+            }
+
+            if (self.binding_manager.processKey(key, mods)) |command_str| {
+                self.executeBindingCommand(client_idx, command_str);
+            } else {
+                _ = std.c.write(pane.fd, @ptrCast(&byte), 1);
+            }
+        }
+    }
+
+    fn executeBindingCommand(self: *Server, client_idx: usize, command_str: []const u8) void {
+        var registry = cmd.Registry.init(self.allocator);
+        defer registry.deinit();
+        registry.registerBuiltins() catch return;
+
+        const client = &self.clients.items[client_idx];
+        var ctx = cmd.Context{
+            .server = self,
+            .session = client.session,
+            .window = if (client.session) |s| s.active_window else null,
+            .pane = if (client.session) |s| if (s.active_window) |w| w.active_pane else null else null,
+            .client_index = client_idx,
+            .allocator = self.allocator,
+            .reply_fd = client.fd,
+            .registry = &registry,
+            .binding_manager = &self.binding_manager,
+        };
+
+        var parser = config_parser.ConfigParser.init(self.allocator, command_str);
+        var commands = parser.parseAll() catch return;
+        defer {
+            for (commands.items) |*c| c.deinit(self.allocator);
+            commands.deinit(self.allocator);
+        }
+
+        for (commands.items) |*command| {
+            ctx.window = if (ctx.session) |s| s.active_window else null;
+            ctx.pane = if (ctx.window) |w| w.active_pane else null;
+            registry.executeParsed(&ctx, command) catch {};
         }
     }
 
@@ -390,15 +456,83 @@ pub const Server = struct {
         const n = std.c.read(fd, &buf, buf.len);
         if (n <= 0) return;
 
-        if (self.session_loop.getPane(pane.id)) |pane_state| {
-            pane_state.processPtyOutput(buf[0..@intCast(n)]);
+        const pane_state = self.session_loop.getPane(pane.id);
+        if (pane_state) |ps| {
+            ps.processPtyOutput(buf[0..@intCast(n)]);
         }
 
         const session = self.findSessionForPaneFd(fd) orelse return;
         for (self.clients.items) |client| {
             if (client.session == session) {
-                protocol.sendMessage(client.fd, .output, buf[0..@intCast(n)]) catch {};
+                self.renderComposedToClient(client.fd, session, pane_state) catch {
+                    // Fall back to raw relay on render failure.
+                    protocol.sendMessage(client.fd, .output, buf[0..@intCast(n)]) catch {};
+                };
             }
+        }
+    }
+
+    /// Render the composed terminal view (screen content + status bar) for a
+    /// client.  Uses a pipe pair so the existing Output→fd writer can produce
+    /// escape sequences that we then wrap in a protocol message.
+    fn renderComposedToClient(
+        self: *Server,
+        client_fd: std.c.fd_t,
+        session: *Session,
+        pane_state_opt: ?*server_loop.PaneState,
+    ) !void {
+        const ps = pane_state_opt orelse return error.NoPaneState;
+
+        // Use a pipe so Output can flush to the write end while we
+        // collect the bytes from the read end.
+        var pipe_fds: [2]std.c.fd_t = undefined;
+        if (std.c.pipe(&pipe_fds) != 0) return error.PipeFailed;
+        defer _ = std.c.close(pipe_fds[0]);
+        errdefer _ = std.c.close(pipe_fds[1]);
+
+        // Render dirty screen lines through the redraw pipeline.
+        var out = output_mod.Output.init(pipe_fds[1]);
+        ps.renderTo(&out);
+
+        // Render status bar on the last row.
+        const window = session.active_window;
+        const cols: u32 = if (window) |w| w.sx else 80;
+        const rows: u32 = if (window) |w| w.sy else 24;
+
+        const fmt_ctx = status_fmt.FormatContext{
+            .session_name = session.name,
+            .window_name = if (window) |w| w.name else "",
+        };
+        const status_bar = @import("status/status.zig").StatusBar.init();
+        const status_line = status_bar.render(self.allocator, cols, &fmt_ctx) catch null;
+        defer if (status_line) |sl| self.allocator.free(sl);
+
+        if (status_line) |sl| {
+            out.cursorTo(0, rows -| 1);
+            out.attrReset();
+            // Reverse video for status bar (like tmux default).
+            out.writeBytes("\x1b[7m");
+            out.writeBytes(sl);
+            out.writeBytes("\x1b[0m");
+        }
+
+        out.flush();
+
+        // Close write end so read gets EOF.
+        _ = std.c.close(pipe_fds[1]);
+        pipe_fds[1] = -1;
+
+        // Read rendered bytes from the pipe.
+        var rendered: [protocol.max_payload]u8 = undefined;
+        var total: usize = 0;
+        while (total < rendered.len) {
+            const rc = std.c.read(pipe_fds[0], rendered[total..].ptr, rendered.len - total);
+            if (rc <= 0) break;
+            total += @intCast(rc);
+        }
+
+        if (total > 0) {
+            try protocol.sendMessage(client_fd, .output, rendered[0..total]);
         }
     }
 

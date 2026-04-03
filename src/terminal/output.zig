@@ -78,24 +78,34 @@ pub const Output = struct {
 
     /// Set foreground color.
     pub fn setFg(self: *Output, c: colour.Colour) void {
-        var tmp: [32]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&tmp);
-        const writer = stream.writer();
-        writer.writeAll("\x1b[") catch return;
-        c.toSgr(writer, true) catch return;
-        writer.writeByte('m') catch return;
-        self.writeBytes(stream.getWritten());
+        self.writeSgrColour(c, true);
     }
 
     /// Set background color.
     pub fn setBg(self: *Output, c: colour.Colour) void {
+        self.writeSgrColour(c, false);
+    }
+
+    fn writeSgrColour(self: *Output, c: colour.Colour, is_fg: bool) void {
         var tmp: [32]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&tmp);
-        const writer = stream.writer();
-        writer.writeAll("\x1b[") catch return;
-        c.toSgr(writer, false) catch return;
-        writer.writeByte('m') catch return;
-        self.writeBytes(stream.getWritten());
+        const s = switch (c) {
+            .default => std.fmt.bufPrint(&tmp, "\x1b[{d}m", .{if (is_fg) @as(u8, 39) else @as(u8, 49)}) catch return,
+            .palette => |idx| blk: {
+                if (idx < 8) {
+                    break :blk std.fmt.bufPrint(&tmp, "\x1b[{d}m", .{(if (is_fg) @as(u8, 30) else @as(u8, 40)) + idx}) catch return;
+                } else if (idx < 16) {
+                    break :blk std.fmt.bufPrint(&tmp, "\x1b[{d}m", .{(if (is_fg) @as(u8, 90) else @as(u8, 100)) + idx - 8}) catch return;
+                } else {
+                    const base: u8 = if (is_fg) 38 else 48;
+                    break :blk std.fmt.bufPrint(&tmp, "\x1b[{d};5;{d}m", .{ base, idx }) catch return;
+                }
+            },
+            .rgb => |rgb| blk: {
+                const base: u8 = if (is_fg) 38 else 48;
+                break :blk std.fmt.bufPrint(&tmp, "\x1b[{d};2;{d};{d};{d}m", .{ base, rgb.r, rgb.g, rgb.b }) catch return;
+            },
+        };
+        self.writeBytes(s);
     }
 
     /// Set attributes (bold, italic, etc.).
