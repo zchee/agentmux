@@ -9,6 +9,10 @@ const SessionLoop = @import("server_loop.zig").SessionLoop;
 const protocol = @import("protocol.zig");
 const cmd = @import("cmd/cmd.zig");
 const config_parser = @import("config/parser.zig");
+const binding_mod = @import("keybind/bindings.zig");
+const key_string = @import("keybind/string.zig");
+const options_mod = @import("config/options.zig");
+const options_table_mod = @import("config/options_table.zig");
 const log = @import("core/log.zig");
 const signals = @import("signals.zig");
 
@@ -21,6 +25,8 @@ pub const Server = struct {
     default_session: ?*Session,
     choose_tree_state: ?ChooseTreeState,
     paste_stack: PasteStack,
+    bindings: binding_mod.BindingManager,
+    options: options_mod.OptionsStore,
     session_loop: SessionLoop,
     running: bool,
     allocator: std.mem.Allocator,
@@ -33,7 +39,7 @@ pub const Server = struct {
     };
 
     pub fn init(alloc: std.mem.Allocator, socket_path: []const u8) !Server {
-        return .{
+        var server = Server{
             .listen_fd = -1,
             .socket_path = try alloc.dupe(u8, socket_path),
             .sessions = .empty,
@@ -41,10 +47,23 @@ pub const Server = struct {
             .default_session = null,
             .choose_tree_state = null,
             .paste_stack = PasteStack.init(alloc),
+            .bindings = binding_mod.BindingManager.init(alloc),
+            .options = options_mod.OptionsStore.init(alloc),
             .session_loop = SessionLoop.init(alloc),
             .running = false,
             .allocator = alloc,
         };
+        errdefer {
+            server.bindings.deinit();
+            server.options.deinit();
+            server.paste_stack.deinit();
+            server.session_loop.deinit();
+            alloc.free(server.socket_path);
+        }
+
+        try server.bindings.setupDefaults();
+        try server.options.loadDefaults(&options_table_mod.options_table);
+        return server;
     }
 
     pub fn deinit(self: *Server) void {
@@ -64,6 +83,8 @@ pub const Server = struct {
             state.deinit();
         }
         self.paste_stack.deinit();
+        self.bindings.deinit();
+        self.options.deinit();
         self.session_loop.deinit();
         self.allocator.free(self.socket_path);
     }
@@ -99,6 +120,7 @@ pub const Server = struct {
     pub fn createSession(self: *Server, name: []const u8, shell: [:0]const u8, cols: u32, rows: u32) !*Session {
         const session = try Session.init(self.allocator, name);
         errdefer session.deinit();
+        self.applySessionDefaults(session);
 
         const window = try Window.init(self.allocator, name, cols, rows);
         errdefer window.deinit();
@@ -118,6 +140,37 @@ pub const Server = struct {
         if (self.default_session == null) self.default_session = session;
         try self.session_loop.addPane(pane.id, pane.fd, cols, rows);
         return session;
+    }
+
+    pub fn applySessionDefaults(self: *Server, session: *Session) void {
+        if (self.options.get(.session, "base-index")) |value| {
+            switch (value) {
+                .number => |number| if (number >= 0) session.options.base_index = @intCast(number),
+                else => {},
+            }
+        }
+        if (self.options.get(.session, "status")) |value| {
+            switch (value) {
+                .boolean => |enabled| session.options.status = enabled,
+                else => {},
+            }
+        }
+        if (self.options.get(.session, "mouse")) |value| {
+            switch (value) {
+                .boolean => |enabled| session.options.mouse = enabled,
+                else => {},
+            }
+        }
+        if (self.options.get(.session, "prefix")) |value| {
+            switch (value) {
+                .string => |binding| if (key_string.stringToKey(binding)) |parsed| {
+                    session.options.prefix_key = parsed.key;
+                    self.bindings.prefix_key = parsed.key;
+                    self.bindings.prefix_mods = parsed.mods;
+                },
+                else => {},
+            }
+        }
     }
 
     pub fn acceptClient(self: *Server) !void {

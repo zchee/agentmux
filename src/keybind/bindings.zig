@@ -111,17 +111,20 @@ pub const BindingManager = struct {
         var iter = self.tables.iterator();
         while (iter.next()) |entry| {
             entry.value_ptr.deinit();
+            self.allocator.free(entry.key_ptr.*);
         }
         self.tables.deinit();
     }
 
     /// Get or create a key table.
     pub fn getOrCreateTable(self: *BindingManager, name: []const u8) !*KeyTable {
-        const result = try self.tables.getOrPut(name);
-        if (!result.found_existing) {
-            result.value_ptr.* = KeyTable.init(self.allocator, name);
-        }
-        return result.value_ptr;
+        if (self.tables.getPtr(name)) |table| return table;
+
+        const owned_name = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(owned_name);
+
+        try self.tables.put(owned_name, KeyTable.init(self.allocator, owned_name));
+        return self.tables.getPtr(owned_name).?;
     }
 
     /// Process a key event. Returns the command to execute, if any.

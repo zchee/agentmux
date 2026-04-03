@@ -69,16 +69,28 @@ pub const OptionsStore = struct {
     }
 
     pub fn deinit(self: *OptionsStore) void {
-        self.server.deinit();
-        self.session.deinit();
-        self.window.deinit();
-        self.pane.deinit();
+        self.deinitMap(&self.server);
+        self.deinitMap(&self.session);
+        self.deinitMap(&self.window);
+        self.deinitMap(&self.pane);
     }
 
     /// Store a value at the given scope.
     pub fn set(self: *OptionsStore, scope: OptionScope, name: []const u8, value: OptionValue) !void {
         const map = self.mapForScope(scope);
-        try map.put(name, value);
+        if (map.getPtr(name)) |existing| {
+            self.freeValue(existing.*);
+            existing.* = try self.copyValue(value);
+            return;
+        }
+
+        const owned_name = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(owned_name);
+
+        const owned_value = try self.copyValue(value);
+        errdefer self.freeValue(owned_value);
+
+        try map.put(owned_name, owned_value);
     }
 
     /// Retrieve a value, walking up the scope chain if not set at this scope.
@@ -117,6 +129,32 @@ pub const OptionsStore = struct {
             .window => &self.window,
             .pane => &self.pane,
         };
+    }
+
+    fn deinitMap(self: *OptionsStore, map: *std.StringHashMap(OptionValue)) void {
+        var iter = map.iterator();
+        while (iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.freeValue(entry.value_ptr.*);
+        }
+        map.deinit();
+    }
+
+    fn copyValue(self: *OptionsStore, value: OptionValue) !OptionValue {
+        return switch (value) {
+            .string => |text| .{ .string = try self.allocator.dupe(u8, text) },
+            .number => |number| .{ .number = number },
+            .boolean => |boolean| .{ .boolean = boolean },
+            .colour => |colour_value| .{ .colour = colour_value },
+            .style => |style_value| .{ .style = style_value },
+        };
+    }
+
+    fn freeValue(self: *OptionsStore, value: OptionValue) void {
+        switch (value) {
+            .string => |text| self.allocator.free(text),
+            else => {},
+        }
     }
 };
 
