@@ -14,7 +14,7 @@ fn initServer() !Server {
 
 fn cleanupPaneProcess(pane: *Pane) void {
     if (pane.pid > 0) {
-        _ = std.c.kill(pane.pid, 15);
+        _ = std.c.kill(pane.pid, .TERM);
         _ = std.c.waitpid(pane.pid, null, 0);
         pane.pid = 0;
     }

@@ -87,6 +87,7 @@ pub const tabs = struct {
     pub const tabs_mod = @import("tabs/tabs.zig");
 };
 
+const cmd_tmux_equivalent_test = @import("cmd/tmux_equivalent_test.zig");
 const log = core.log;
 
 const version_string = "agentmux 0.1.0";
@@ -313,6 +314,7 @@ test {
     _ = config.options;
     _ = config.options_table;
     _ = cmd;
+    _ = cmd_tmux_equivalent_test;
     _ = keybind.bindings;
     _ = keybind.string;
     _ = terminal.acs;
