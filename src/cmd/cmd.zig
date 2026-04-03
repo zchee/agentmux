@@ -1312,219 +1312,37 @@ fn cmdDisplayMessage(ctx: *Context, args: []const []const u8) CmdError!void {
     }
 }
 
-fn applyServerOption(ctx: *Context, name: []const u8, value: []const u8) CmdError!void {
-    if (std.mem.eql(u8, name, "default-terminal")) {
-        ctx.server.setDefaultTerminal(value) catch return CmdError.OutOfMemory;
-        return;
-    }
-    if (std.mem.eql(u8, name, "history-limit")) {
-        ctx.server.options.history_limit = std.fmt.parseInt(i64, value, 10) catch return CmdError.InvalidArgs;
-        return;
-    }
-    if (std.mem.eql(u8, name, "escape-time")) {
-        ctx.server.options.escape_time = std.fmt.parseInt(i64, value, 10) catch return CmdError.InvalidArgs;
-        return;
-    }
-    if (std.mem.eql(u8, name, "set-clipboard")) {
-        ctx.server.setSetClipboard(value) catch return CmdError.OutOfMemory;
-        return;
-    }
-    return CmdError.InvalidArgs;
-}
-
-fn applySessionOption(ctx: *Context, name: []const u8, value: []const u8) CmdError!void {
+fn cmdSetOption(ctx: *Context, args: []const []const u8) CmdError!void {
     const session = ctx.session orelse return CmdError.SessionNotFound;
+    if (args.len < 2) return CmdError.InvalidArgs;
+
+    var index: usize = 0;
+    while (index < args.len and args[index].len > 0 and args[index][0] == '-') : (index += 1) {
+        if (!std.mem.eql(u8, args[index], "-g")) return CmdError.InvalidArgs;
+    }
+    if (index + 2 != args.len) return CmdError.InvalidArgs;
+
+    const name = args[index];
+    const value = args[index + 1];
 
     if (std.mem.eql(u8, name, "base-index")) {
         session.options.base_index = std.fmt.parseInt(u32, value, 10) catch return CmdError.InvalidArgs;
         return;
     }
-    if (std.mem.eql(u8, name, "default-shell")) {
-        session.setDefaultShell(value) catch return CmdError.OutOfMemory;
+    if (std.mem.eql(u8, name, "mouse")) {
+        session.options.mouse = parseBooleanValue(value) orelse return CmdError.InvalidArgs;
         return;
     }
     if (std.mem.eql(u8, name, "status")) {
-        session.options.status = parseBoolValue(value) orelse return CmdError.InvalidArgs;
-        return;
-    }
-    if (std.mem.eql(u8, name, "mouse")) {
-        session.options.mouse = parseBoolValue(value) orelse return CmdError.InvalidArgs;
+        session.options.status = parseBooleanValue(value) orelse return CmdError.InvalidArgs;
         return;
     }
     if (std.mem.eql(u8, name, "prefix")) {
-        const result = key_string.stringToKey(value) orelse return CmdError.InvalidArgs;
-        session.setPrefix(value, result.key) catch return CmdError.OutOfMemory;
-        ctx.server.bindings.prefix_key = result.key;
-        ctx.server.bindings.prefix_mods = .{
-            .ctrl = result.mods.ctrl,
-            .meta = result.mods.meta,
-            .shift = result.mods.shift,
-        };
+        session.options.prefix_key = parsePrefixValue(value) orelse return CmdError.InvalidArgs;
         return;
     }
-    if (std.mem.eql(u8, name, "status-style")) {
-        session.options.status_style = status_style.parse(value);
-        return;
-    }
-    if (std.mem.eql(u8, name, "status-left")) {
-        session.setStatusLeft(value) catch return CmdError.OutOfMemory;
-        return;
-    }
-    if (std.mem.eql(u8, name, "status-right")) {
-        session.setStatusRight(value) catch return CmdError.OutOfMemory;
-        return;
-    }
-    if (std.mem.eql(u8, name, "visual-activity")) {
-        session.options.visual_activity = parseBoolValue(value) orelse return CmdError.InvalidArgs;
-        return;
-    }
-    return CmdError.InvalidArgs;
-}
 
-fn applyWindowOption(ctx: *Context, name: []const u8, value: []const u8) CmdError!void {
-    const window = ctx.window orelse return CmdError.WindowNotFound;
-
-    if (std.mem.eql(u8, name, "mode-keys")) {
-        window.setModeKeys(value) catch return CmdError.OutOfMemory;
-        return;
-    }
-    if (std.mem.eql(u8, name, "window-status-format")) {
-        window.setWindowStatusFormat(value) catch return CmdError.OutOfMemory;
-        return;
-    }
-    if (std.mem.eql(u8, name, "aggressive-resize")) {
-        window.options.aggressive_resize = parseBoolValue(value) orelse return CmdError.InvalidArgs;
-        return;
-    }
-    if (std.mem.eql(u8, name, "remain-on-exit")) {
-        window.options.remain_on_exit = parseBoolValue(value) orelse return CmdError.InvalidArgs;
-        return;
-    }
-    return CmdError.InvalidArgs;
-}
-
-fn cmdSetOption(ctx: *Context, args: []const []const u8) CmdError!void {
-    var option_index: ?usize = null;
-    var target_server = false;
-
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "-s")) {
-            target_server = true;
-            continue;
-        }
-        if (std.mem.eql(u8, args[i], "-g")) continue;
-        if (args[i].len > 0 and args[i][0] == '-') continue;
-        option_index = i;
-        break;
-    }
-
-    const option_pos = option_index orelse return CmdError.InvalidArgs;
-    if (option_pos + 1 >= args.len) return CmdError.InvalidArgs;
-    const option_name = args[option_pos];
-    const value = joinArgs(ctx.allocator, args[option_pos + 1 ..]) catch return CmdError.OutOfMemory;
-    defer ctx.allocator.free(value);
-
-    if (target_server or
-        std.mem.eql(u8, option_name, "default-terminal") or
-        std.mem.eql(u8, option_name, "history-limit") or
-        std.mem.eql(u8, option_name, "escape-time") or
-        std.mem.eql(u8, option_name, "set-clipboard"))
-    {
-        return applyServerOption(ctx, option_name, value);
-    }
-
-    return applySessionOption(ctx, option_name, value);
-}
-
-fn cmdSetWindowOption(ctx: *Context, args: []const []const u8) CmdError!void {
-    var option_index: ?usize = null;
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        if (args[i].len > 0 and args[i][0] == '-') continue;
-        option_index = i;
-        break;
-    }
-
-    const option_pos = option_index orelse return CmdError.InvalidArgs;
-    if (option_pos + 1 >= args.len) return CmdError.InvalidArgs;
-    const option_name = args[option_pos];
-    const value = joinArgs(ctx.allocator, args[option_pos + 1 ..]) catch return CmdError.OutOfMemory;
-    defer ctx.allocator.free(value);
-    return applyWindowOption(ctx, option_name, value);
-}
-
-fn parseBindingKeyArg(key_arg: []const u8) ?struct { key: u21, mods: binding_mod.Modifiers } {
-    if (key_string.stringToKey(key_arg)) |result| {
-        return .{
-            .key = result.key,
-            .mods = .{
-                .ctrl = result.mods.ctrl,
-                .meta = result.mods.meta,
-                .shift = result.mods.shift,
-            },
-        };
-    }
-    if (key_arg.len == 1) {
-        return .{ .key = key_arg[0], .mods = .{} };
-    }
-    return null;
-}
-
-fn cmdBindKey(ctx: *Context, args: []const []const u8) CmdError!void {
-    var table_name: []const u8 = "prefix";
-    var key_index: ?usize = null;
-
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "-T")) {
-            if (i + 1 >= args.len) return CmdError.InvalidArgs;
-            i += 1;
-            table_name = args[i];
-            continue;
-        }
-        if (std.mem.eql(u8, args[i], "-n")) {
-            table_name = "root";
-            continue;
-        }
-        key_index = i;
-        break;
-    }
-
-    const key_pos = key_index orelse return CmdError.InvalidArgs;
-    if (key_pos + 1 >= args.len) return CmdError.InvalidArgs;
-    const parsed = parseBindingKeyArg(args[key_pos]) orelse return CmdError.InvalidArgs;
-    const command = joinArgs(ctx.allocator, args[key_pos + 1 ..]) catch return CmdError.OutOfMemory;
-    defer ctx.allocator.free(command);
-
-    const table = ctx.server.bindings.getOrCreateTable(table_name) catch return CmdError.OutOfMemory;
-    table.bind(parsed.key, parsed.mods, command) catch return CmdError.OutOfMemory;
-}
-
-fn cmdUnbindKey(ctx: *Context, args: []const []const u8) CmdError!void {
-    var table_name: []const u8 = "prefix";
-    var key_index: ?usize = null;
-
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "-T")) {
-            if (i + 1 >= args.len) return CmdError.InvalidArgs;
-            i += 1;
-            table_name = args[i];
-            continue;
-        }
-        if (std.mem.eql(u8, args[i], "-n")) {
-            table_name = "root";
-            continue;
-        }
-        key_index = i;
-        break;
-    }
-
-    const key_pos = key_index orelse return CmdError.InvalidArgs;
-    const parsed = parseBindingKeyArg(args[key_pos]) orelse return CmdError.InvalidArgs;
-    const table = ctx.server.bindings.tables.getPtr(table_name) orelse return;
-    table.unbind(parsed.key, parsed.mods);
+    return CmdError.CommandFailed;
 }
 
 fn cmdSourceFile(ctx: *Context, args: []const []const u8) CmdError!void {
@@ -1873,6 +1691,8 @@ test "registry register and find" {
     try std.testing.expect(reg.find("send-prefix") != null);
     try std.testing.expect(reg.find("if-shell") != null);
     try std.testing.expect(reg.find("if") != null);
+    try std.testing.expect(reg.find("set-option") != null);
+    try std.testing.expect(reg.find("set") != null);
     try std.testing.expect(reg.find("nonexistent") == null);
 }
 
@@ -2047,7 +1867,7 @@ test "addChooseTreeEntry stores pane metadata" {
     var choose_state = ChooseTreeState.init(alloc, 10);
     defer choose_state.deinit();
 
-    var session = try Session.init(alloc, "demo");
+    const session = try Session.init(alloc, "demo");
     defer session.deinit();
     var window = try Window.init(alloc, "win", 80, 24);
     const pane = try Pane.init(alloc, 80, 24);
@@ -2067,6 +1887,83 @@ test "set-option updates session and server settings" {
     var reg = Registry.init(std.testing.allocator);
     defer reg.deinit();
     try reg.registerBuiltins();
+
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    var ctx = Context{
+        .server = &server,
+        .session = null,
+        .window = null,
+        .pane = null,
+        .allocator = alloc,
+        .reply_fd = fds[1],
+        .registry = &reg,
+    };
+
+    try reg.execute(&ctx, "if-shell", &.{ "true", "display-message success", "display-message failure" });
+
+    var msg = try protocol.recvMessageAlloc(alloc, fds[0]);
+    defer msg.deinit();
+    try std.testing.expectEqual(protocol.MessageType.output, msg.msg_type);
+    try std.testing.expectEqualStrings("success\n", msg.payload);
+}
+
+test "if-shell executes failure branch" {
+    const alloc = std.testing.allocator;
+    var server = try Server.init(alloc, "/tmp/agentmux-if-shell-failure.sock");
+    defer server.deinit();
+
+    var reg = Registry.init(alloc);
+    defer reg.deinit();
+    try reg.registerBuiltins();
+
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    var ctx = Context{
+        .server = &server,
+        .session = null,
+        .window = null,
+        .pane = null,
+        .allocator = alloc,
+        .reply_fd = fds[1],
+        .registry = &reg,
+    };
+
+    try reg.execute(&ctx, "if-shell", &.{ "false", "display-message success", "display-message failure" });
+
+    var msg = try protocol.recvMessageAlloc(alloc, fds[0]);
+    defer msg.deinit();
+    try std.testing.expectEqual(protocol.MessageType.output, msg.msg_type);
+    try std.testing.expectEqualStrings("failure\n", msg.payload);
+}
+
+test "send-prefix writes configured prefix byte to active pane" {
+    const alloc = std.testing.allocator;
+    var server = try Server.init(alloc, "/tmp/agentmux-send-prefix.sock");
+    defer server.deinit();
+
+    const session = try Session.init(alloc, "demo");
+    try server.sessions.append(alloc, session);
+    server.default_session = session;
+
+    var window = try Window.init(alloc, "win", 80, 24);
+    const pane = try Pane.init(alloc, 80, 24);
+
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    pane.fd = fds[1];
+
+    try window.addPane(pane);
+    try session.addWindow(window);
+    session.selectWindow(window);
+    session.options.prefix_key = 0x01;
 
     var ctx = Context{
         .server = &server,
@@ -2197,4 +2094,83 @@ test "source-file applies tmux-style config commands" {
         .command => |command| try std.testing.expectEqualStrings("send-prefix", command),
         .none => return error.ExpectedCommandBinding,
     }
+}
+
+test "set-option updates session base index" {
+    const alloc = std.testing.allocator;
+    var server = try Server.init(alloc, "/tmp/agentmux-set-base-index.sock");
+    defer server.deinit();
+
+    const session = try Session.init(alloc, "demo");
+    try server.sessions.append(alloc, session);
+
+    var ctx = Context{
+        .server = &server,
+        .session = session,
+        .window = null,
+        .pane = null,
+        .allocator = alloc,
+    };
+
+    try cmdSetOption(&ctx, &.{ "-g", "base-index", "3" });
+    try std.testing.expectEqual(@as(u32, 3), session.options.base_index);
+}
+
+test "set-option updates session booleans" {
+    const alloc = std.testing.allocator;
+    var server = try Server.init(alloc, "/tmp/agentmux-set-bool.sock");
+    defer server.deinit();
+
+    const session = try Session.init(alloc, "demo");
+    try server.sessions.append(alloc, session);
+
+    var ctx = Context{
+        .server = &server,
+        .session = session,
+        .window = null,
+        .pane = null,
+        .allocator = alloc,
+    };
+
+    try cmdSetOption(&ctx, &.{ "-g", "mouse", "on" });
+    try cmdSetOption(&ctx, &.{ "-g", "status", "off" });
+    try std.testing.expect(session.options.mouse);
+    try std.testing.expect(!session.options.status);
+}
+
+test "set-option updates prefix for send-prefix" {
+    const alloc = std.testing.allocator;
+    var server = try Server.init(alloc, "/tmp/agentmux-set-prefix.sock");
+    defer server.deinit();
+
+    var session = try Session.init(alloc, "demo");
+    try server.sessions.append(alloc, session);
+    server.default_session = session;
+
+    var window = try Window.init(alloc, "win", 80, 24);
+    const pane = try Pane.init(alloc, 80, 24);
+
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    pane.fd = fds[1];
+
+    try window.addPane(pane);
+    try session.addWindow(window);
+    session.selectWindow(window);
+
+    var ctx = Context{
+        .server = &server,
+        .session = session,
+        .window = window,
+        .pane = pane,
+        .allocator = alloc,
+    };
+
+    try cmdSetOption(&ctx, &.{ "-g", "prefix", "C-a" });
+    try cmdSendPrefix(&ctx, &.{});
+
+    var buf: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 1), std.c.read(fds[0], &buf, buf.len));
+    try std.testing.expectEqual(@as(u8, 0x01), buf[0]);
 }
