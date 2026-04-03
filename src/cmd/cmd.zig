@@ -2174,3 +2174,82 @@ test "set-option updates prefix for send-prefix" {
     try std.testing.expectEqual(@as(isize, 1), std.c.read(fds[0], &buf, buf.len));
     try std.testing.expectEqual(@as(u8, 0x01), buf[0]);
 }
+
+test "set-option updates session base index" {
+    const alloc = std.testing.allocator;
+    var server = try Server.init(alloc, "/tmp/agentmux-set-base-index.sock");
+    defer server.deinit();
+
+    const session = try Session.init(alloc, "demo");
+    try server.sessions.append(alloc, session);
+
+    var ctx = Context{
+        .server = &server,
+        .session = session,
+        .window = null,
+        .pane = null,
+        .allocator = alloc,
+    };
+
+    try cmdSetOption(&ctx, &.{ "-g", "base-index", "3" });
+    try std.testing.expectEqual(@as(u32, 3), session.options.base_index);
+}
+
+test "set-option updates session booleans" {
+    const alloc = std.testing.allocator;
+    var server = try Server.init(alloc, "/tmp/agentmux-set-bool.sock");
+    defer server.deinit();
+
+    const session = try Session.init(alloc, "demo");
+    try server.sessions.append(alloc, session);
+
+    var ctx = Context{
+        .server = &server,
+        .session = session,
+        .window = null,
+        .pane = null,
+        .allocator = alloc,
+    };
+
+    try cmdSetOption(&ctx, &.{ "-g", "mouse", "on" });
+    try cmdSetOption(&ctx, &.{ "-g", "status", "off" });
+    try std.testing.expect(session.options.mouse);
+    try std.testing.expect(!session.options.status);
+}
+
+test "set-option updates prefix for send-prefix" {
+    const alloc = std.testing.allocator;
+    var server = try Server.init(alloc, "/tmp/agentmux-set-prefix.sock");
+    defer server.deinit();
+
+    var session = try Session.init(alloc, "demo");
+    try server.sessions.append(alloc, session);
+    server.default_session = session;
+
+    var window = try Window.init(alloc, "win", 80, 24);
+    const pane = try Pane.init(alloc, 80, 24);
+
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    pane.fd = fds[1];
+
+    try window.addPane(pane);
+    try session.addWindow(window);
+    session.selectWindow(window);
+
+    var ctx = Context{
+        .server = &server,
+        .session = session,
+        .window = window,
+        .pane = pane,
+        .allocator = alloc,
+    };
+
+    try cmdSetOption(&ctx, &.{ "-g", "prefix", "C-a" });
+    try cmdSendPrefix(&ctx, &.{});
+
+    var buf: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 1), std.c.read(fds[0], &buf, buf.len));
+    try std.testing.expectEqual(@as(u8, 0x01), buf[0]);
+}
