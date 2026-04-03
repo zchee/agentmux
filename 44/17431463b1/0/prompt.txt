@@ -1,0 +1,13 @@
+/autopilot "Fix Codex reviewed points"
+
+---
+
+do 'Focus on items 1+2 (composed rendering + key binding dispatch) as the core missing pieces?'
+
+---
+
+Before autopilot, SHOULD commit current changes
+
+---
+
+do 'Focus on items 1+2 (composed rendering + key binding dispatch) as the core missing pieces?'. But before doing autopilot, SHOULD commit current changes
