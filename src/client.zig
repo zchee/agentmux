@@ -4,6 +4,7 @@ const log = @import("core/log.zig");
 
 pub const CommandResult = struct {
     exit_code: u16,
+    attached: bool = false,
 };
 
 /// Client that connects to an agentmux server.
@@ -102,7 +103,10 @@ pub const Client = struct {
                 .exit_ack => {
                     return .{ .exit_code = msg.flags };
                 },
-                .ready, .version => {},
+                .ready => {
+                    return .{ .exit_code = 0, .attached = true };
+                },
+                .version => {},
                 else => {},
             }
         }
@@ -142,6 +146,65 @@ pub const Client = struct {
             log.err("failed to send resize: {}", .{err});
             return err;
         };
+    }
+
+    /// Send raw bytes as key input to the server.
+    pub fn sendKeyRaw(self: *Client, data: []const u8) !void {
+        protocol.sendMessage(self.fd, .key, data) catch |err| {
+            log.err("failed to send key data: {}", .{err});
+            return err;
+        };
+    }
+
+    /// Run an interactive session loop: relay stdin to server, server output to stdout.
+    /// Returns when the server sends detach, shutdown, or the connection drops.
+    pub fn interactiveLoop(self: *Client) !void {
+        const client_terminal = @import("client_terminal.zig");
+
+        // Get actual terminal size and notify server.
+        if (client_terminal.getTerminalSize(0)) |size| {
+            self.sendResize(size.cols, size.rows) catch {};
+        }
+
+        // Enter raw mode.
+        var raw = client_terminal.RawTerminal.init(0) catch return;
+        raw.enableRaw() catch return;
+        defer raw.restore();
+
+        const POLLIN: i16 = 0x0001;
+        var pollfds = [_]std.c.pollfd{
+            .{ .fd = 0, .events = POLLIN, .revents = 0 },
+            .{ .fd = self.fd, .events = POLLIN, .revents = 0 },
+        };
+
+        while (true) {
+            const ret = std.c.poll(&pollfds, pollfds.len, -1);
+            if (ret < 0) break;
+
+            // stdin readable: forward to server as key data.
+            if (pollfds[0].revents & POLLIN != 0) {
+                var buf: [4096]u8 = undefined;
+                const n = std.c.read(0, &buf, buf.len);
+                if (n <= 0) break;
+                self.sendKeyRaw(buf[0..@intCast(n)]) catch break;
+            }
+
+            // Server readable: handle messages.
+            if (pollfds[1].revents & POLLIN != 0) {
+                var msg = protocol.recvMessageAlloc(self.allocator, self.fd) catch break;
+                defer msg.deinit();
+
+                switch (msg.msg_type) {
+                    .output => {
+                        if (msg.payload.len > 0) {
+                            _ = std.c.write(1, msg.payload.ptr, msg.payload.len);
+                        }
+                    },
+                    .detach, .shutdown, .exit_ack => break,
+                    else => {},
+                }
+            }
+        }
     }
 
     /// Disconnect from the server.

@@ -258,8 +258,18 @@ fn runCommandMode(alloc: std.mem.Allocator, flags: *const Flags, socket_path: []
     };
     defer client.disconnect();
 
-    try client.identify(determineTerminalName(), 80, 24);
+    var cols: u16 = 80;
+    var rows: u16 = 24;
+    if (client_terminal.getTerminalSize(0)) |ts| {
+        cols = ts.cols;
+        rows = ts.rows;
+    }
+    try client.identify(determineTerminalName(), cols, rows);
     const result = try client.requestCommand(flags.remaining.items);
+    if (result.attached) {
+        try client.interactiveLoop();
+        return;
+    }
     if (result.exit_code != 0) {
         std.c.exit(result.exit_code);
     }

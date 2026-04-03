@@ -264,7 +264,10 @@ pub const Server = struct {
         switch (message.msg_type) {
             .identify => try self.handleIdentify(client_idx, message.payload),
             .command => try self.handleCommand(client_idx, message.payload),
-            .resize, .key, .shell, .exit, .exiting => {},
+            .key => self.handleClientKey(client_idx, message.payload),
+            .resize => self.handleClientResize(client_idx, message.payload),
+            .exit, .exiting => self.removeClient(client_idx),
+            .shell => {},
             else => {},
         }
     }
@@ -306,7 +309,7 @@ pub const Server = struct {
             }
 
             if (!std.mem.eql(u8, args.items[0], "choose-tree") and !(std.mem.eql(u8, args.items[0], "send-keys") and self.choose_tree_state != null)) {
-                try self.ensureCommandSession(&ctx, client.fd, args.items[0]);
+                try self.ensureCommandSession(&ctx, client.fd, args.items[0], &registry);
             }
             ctx.window = if (ctx.session) |session| session.active_window else null;
             ctx.pane = if (ctx.window) |window| window.active_pane else null;
@@ -332,7 +335,7 @@ pub const Server = struct {
 
             for (commands.items) |*command| {
                 if (!std.mem.eql(u8, command.name, "choose-tree") and !(std.mem.eql(u8, command.name, "send-keys") and self.choose_tree_state != null)) {
-                    try self.ensureCommandSession(&ctx, client.fd, command.name);
+                    try self.ensureCommandSession(&ctx, client.fd, command.name, &registry);
                 }
                 ctx.window = if (ctx.session) |session| session.active_window else null;
                 ctx.pane = if (ctx.window) |window| window.active_pane else null;
@@ -344,8 +347,35 @@ pub const Server = struct {
             }
         }
 
+        const prev_session = client.session;
         self.setClientSession(client_idx, ctx.session);
-        try protocol.sendMessageWithFlags(client.fd, .exit_ack, 0, &.{});
+
+        // If the client became attached to a session, send ready instead of
+        // exit_ack so the client enters interactive mode.
+        if (prev_session == null and ctx.session != null) {
+            try protocol.sendMessage(client.fd, .ready, &.{});
+        } else {
+            try protocol.sendMessageWithFlags(client.fd, .exit_ack, 0, &.{});
+        }
+    }
+
+    fn handleClientKey(self: *Server, client_idx: usize, payload: []const u8) void {
+        const client = &self.clients.items[client_idx];
+        const session = client.session orelse return;
+        const window = session.active_window orelse return;
+        const pane = window.active_pane orelse return;
+        if (pane.fd >= 0 and payload.len > 0) {
+            _ = std.c.write(pane.fd, payload.ptr, payload.len);
+        }
+    }
+
+    fn handleClientResize(self: *Server, client_idx: usize, payload: []const u8) void {
+        if (payload.len < @sizeOf(protocol.ResizeMsg)) return;
+        const msg: *const protocol.ResizeMsg = @alignCast(@ptrCast(payload.ptr));
+        const client = &self.clients.items[client_idx];
+        const session = client.session orelse return;
+        const window = session.active_window orelse return;
+        window.resize(msg.cols, msg.rows);
     }
 
     fn sendError(self: *Server, fd: std.c.fd_t, message: []const u8, exit_code: u16) !void {
@@ -384,8 +414,9 @@ pub const Server = struct {
         if (client.fd >= 0) _ = std.c.close(client.fd);
     }
 
-    fn ensureCommandSession(self: *Server, ctx: *cmd.Context, reply_fd: std.c.fd_t, command_name: []const u8) !void {
-        if (ctx.session != null or commandAllowsMissingSession(command_name)) return;
+    fn ensureCommandSession(self: *Server, ctx: *cmd.Context, reply_fd: std.c.fd_t, command_name: []const u8, registry: *const cmd.Registry) !void {
+        const canonical = if (registry.find(command_name)) |def| def.name else command_name;
+        if (ctx.session != null or commandAllowsMissingSession(canonical)) return;
         if (self.default_session) |session| {
             ctx.session = session;
             return;
@@ -468,6 +499,8 @@ pub const Server = struct {
 fn commandAllowsMissingSession(name: []const u8) bool {
     return std.mem.eql(u8, name, "new-session") or
         std.mem.eql(u8, name, "list-sessions") or
+        std.mem.eql(u8, name, "list-commands") or
+        std.mem.eql(u8, name, "start-server") or
         std.mem.eql(u8, name, "kill-server") or
         std.mem.eql(u8, name, "display-message") or
         std.mem.eql(u8, name, "if-shell");

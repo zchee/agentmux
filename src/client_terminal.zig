@@ -38,31 +38,24 @@ pub const RawTerminal = struct {
         var raw = self.original;
 
         // Input flags: disable break signal, CR->NL, parity, strip, flow control
-        raw.iflag &= ~@as(std.c.tc_iflag_t, @bitCast(std.c.IFLAG{
-            .BRKINT = true,
-            .ICRNL = true,
-            .INPCK = true,
-            .ISTRIP = true,
-            .IXON = true,
-        }));
+        const iflag_off: @typeInfo(@TypeOf(raw.iflag)).@"struct".backing_integer.? =
+            @bitCast(std.c.tc_iflag_t{ .BRKINT = true, .ICRNL = true, .INPCK = true, .ISTRIP = true, .IXON = true });
+        raw.iflag = @bitCast(@as(@typeInfo(@TypeOf(raw.iflag)).@"struct".backing_integer.?, @bitCast(raw.iflag)) & ~iflag_off);
 
         // Output flags: disable post-processing
-        raw.oflag &= ~@as(std.c.tc_oflag_t, @bitCast(std.c.OFLAG{
-            .OPOST = true,
-        }));
+        const oflag_off: @typeInfo(@TypeOf(raw.oflag)).@"struct".backing_integer.? =
+            @bitCast(std.c.tc_oflag_t{ .OPOST = true });
+        raw.oflag = @bitCast(@as(@typeInfo(@TypeOf(raw.oflag)).@"struct".backing_integer.?, @bitCast(raw.oflag)) & ~oflag_off);
 
         // Control flags: set 8-bit chars
-        raw.cflag |= @as(std.c.tc_cflag_t, @bitCast(std.c.CFLAG{
-            .CS8 = true,
-        }));
+        const cflag_on: @typeInfo(@TypeOf(raw.cflag)).@"struct".backing_integer.? =
+            @bitCast(std.c.tc_cflag_t{ .CSIZE = .CS8 });
+        raw.cflag = @bitCast(@as(@typeInfo(@TypeOf(raw.cflag)).@"struct".backing_integer.?, @bitCast(raw.cflag)) | cflag_on);
 
         // Local flags: disable echo, canonical mode, signals, extended input
-        raw.lflag &= ~@as(std.c.tc_lflag_t, @bitCast(std.c.LFLAG{
-            .ECHO = true,
-            .ICANON = true,
-            .IEXTEN = true,
-            .ISIG = true,
-        }));
+        const lflag_off: @typeInfo(@TypeOf(raw.lflag)).@"struct".backing_integer.? =
+            @bitCast(std.c.tc_lflag_t{ .ECHO = true, .ICANON = true, .IEXTEN = true, .ISIG = true });
+        raw.lflag = @bitCast(@as(@typeInfo(@TypeOf(raw.lflag)).@"struct".backing_integer.?, @bitCast(raw.lflag)) & ~lflag_off);
 
         // Control chars: read returns after 1 byte, no timeout
         raw.cc[@intFromEnum(std.c.V.MIN)] = 1;
