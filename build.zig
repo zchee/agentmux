@@ -14,6 +14,9 @@ pub fn build(b: *std.Build) void {
     // Link ncurses/tinfo for terminfo
     root_mod.linkSystemLibrary("ncurses", .{});
 
+    // Link freetype for font rasterization
+    root_mod.linkSystemLibrary("freetype", .{});
+
     // Platform-specific linking
     if (root_mod.resolved_target) |resolved| {
         switch (resolved.result.os.tag) {
@@ -54,6 +57,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     test_mod.linkSystemLibrary("ncurses", .{});
+    test_mod.linkSystemLibrary("freetype", .{});
 
     const unit_tests = b.addTest(.{
         .root_module = test_mod,
