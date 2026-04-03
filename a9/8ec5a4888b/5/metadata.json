@@ -1,0 +1,42 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "a98ec5a4888b",
+  "session_id": "d0f971b2-3ff2-4666-b43e-7cd9e2a6b2f5",
+  "strategy": "manual-commit",
+  "created_at": "2026-04-03T21:50:16.841562Z",
+  "branch": "main",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "src/core/environ.zig",
+    "src/keybind/bindings.zig",
+    "src/server.zig",
+    "src/session.zig",
+    "src/window.zig"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "5a5dcad16c0e",
+  "checkpoint_transcript_start": 635,
+  "transcript_lines_at_start": 635,
+  "token_usage": {
+    "input_tokens": 199,
+    "cache_creation_tokens": 270975,
+    "cache_read_tokens": 16303682,
+    "output_tokens": 15876,
+    "api_call_count": 75
+  },
+  "session_metrics": {
+    "turn_count": 3
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-04-03T21:50:14.16851Z",
+    "agent_lines": 91,
+    "agent_removed": 3,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 91,
+    "total_lines_changed": 94,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
+}
