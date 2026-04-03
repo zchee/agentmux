@@ -9,7 +9,7 @@ pub const GcdEventLoop = if (builtin.os.tag == .macos) struct {
     const dispatch_queue_t = ?*anyopaque;
     const dispatch_source_t = ?*anyopaque;
     const dispatch_object_t = ?*anyopaque;
-    const dispatch_function_t = *const fn (?*anyopaque) callconv(.C) void;
+    const dispatch_function_t = *const fn (?*anyopaque) callconv(.c) void;
     const dispatch_time_t = u64;
     const dispatch_semaphore_t = ?*anyopaque;
 
@@ -34,20 +34,22 @@ pub const GcdEventLoop = if (builtin.os.tag == .macos) struct {
         extern "c" fn dispatch_semaphore_create(value: i64) dispatch_semaphore_t;
         extern "c" fn dispatch_semaphore_wait(dsema: dispatch_semaphore_t, timeout: dispatch_time_t) i64;
         extern "c" fn dispatch_semaphore_signal(dsema: dispatch_semaphore_t) i64;
-        // Source type globals: declare as u8 and take address to match C's &_dispatch_source_type_*
-        extern "c" var dispatch_source_type_read: u8;
-        extern "c" var dispatch_source_type_write: u8;
-        extern "c" var dispatch_source_type_timer: u8;
+        // Source type globals: the dylib symbols are __dispatch_source_type_*
+        // (double underscore). Zig's extern "c" adds one underscore on macOS,
+        // so we declare with a leading underscore to produce the correct symbol.
+        extern "c" var _dispatch_source_type_read: u8;
+        extern "c" var _dispatch_source_type_write: u8;
+        extern "c" var _dispatch_source_type_timer: u8;
     };
 
     fn sourceTypeRead() ?*anyopaque {
-        return @ptrCast(&gcd.dispatch_source_type_read);
+        return @ptrCast(&gcd._dispatch_source_type_read);
     }
     fn sourceTypeWrite() ?*anyopaque {
-        return @ptrCast(&gcd.dispatch_source_type_write);
+        return @ptrCast(&gcd._dispatch_source_type_write);
     }
     fn sourceTypeTimer() ?*anyopaque {
-        return @ptrCast(&gcd.dispatch_source_type_timer);
+        return @ptrCast(&gcd._dispatch_source_type_timer);
     }
 
     // Heap-allocated context passed through dispatch_set_context so C callbacks
@@ -115,17 +117,17 @@ pub const GcdEventLoop = if (builtin.os.tag == .macos) struct {
 
     // ---- C-callable event handlers ------------------------------------------
 
-    fn fdReadHandler(ctx: ?*anyopaque) callconv(.C) void {
+    fn fdReadHandler(ctx: ?*anyopaque) callconv(.c) void {
         const fc: *FdContext = @ptrCast(@alignCast(ctx.?));
         fc.callback.invoke(fc.fd, .read);
     }
 
-    fn fdWriteHandler(ctx: ?*anyopaque) callconv(.C) void {
+    fn fdWriteHandler(ctx: ?*anyopaque) callconv(.c) void {
         const fc: *FdContext = @ptrCast(@alignCast(ctx.?));
         fc.callback.invoke(fc.fd, .write);
     }
 
-    fn timerHandler(ctx: ?*anyopaque) callconv(.C) void {
+    fn timerHandler(ctx: ?*anyopaque) callconv(.c) void {
         const tc: *TimerContext = @ptrCast(@alignCast(ctx.?));
         tc.callback.invoke();
         if (!tc.repeat) {

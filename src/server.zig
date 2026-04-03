@@ -16,6 +16,9 @@ const output_mod = @import("terminal/output.zig");
 const status_fmt = @import("status/format.zig");
 const log = @import("core/log.zig");
 const signals = @import("signals.zig");
+const builtin = @import("builtin");
+const event_loop_mod = @import("core/event_loop.zig");
+const GcdEventLoop = @import("platform/darwin.zig").GcdEventLoop;
 
 /// Server ACL entry.
 pub const AclEntry = struct {
@@ -44,6 +47,7 @@ pub const Server = struct {
     messages: std.ArrayListAligned([]u8, null),
     running: bool,
     allocator: std.mem.Allocator,
+    gcd_loop: if (builtin.os.tag == .macos) ?GcdEventLoop else void,
 
     pub const ClientConnection = struct {
         fd: std.c.fd_t,
@@ -52,6 +56,8 @@ pub const Server = struct {
         choose_tree_state: ?ChooseTreeState,
         locked: bool = false,
         pid: i32 = 0,
+        cols: u16 = 80,
+        rows: u16 = 24,
     };
 
     pub fn init(alloc: std.mem.Allocator, socket_path: []const u8) !Server {
@@ -77,6 +83,7 @@ pub const Server = struct {
             .messages = .empty,
             .running = false,
             .allocator = alloc,
+            .gcd_loop = if (builtin.os.tag == .macos) null else {},
         };
     }
 
@@ -115,6 +122,9 @@ pub const Server = struct {
         if (self.global_default_shell) |shell| self.allocator.free(shell);
         for (self.messages.items) |msg| self.allocator.free(msg);
         self.messages.deinit(self.allocator);
+        if (builtin.os.tag == .macos) {
+            if (self.gcd_loop) |*loop| loop.deinit();
+        }
         self.allocator.free(self.socket_path);
     }
 
@@ -248,6 +258,102 @@ pub const Server = struct {
     }
 
     pub fn run(self: *Server) !void {
+        if (builtin.os.tag == .macos) {
+            return self.runGcd();
+        }
+        return self.runPoll();
+    }
+
+    /// GCD-based event loop for macOS. Uses dispatch sources for fd monitoring
+    /// instead of poll(), enabling efficient kernel-level event notification.
+    fn runGcd(self: *Server) !void {
+        if (builtin.os.tag != .macos) return self.runPoll();
+
+        self.gcd_loop = GcdEventLoop.init(self.allocator);
+        const gcd: *GcdEventLoop = &self.gcd_loop.?;
+
+        // Server context for dispatch callbacks — uses a stable pointer to self.
+        const ServerCtx = struct {
+            fn makeCallback(server: *Server) event_loop_mod.Callback {
+                return .{
+                    .context = @ptrCast(server),
+                    .func = @ptrCast(&handleGcdEvent),
+                };
+            }
+
+            fn handleGcdEvent(ctx: *anyopaque, fd: std.posix.fd_t, _: event_loop_mod.EventType) void {
+                const server: *Server = @ptrCast(@alignCast(ctx));
+                // Accept new clients on listen fd.
+                if (fd == server.listen_fd) {
+                    server.acceptClient() catch {};
+                    // Register the new client fd with GCD.
+                    if (server.clients.items.len > 0) {
+                        const new_client = server.clients.items[server.clients.items.len - 1];
+                        if (builtin.os.tag == .macos) {
+                            if (server.gcd_loop) |*gl| {
+                                gl.addFd(new_client.fd, .read, makeCallback(server)) catch {};
+                            }
+                        }
+                    }
+                    return;
+                }
+                // Client or PTY fd.
+                if (server.findClientIndex(fd)) |client_idx| {
+                    server.handleClientReadable(client_idx) catch {};
+                } else {
+                    server.handlePtyReadable(fd);
+                }
+            }
+        };
+
+        const cb = ServerCtx.makeCallback(self);
+
+        // Register listen fd.
+        if (self.listen_fd >= 0) {
+            try gcd.addFd(self.listen_fd, .read, cb);
+        }
+
+        // Register existing pane fds.
+        for (self.sessions.items) |session| {
+            for (session.windows.items) |window| {
+                for (window.panes.items) |pane| {
+                    if (pane.fd >= 0) {
+                        gcd.addFd(pane.fd, .read, cb) catch {};
+                    }
+                }
+            }
+        }
+
+        // Register existing client fds.
+        for (self.clients.items) |client| {
+            if (client.fd >= 0) {
+                gcd.addFd(client.fd, .read, cb) catch {};
+            }
+        }
+
+        // Add signal check timer (100ms).
+        const signal_cb = event_loop_mod.TimerCallback{
+            .context = @ptrCast(self),
+            .func = @ptrCast(&struct {
+                fn check(ctx: *anyopaque) void {
+                    const server: *Server = @ptrCast(@alignCast(ctx));
+                    if (signals.SignalHandler.shouldExit()) {
+                        server.stop();
+                        if (builtin.os.tag == .macos) {
+                            if (server.gcd_loop) |*gl| gl.stop();
+                        }
+                    }
+                }
+            }.check),
+        };
+        _ = try gcd.addTimer(100, true, signal_cb);
+
+        // Block on the GCD run loop.
+        try gcd.run();
+    }
+
+    /// Traditional poll()-based event loop. Used as fallback on non-macOS platforms.
+    fn runPoll(self: *Server) !void {
         const max_fds = 256;
         var pollfds: [max_fds]std.c.pollfd = undefined;
 
@@ -393,6 +499,8 @@ pub const Server = struct {
         const ident: *const protocol.IdentifyMsg = @ptrCast(@alignCast(payload.ptr));
         self.clients.items[client_idx].identified = true;
         self.clients.items[client_idx].pid = ident.pid;
+        self.clients.items[client_idx].cols = if (ident.cols > 0) ident.cols else 80;
+        self.clients.items[client_idx].rows = if (ident.rows > 0) ident.rows else 24;
         if (self.clients.items[client_idx].session == null and self.sessions.items.len == 1) {
             self.setClientSession(client_idx, self.sessions.items[0]);
         } else if (self.clients.items[client_idx].session == null and self.default_session != null) {
@@ -547,6 +655,8 @@ pub const Server = struct {
         if (payload.len < @sizeOf(protocol.ResizeMsg)) return;
         const msg: *const protocol.ResizeMsg = @alignCast(@ptrCast(payload.ptr));
         const client = &self.clients.items[client_idx];
+        client.cols = if (msg.cols > 0) msg.cols else client.cols;
+        client.rows = if (msg.rows > 0) msg.rows else client.rows;
         const session = client.session orelse return;
         const window = session.active_window orelse return;
         window.resize(msg.cols, msg.rows);
@@ -712,9 +822,34 @@ pub const Server = struct {
 
     pub fn trackPane(self: *Server, pane: *Pane, cols: u32, rows: u32) !void {
         try self.session_loop.addPane(pane.id, pane.fd, cols, rows);
+        // Register with GCD event loop if active.
+        if (builtin.os.tag == .macos) {
+            if (self.gcd_loop) |*gcd| {
+                if (pane.fd >= 0) {
+                    const cb = event_loop_mod.Callback{
+                        .context = @ptrCast(self),
+                        .func = @ptrCast(&struct {
+                            fn handle(ctx: *anyopaque, fd: std.posix.fd_t, _: event_loop_mod.EventType) void {
+                                const server: *Server = @ptrCast(@alignCast(ctx));
+                                server.handlePtyReadable(fd);
+                            }
+                        }.handle),
+                    };
+                    gcd.addFd(pane.fd, .read, cb) catch {};
+                }
+            }
+        }
     }
 
     pub fn untrackPane(self: *Server, pane_id: u32) void {
+        // Remove from GCD event loop if active.
+        if (builtin.os.tag == .macos) {
+            if (self.gcd_loop) |*gcd| {
+                if (self.session_loop.getPane(pane_id)) |ps| {
+                    gcd.removeFd(ps.pty_fd);
+                }
+            }
+        }
         self.session_loop.removePane(pane_id);
     }
 

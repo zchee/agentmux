@@ -59,6 +59,23 @@ pub fn build(b: *std.Build) void {
     test_mod.linkSystemLibrary("ncurses", .{});
     test_mod.linkSystemLibrary("freetype", .{});
 
+    // Platform-specific linking for tests
+    if (test_mod.resolved_target) |resolved| {
+        switch (resolved.result.os.tag) {
+            .macos => {
+                test_mod.linkFramework("CoreFoundation", .{});
+                test_mod.linkFramework("CoreGraphics", .{});
+                test_mod.linkFramework("Metal", .{});
+                test_mod.linkFramework("QuartzCore", .{});
+                test_mod.linkFramework("IOKit", .{});
+            },
+            .linux => {
+                test_mod.linkSystemLibrary("vulkan", .{});
+            },
+            else => {},
+        }
+    }
+
     const unit_tests = b.addTest(.{
         .root_module = test_mod,
     });

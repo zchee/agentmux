@@ -83,11 +83,50 @@ pub const IoUringEventLoop = if (builtin.os.tag == .linux) struct {
         self.running = false;
     }
 
+    // ---- VTable trampoline functions ----------------------------------------
+
+    fn vtAddFd(ptr: *anyopaque, fd: std.posix.fd_t, ev: event_loop.EventType, cb: event_loop.Callback) anyerror!void {
+        const self: *IoUringEventLoop = @ptrCast(@alignCast(ptr));
+        return self.addFd(fd, ev, cb);
+    }
+    fn vtRemoveFd(ptr: *anyopaque, fd: std.posix.fd_t) void {
+        const self: *IoUringEventLoop = @ptrCast(@alignCast(ptr));
+        self.removeFd(fd);
+    }
+    fn vtAddTimer(ptr: *anyopaque, timeout_ms: u64, repeat: bool, cb: event_loop.TimerCallback) anyerror!event_loop.TimerHandle {
+        const self: *IoUringEventLoop = @ptrCast(@alignCast(ptr));
+        return self.addTimer(timeout_ms, repeat, cb);
+    }
+    fn vtRemoveTimer(ptr: *anyopaque, handle: event_loop.TimerHandle) void {
+        const self: *IoUringEventLoop = @ptrCast(@alignCast(ptr));
+        self.removeTimer(handle);
+    }
+    fn vtRun(ptr: *anyopaque) anyerror!void {
+        const self: *IoUringEventLoop = @ptrCast(@alignCast(ptr));
+        return self.run();
+    }
+    fn vtStop(ptr: *anyopaque) void {
+        const self: *IoUringEventLoop = @ptrCast(@alignCast(ptr));
+        self.stop();
+    }
+    fn vtDeinit(ptr: *anyopaque) void {
+        const self: *IoUringEventLoop = @ptrCast(@alignCast(ptr));
+        self.deinit();
+    }
+
+    const vtable = event_loop.EventLoop.VTable{
+        .addFd = vtAddFd,
+        .removeFd = vtRemoveFd,
+        .addTimer = vtAddTimer,
+        .removeTimer = vtRemoveTimer,
+        .run = vtRun,
+        .stop = vtStop,
+        .deinit = vtDeinit,
+    };
+
     /// Return as EventLoop interface.
     pub fn asEventLoop(self: *IoUringEventLoop) event_loop.EventLoop {
-        _ = self;
-        // TODO: implement VTable wrapper
-        return undefined;
+        return .{ .ptr = self, .vtable = &vtable };
     }
 } else struct {
     // Stub for non-Linux platforms
