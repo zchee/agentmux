@@ -66,16 +66,34 @@ pub const ModeTree = struct {
                 self.moveUp();
                 return .none;
             },
-            '\r', 'l' => { // Enter or l
+            '\r' => {
+                if (self.getSelected()) |_| return .select;
+                return .none;
+            },
+            'l' => {
                 if (self.getSelected()) |item| {
-                    if (item.has_children) return .toggle_expand;
+                    if (item.has_children) {
+                        if (!self.items.items[self.selected].expanded) {
+                            self.items.items[self.selected].expanded = true;
+                        }
+                        return .none;
+                    }
                     return .select;
                 }
                 return .none;
             },
             'h' => { // collapse
                 if (self.getSelected()) |item| {
-                    if (item.expanded and item.has_children) return .toggle_expand;
+                    if (item.has_children and item.expanded) {
+                        self.items.items[self.selected].expanded = false;
+                        return .none;
+                    }
+                    if (item.depth > 0) {
+                        if (self.findParentIndex(self.selected)) |parent_idx| {
+                            self.selected = parent_idx;
+                            self.ensureSelectionVisible();
+                        }
+                    }
                 }
                 return .none;
             },
@@ -86,30 +104,78 @@ pub const ModeTree = struct {
 
     fn moveDown(self: *ModeTree) void {
         if (self.items.items.len == 0) return;
-        if (self.selected < self.items.items.len - 1) {
-            self.selected += 1;
+        var idx = self.selected + 1;
+        while (idx < self.items.items.len) : (idx += 1) {
+            if (self.isVisibleIndex(idx)) {
+                self.selected = idx;
+                break;
+            }
         }
-        // Scroll if needed
-        if (self.selected >= self.offset + self.visible_rows) {
-            self.offset = self.selected - self.visible_rows + 1;
-        }
+        self.ensureSelectionVisible();
     }
 
     fn moveUp(self: *ModeTree) void {
-        if (self.selected > 0) {
-            self.selected -= 1;
+        if (self.items.items.len == 0 or self.selected == 0) return;
+        var idx = self.selected;
+        while (idx > 0) {
+            idx -= 1;
+            if (self.isVisibleIndex(idx)) {
+                self.selected = idx;
+                break;
+            }
         }
-        if (self.selected < self.offset) {
-            self.offset = self.selected;
+        self.ensureSelectionVisible();
+    }
+
+    fn isVisibleIndex(self: *const ModeTree, index: usize) bool {
+        if (index >= self.items.items.len) return false;
+        const depth = self.items.items[index].depth;
+        if (depth == 0) return true;
+
+        var current_depth = depth;
+        var i = index;
+        while (i > 0 and current_depth > 0) {
+            i -= 1;
+            const candidate = self.items.items[i];
+            if (candidate.depth + 1 == current_depth) {
+                if (!candidate.expanded) return false;
+                current_depth = candidate.depth;
+            }
+        }
+        return true;
+    }
+
+    fn ensureSelectionVisible(self: *ModeTree) void {
+        var visible_idx: usize = 0;
+        var selected_visible_idx: ?usize = null;
+        for (self.items.items, 0..) |_, idx| {
+            if (!self.isVisibleIndex(idx)) continue;
+            if (idx == self.selected) {
+                selected_visible_idx = visible_idx;
+                break;
+            }
+            visible_idx += 1;
+        }
+
+        const selected_row = selected_visible_idx orelse 0;
+        if (selected_row < self.offset) {
+            self.offset = selected_row;
+        } else if (selected_row >= self.offset + self.visible_rows) {
+            self.offset = selected_row - self.visible_rows + 1;
         }
     }
 
-    /// Get visible items for rendering.
-    pub fn visibleItems(self: *const ModeTree) []const TreeItem {
-        const start = self.offset;
-        const end = @min(self.offset + self.visible_rows, self.items.items.len);
-        if (start >= self.items.items.len) return &.{};
-        return self.items.items[start..end];
+    fn findParentIndex(self: *const ModeTree, index: usize) ?usize {
+        if (index == 0 or index >= self.items.items.len) return null;
+        const depth = self.items.items[index].depth;
+        if (depth == 0) return null;
+
+        var i = index;
+        while (i > 0) {
+            i -= 1;
+            if (self.items.items[i].depth + 1 == depth) return i;
+        }
+        return null;
     }
 
     /// Render the tree to a buffer.
@@ -117,9 +183,15 @@ pub const ModeTree = struct {
         var buf: std.ArrayListAligned(u8, null) = .empty;
         errdefer buf.deinit(alloc);
 
-        const visible = self.visibleItems();
-        for (visible, 0..) |item, i| {
-            const actual_idx = self.offset + i;
+        var visible_seen: usize = 0;
+        for (self.items.items, 0..) |item, actual_idx| {
+            if (!self.isVisibleIndex(actual_idx)) continue;
+            if (visible_seen < self.offset) {
+                visible_seen += 1;
+                continue;
+            }
+            if (visible_seen >= self.offset + self.visible_rows) break;
+
             const is_selected = actual_idx == self.selected;
 
             // Selection indicator
@@ -151,6 +223,7 @@ pub const ModeTree = struct {
                 try buf.appendSlice(alloc, "\x1b[0m"); // reset
             }
             try buf.append(alloc, '\n');
+            visible_seen += 1;
         }
 
         return try buf.toOwnedSlice(alloc);
@@ -195,4 +268,33 @@ test "mode tree cancel" {
 
     const action = tree.handleKey('q');
     try std.testing.expectEqual(TreeAction.cancel, action);
+}
+
+test "mode tree collapse hides children and navigation skips them" {
+    var tree = ModeTree.init(std.testing.allocator, 10);
+    defer tree.deinit();
+
+    try tree.addItem(.{ .label = "session", .depth = 0, .expanded = true, .has_children = true, .tag = 0 });
+    try tree.addItem(.{ .label = "window-0", .depth = 1, .expanded = true, .has_children = false, .tag = 1 });
+    try tree.addItem(.{ .label = "window-1", .depth = 1, .expanded = true, .has_children = false, .tag = 2 });
+    try tree.addItem(.{ .label = "session-2", .depth = 0, .expanded = true, .has_children = false, .tag = 3 });
+
+    _ = tree.handleKey('h');
+    try std.testing.expect(!tree.items.items[0].expanded);
+
+    _ = tree.handleKey('j');
+    try std.testing.expectEqual(@as(usize, 3), tree.selected);
+}
+
+test "mode tree l expands collapsed parent without selecting child" {
+    var tree = ModeTree.init(std.testing.allocator, 10);
+    defer tree.deinit();
+
+    try tree.addItem(.{ .label = "session", .depth = 0, .expanded = false, .has_children = true, .tag = 0 });
+    try tree.addItem(.{ .label = "window-0", .depth = 1, .expanded = true, .has_children = false, .tag = 1 });
+
+    const action = tree.handleKey('l');
+    try std.testing.expectEqual(TreeAction.none, action);
+    try std.testing.expect(tree.items.items[0].expanded);
+    try std.testing.expectEqual(@as(usize, 0), tree.selected);
 }

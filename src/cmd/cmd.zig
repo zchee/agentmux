@@ -628,7 +628,7 @@ fn handlePromptKey(ctx: *Context, pane: *Pane, key_arg: []const u8) CmdError!boo
     return true;
 }
 
-fn addChooseTreeEntry(state: *ChooseTreeState, label: []const u8, depth: u8, session: *Session, window: ?*Window) CmdError!void {
+fn addChooseTreeEntry(state: *ChooseTreeState, label: []const u8, depth: u8, has_children: bool, session: *Session, window: ?*Window, pane: ?*Pane) CmdError!void {
     const owned_label = state.allocator.dupe(u8, label) catch return CmdError.OutOfMemory;
     errdefer state.allocator.free(owned_label);
     state.labels.append(state.allocator, owned_label) catch return CmdError.OutOfMemory;
@@ -636,12 +636,13 @@ fn addChooseTreeEntry(state: *ChooseTreeState, label: []const u8, depth: u8, ses
         .label = owned_label,
         .depth = depth,
         .expanded = true,
-        .has_children = false,
+        .has_children = has_children,
         .tag = @intCast(state.items.items.len),
     }) catch return CmdError.OutOfMemory;
     state.items.append(state.allocator, .{
         .session = @ptrCast(session),
         .window = if (window) |w| @ptrCast(w) else null,
+        .pane = if (pane) |p| @ptrCast(p) else null,
     }) catch return CmdError.OutOfMemory;
 }
 
@@ -697,7 +698,13 @@ fn handleChooseTreeSelect(ctx: *Context, pane: ?*Pane, item_index: usize) CmdErr
         const window: *Window = @ptrCast(@alignCast(window_ptr));
         session.selectWindow(window);
         ctx.window = window;
-        ctx.pane = window.active_pane;
+        if (item.pane) |pane_ptr| {
+            const selected_pane: *Pane = @ptrCast(@alignCast(pane_ptr));
+            window.selectPane(selected_pane);
+            ctx.pane = selected_pane;
+        } else {
+            ctx.pane = window.active_pane;
+        }
     } else {
         ctx.window = session.active_window;
         ctx.pane = if (ctx.window) |window| window.active_pane else null;
@@ -1282,7 +1289,7 @@ fn cmdChooseTree(ctx: *Context, args: []const []const u8) CmdError!void {
     errdefer state.deinit();
 
     for (ctx.server.sessions.items) |tree_session| {
-        try addChooseTreeEntry(&state, tree_session.name, 0, tree_session, null);
+        try addChooseTreeEntry(&state, tree_session.name, 0, !sessions_only, tree_session, null, null);
         if (sessions_only) continue;
 
         for (tree_session.windows.items, 0..) |tree_window, window_idx| {
@@ -1292,8 +1299,19 @@ fn cmdChooseTree(ctx: *Context, args: []const []const u8) CmdError!void {
                 tree_window.name,
                 tree_window.paneCount(),
             }) catch return CmdError.CommandFailed;
-            try addChooseTreeEntry(&state, label, 1, tree_session, tree_window);
+            try addChooseTreeEntry(&state, label, 1, !windows_only and tree_window.paneCount() > 0, tree_session, tree_window, null);
             if (windows_only) continue;
+
+            for (tree_window.panes.items, 0..) |tree_pane, pane_idx| {
+                var pane_label_buf: [256]u8 = undefined;
+                const pane_label = std.fmt.bufPrint(&pane_label_buf, "{d}: pane {d} [{d}x{d}]", .{
+                    pane_idx,
+                    tree_pane.id,
+                    tree_pane.sx,
+                    tree_pane.sy,
+                }) catch return CmdError.CommandFailed;
+                try addChooseTreeEntry(&state, pane_label, 2, false, tree_session, tree_window, tree_pane);
+            }
         }
     }
 
@@ -1400,4 +1418,21 @@ test "appendPromptBytes appends text" {
     appendPromptBytes(&state, " ");
     appendPromptBytes(&state, "ok");
     try std.testing.expectEqualStrings("display-message ok", state.buffer[0..state.len]);
+}
+
+test "addChooseTreeEntry stores pane metadata" {
+    const alloc = std.testing.allocator;
+    var choose_state = ChooseTreeState.init(alloc, 10);
+    defer choose_state.deinit();
+
+    var session = try Session.init(alloc, "demo");
+    defer session.deinit();
+    var window = try Window.init(alloc, "win", 80, 24);
+    const pane = try Pane.init(alloc, 80, 24);
+    try window.addPane(pane);
+    try session.addWindow(window);
+
+    try addChooseTreeEntry(&choose_state, "pane", 2, false, session, window, pane);
+    try std.testing.expectEqual(@as(usize, 1), choose_state.items.items.len);
+    try std.testing.expect(choose_state.items.items[0].pane != null);
 }
