@@ -117,8 +117,16 @@ pub const Window = struct {
     sx: u32,
     sy: u32,
 
+    options: Options,
     flags: Flags,
     allocator: std.mem.Allocator,
+
+    pub const Options = struct {
+        mode_keys: []u8,
+        window_status_format: []u8,
+        aggressive_resize: bool = false,
+        remain_on_exit: bool = false,
+    };
 
     pub const Flags = packed struct(u16) {
         bell: bool = false,
@@ -132,7 +140,13 @@ pub const Window = struct {
 
     pub fn init(alloc: std.mem.Allocator, name: []const u8, sx: u32, sy: u32) !*Window {
         const w = try alloc.create(Window);
+        errdefer alloc.destroy(w);
         const owned_name = try alloc.dupe(u8, name);
+        errdefer alloc.free(owned_name);
+        const mode_keys = try alloc.dupe(u8, "emacs");
+        errdefer alloc.free(mode_keys);
+        const window_status_format = try alloc.dupe(u8, "#I:#W#F");
+        errdefer alloc.free(window_status_format);
         w.* = .{
             .id = next_id,
             .name = owned_name,
@@ -141,6 +155,10 @@ pub const Window = struct {
             .layout_root = null,
             .sx = sx,
             .sy = sy,
+            .options = .{
+                .mode_keys = mode_keys,
+                .window_status_format = window_status_format,
+            },
             .flags = .{},
             .allocator = alloc,
         };
@@ -156,6 +174,8 @@ pub const Window = struct {
         if (self.layout_root) |root| {
             root.deinit();
         }
+        self.allocator.free(self.options.mode_keys);
+        self.allocator.free(self.options.window_status_format);
         self.allocator.free(self.name);
         self.allocator.destroy(self);
     }
@@ -368,6 +388,18 @@ pub const Window = struct {
         const owned = try self.allocator.dupe(u8, new_name);
         self.allocator.free(self.name);
         self.name = owned;
+    }
+
+    pub fn setModeKeys(self: *Window, value: []const u8) !void {
+        const owned = try self.allocator.dupe(u8, value);
+        self.allocator.free(self.options.mode_keys);
+        self.options.mode_keys = owned;
+    }
+
+    pub fn setWindowStatusFormat(self: *Window, value: []const u8) !void {
+        const owned = try self.allocator.dupe(u8, value);
+        self.allocator.free(self.options.window_status_format);
+        self.options.window_status_format = owned;
     }
 };
 

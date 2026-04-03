@@ -2,6 +2,7 @@ const std = @import("std");
 const Window = @import("window.zig").Window;
 const Pane = @import("window.zig").Pane;
 const Environ = @import("core/environ.zig").Environ;
+const Style = @import("status/style.zig").Style;
 
 /// An agentmux session. Contains windows and tracks attached clients.
 pub const Session = struct {
@@ -27,17 +28,38 @@ pub const Session = struct {
 
     pub const Options = struct {
         base_index: u32 = 0,
-        default_shell: ?[]const u8 = null,
+        default_shell: []u8,
         status: bool = true,
         mouse: bool = false,
         prefix_key: u21 = 0x02, // C-b
+        prefix_string: []u8,
+        status_style: Style = .{
+            .fg = .green,
+            .bg = .black,
+            .attrs = .{},
+        },
+        status_left: []u8,
+        status_right: []u8,
+        visual_activity: bool = false,
     };
 
     var next_id: u32 = 0;
 
     pub fn init(alloc: std.mem.Allocator, name: []const u8) !*Session {
         const s = try alloc.create(Session);
+        errdefer alloc.destroy(s);
+
         const owned_name = try alloc.dupe(u8, name);
+        errdefer alloc.free(owned_name);
+        const default_shell = try alloc.dupe(u8, "/bin/sh");
+        errdefer alloc.free(default_shell);
+        const prefix_string = try alloc.dupe(u8, "C-b");
+        errdefer alloc.free(prefix_string);
+        const status_left = try alloc.dupe(u8, "[#S]");
+        errdefer alloc.free(status_left);
+        const status_right = try alloc.dupe(u8, "#H");
+        errdefer alloc.free(status_right);
+
         s.* = .{
             .id = next_id,
             .name = owned_name,
@@ -46,7 +68,12 @@ pub const Session = struct {
             .last_window = null,
             .attached = 0,
             .flags = .{},
-            .options = .{},
+            .options = .{
+                .default_shell = default_shell,
+                .prefix_string = prefix_string,
+                .status_left = status_left,
+                .status_right = status_right,
+            },
             .environ = Environ.init(alloc),
             .allocator = alloc,
         };
@@ -60,6 +87,10 @@ pub const Session = struct {
         }
         self.windows.deinit(self.allocator);
         self.environ.deinit();
+        self.allocator.free(self.options.default_shell);
+        self.allocator.free(self.options.prefix_string);
+        self.allocator.free(self.options.status_left);
+        self.allocator.free(self.options.status_right);
         self.allocator.free(self.name);
         self.allocator.destroy(self);
     }
@@ -175,6 +206,31 @@ pub const Session = struct {
         const owned = try self.allocator.dupe(u8, new_name);
         self.allocator.free(self.name);
         self.name = owned;
+    }
+
+    pub fn setDefaultShell(self: *Session, shell: []const u8) !void {
+        const owned = try self.allocator.dupe(u8, shell);
+        self.allocator.free(self.options.default_shell);
+        self.options.default_shell = owned;
+    }
+
+    pub fn setPrefix(self: *Session, prefix_string: []const u8, prefix_key: u21) !void {
+        const owned = try self.allocator.dupe(u8, prefix_string);
+        self.allocator.free(self.options.prefix_string);
+        self.options.prefix_string = owned;
+        self.options.prefix_key = prefix_key;
+    }
+
+    pub fn setStatusLeft(self: *Session, value: []const u8) !void {
+        const owned = try self.allocator.dupe(u8, value);
+        self.allocator.free(self.options.status_left);
+        self.options.status_left = owned;
+    }
+
+    pub fn setStatusRight(self: *Session, value: []const u8) !void {
+        const owned = try self.allocator.dupe(u8, value);
+        self.allocator.free(self.options.status_right);
+        self.options.status_right = owned;
     }
 };
 
