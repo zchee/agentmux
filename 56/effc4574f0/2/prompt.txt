@@ -1,0 +1,383 @@
+$autopilot .omx/specs/deep-interview-reimplementing-tmux-in-zig-language.md
+
+---
+
+$commit
+
+---
+
+$deep-interview --deep "statusline is not drawn as defined in `~/.config/zmux/zmux.conf`"
+
+---
+
+$plan --consensus --direct .omx/specs/deep-interview-statusline-is-not-drawn-as-defined-in-zmux-conf.md
+
+---
+
+$plan --consensus --direct .omx/specs/deep-interview-statusline-is-not-drawn-as-defined-in-zmux-conf.md
+
+---
+
+$plan --consensus --direct .omx/specs/deep-interview-statusline-is-not-drawn-as-defined-in-zmux-conf.md
+
+---
+
+$team .omx/plans/prd-statusline-tmux-parity.md
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 2m. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shutdo... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 2m30s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shu... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: leader stale, no progress 3m. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shutdown. (p:0... [OMX_TMUX_INJECT]Team implement-omx-plans-prd-status: leader stale, no progress 3m. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shutdown. (p:0... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 3m30s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shu... [OMX_TMUX_INJECT]Team implement-omx-plans-prd-status: worker panes stalled, no progress 3m30s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shu... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: 19 msg(s) for leader. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown implement-omx-plans-prd-status. [OMX_TMUX_INJECT]
+
+---
+
+Continue from current mode state. [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: 20 msg(s) for leader. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown implement-omx-plans-prd-status. [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 30s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shutd... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 30s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shutd... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: 21 msg(s) for leader. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown implement-omx-plans-prd-status. [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 57s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shutd... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 1m27s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shu... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 1m27s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shu... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 1m57s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shu... [OMX_TMUX_INJECT]Team implement-omx-plans-prd-status: worker panes stalled, no progress 1m57s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shu... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 30s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shutd... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 30s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shutd... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 30s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shutd... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 1m. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shutdo... [OMX_TMUX_INJECT]Team implement-omx-plans-prd-status: worker panes stalled, no progress 1m. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shutdo... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 1m39s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shu... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 1m39s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shu... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: 30 msg(s) for leader. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown implement-omx-plans-prd-status. [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 30s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shutd... [OMX_TMUX_INJECT]Team implement-omx-plans-prd-status: worker panes stalled, no progress 30s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shutd... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: 31 msg(s) for leader. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown implement-omx-plans-prd-status. [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 30s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shutd... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 30s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shutd... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: 36 msg(s) for leader. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown implement-omx-plans-prd-status. [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 30s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shutd... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 1m1s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shut... [OMX_TMUX_INJECT]Team implement-omx-plans-prd-status: worker panes stalled, no progress 1m1s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shut... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 1m31s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shu... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 1m31s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shu... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: 43 msg(s) for leader. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown implement-omx-plans-prd-status. [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 30s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shutd... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 1m. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shutdo... [OMX_TMUX_INJECT]Team implement-omx-plans-prd-status: worker panes stalled, no progress 1m. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shutdo... [OMX_TMUX_INJECT]
+
+---
+
+Read .omx/state/team/implement-omx-plans-prd-status/mailbox/leader-fixed.json; worker-1 sent a new message. Review it and decide the next concrete step.
+
+Read .omx/state/team/implement-omx-plans-prd-status/mailbox/leader-fixed.json; worker-2 sent a new message. Review it and decide the next concrete step.
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 1m30s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shu... [OMX_TMUX_INJECT]Team implement-omx-plans-prd-status: worker panes stalled, no progress 1m31s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shu... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: 49 msg(s) for leader. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown implement-omx-plans-prd-status. [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 30s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shutd... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 30s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shutd... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 1m1s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shut... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 1m31s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shu... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 1m31s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shu... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 2m1s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shut... [OMX_TMUX_INJECT]
+
+---
+
+[OMX] All 3 workers idle. Team implement-omx-plans-prd-status is complete and waiting on leader action. Next: decide whether to reconcile/merge results or gracefully shut down: ... [OMX_TMUX_INJECT]
+
+---
+
+[OMX] All 3 workers idle. Team implement-omx-plans-prd-status is complete and waiting on leader action. Next: decide whether to reconcile/merge results or gracefully shut down: ... [OMX_TMUX_INJECT]
+
+---
+
+Cleanup `bd7eb6c3598c...a1de62d1b687` commits
+
+---
+
+Squash `bd7eb6c3598c...a1de62d1b687` commits
+
+---
+
+$deep-interview --deep "statusline is not drawn correctly. /Users/zchee/Documents/Screenshots/Screenshot 2026-04-07 at 4.10.17.png"
+
+---
+
+$ralplan
+
+---
+
+$plan --consensus --direct .omx/specs/deep-interview-statusline-is-not-drawn-correctly.md
+
+---
+
+$team .omx/plans/prd-statusline-render-correctness.md
+
+---
+
+$team .omx/plans/prd-statusline-render-correctness.md
+
+---
+
+$team .omx/plans/prd-statusline-render-correctness.md
+
+---
+
+$team .omx/plans/prd-statusline-render-correctness.md
+
+---
+
+$team "Implement .omx/plans/prd-statusline-render-correctness.md and satisfy .omx/plans/test-spec-statusline-render-correctness.md"
+
+---
+
+$team "Implement .omx/plans/prd-statusline-render-correctness.md and satisfy .omx/plans/test-spec-statusline-render-correctness.md"
+
+---
+
+$cancel
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 2m55s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shu... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: worker panes stalled, no progress 3m25s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shu... [OMX_TMUX_INJECT]
+
+---
+
+$team "Implement .omx/plans/prd-statusline-render-correctness.md and satisfy .omx/plans/test-spec-statusline-render-correctness.md"
+
+---
+
+Team implement-omx-plans-prd-status: leader stale, no progress 5m58s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shutdown. (... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: leader stale, no progress 6m28s. Next: omx team status implement-omx-plans-prd-status; read worker messages; unblock/reassign or shutdown. (... [OMX_TMUX_INJECT]
+
+---
+
+$team 6:executor "Implement .omx/plans/prd-statusline-render-correctness.md and satisfy .omx/plans/test-spec-statusline-render-correctness.md"
+
+---
+
+Team implement-omx-plans-prd-status: 16 msg(s) for leader. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown implement-omx-plans-prd-status. [OMX_TMUX_INJECT]
+
+---
+
+[OMX] worker-3 idle. Next: read worker-3's latest message/output, then assign the next concrete step or mark the task complete.. [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: 42 msg(s) for leader. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown implement-omx-plans-prd-status. [OMX_TMUX_INJECT]
+
+---
+
+Team implement-omx-plans-prd-status: 46 msg(s) for leader. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown implement-omx-plans-prd-status. [OMX_TMUX_INJECT]
+
+---
+
+[OMX] All 6 workers idle. Team implement-omx-plans-prd-status is complete and waiting on leader action. Next: decide whether to reconcile/merge results or gracefully shut down: ... [OMX_TMUX_INJECT]
+
+---
+
+[OMX] All 6 workers idle. Team implement-omx-plans-prd-status is complete and waiting on leader action. Next: decide whether to reconcile/merge results or gracefully shut down: ... [OMX_TMUX_INJECT]
+
+---
+
+do '1. rerun repo-level verification after reconciliation'
+
+---
+
+Fix `zig build test` fail
+
+---
+
+continue do 'Next concrete step'
+
+---
+
+continue
+
+---
+
+$team "Implement .omx/plans/prd-statusline-render-correctness.md and satisfy .omx/plans/test-spec-statusline-render-correctness.md"
+
+---
+
+Team implement-screenshot-driven-om: leader stale, 3 worker pane(s) still active. Next: check messages; keep orchestrating; if done, gracefully shut down: omx team shutdown impl... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-screenshot-driven-om: worker-1 said "ACK: worker-1 initialized" but has no start evidence (status: unknown). Next: check worker-1 msg/output, confirm task in omx ... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-screenshot-driven-om: leader stale, 3 pane(s) active, 2 msg(s) pending. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown ... [OMX_TMUX_INJECT]Team implement-screenshot-driven-om: leader stale, 3 pane(s) active, 2 msg(s) pending. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown ... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-screenshot-driven-om: worker-2 said "ACK: worker-2 initialized" but has no start evidence (status: unknown). Next: check worker-2 msg/output, confirm task in omx ... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-screenshot-driven-om: worker-3 said "ACK: worker-3 initialized" but has no start evidence (status: unknown). Next: check worker-3 msg/output, confirm task in omx ... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-screenshot-driven-om: leader stale, 3 pane(s) active, 5 msg(s) pending. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown ... [OMX_TMUX_INJECT]Team implement-screenshot-driven-om: leader stale, 3 pane(s) active, 5 msg(s) pending. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown ... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-screenshot-driven-om: leader stale, 3 pane(s) active, 6 msg(s) pending. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown ... [OMX_TMUX_INJECT]Team implement-screenshot-driven-om: leader stale, 3 pane(s) active, 6 msg(s) pending. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown ... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-screenshot-driven-om: 7 msg(s) for leader. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown implement-screenshot-driven-om. [OMX_TMUX_INJECT]Team implement-screenshot-driven-om: 7 msg(s) for leader. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown implement-screenshot-driven-om. [OMX_TMUX_INJECT]
+
+---
+
+Team implement-screenshot-driven-om: 8 msg(s) for leader. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown implement-screenshot-driven-om. [OMX_TMUX_INJECT]
+
+---
+
+Team implement-screenshot-driven-om: 8 msg(s) for leader. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown implement-screenshot-driven-om. [OMX_TMUX_INJECT]
+
+---
+
+Team implement-screenshot-driven-om: 9 msg(s) for leader. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown implement-screenshot-driven-om. [OMX_TMUX_INJECT]
+
+---
+
+Team implement-screenshot-driven-om: worker panes stalled, no progress 2m. Next: omx team status implement-screenshot-driven-om; read worker messages; unblock/reassign or shutdo... [OMX_TMUX_INJECT]Team implement-screenshot-driven-om: worker panes stalled, no progress 2m. Next: omx team status implement-screenshot-driven-om; read worker messages; unblock/reassign or shutdo... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-screenshot-driven-om: worker panes stalled, no progress 2m30s. Next: omx team status implement-screenshot-driven-om; read worker messages; unblock/reassign or shu... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-screenshot-driven-om: worker panes stalled, no progress 3m. Next: omx team status implement-screenshot-driven-om; read worker messages; unblock/reassign or shutdo... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-screenshot-driven-om: worker panes stalled, no progress 3m1s. Next: omx team status implement-screenshot-driven-om; read worker messages; unblock/reassign or shut... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-screenshot-driven-om: worker panes stalled, no progress 3m31s. Next: omx team status implement-screenshot-driven-om; read worker messages; unblock/reassign or shu... [OMX_TMUX_INJECT]
