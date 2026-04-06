@@ -121,6 +121,7 @@ pub const Window = struct {
     last_pane: ?*Pane,
 
     layout_root: ?*LayoutCell,
+    layout_preset_index: u3,
 
     sx: u32,
     sy: u32,
@@ -162,6 +163,7 @@ pub const Window = struct {
             .active_pane = null,
             .last_pane = null,
             .layout_root = null,
+            .layout_preset_index = 0,
             .sx = sx,
             .sy = sy,
             .options = .{

@@ -1613,9 +1613,7 @@ fn cmdNextLayout(ctx: *Context, args: []const []const u8) CmdError!void {
         session.findWindowByNumber(n) orelse return CmdError.WindowNotFound
     else
         session.active_window orelse return CmdError.WindowNotFound;
-    if (window.layout_root) |root| {
-        root.resize(window.sx, window.sy);
-    }
+    applyLayoutCycle(ctx.allocator, window, 1);
 }
 
 fn cmdPrevLayout(ctx: *Context, args: []const []const u8) CmdError!void {
@@ -1624,9 +1622,40 @@ fn cmdPrevLayout(ctx: *Context, args: []const []const u8) CmdError!void {
         session.findWindowByNumber(n) orelse return CmdError.WindowNotFound
     else
         session.active_window orelse return CmdError.WindowNotFound;
-    if (window.layout_root) |root| {
-        root.resize(window.sx, window.sy);
+    applyLayoutCycle(ctx.allocator, window, -1);
+}
+
+fn applyLayoutCycle(alloc: std.mem.Allocator, window: *Window, direction: i2) void {
+    const preset_count: u3 = 5; // number of LayoutPreset variants
+    if (direction > 0) {
+        window.layout_preset_index = if (window.layout_preset_index >= preset_count - 1) 0 else window.layout_preset_index + 1;
+    } else {
+        window.layout_preset_index = if (window.layout_preset_index == 0) preset_count - 1 else window.layout_preset_index - 1;
     }
+
+    const preset: layout_set.LayoutPreset = @enumFromInt(window.layout_preset_index);
+
+    // Collect pane IDs.
+    var pane_ids_buf: [64]u32 = undefined;
+    const pane_count = @min(window.panes.items.len, pane_ids_buf.len);
+    for (window.panes.items[0..pane_count], 0..) |p, i| {
+        pane_ids_buf[i] = p.id;
+    }
+
+    // Apply the preset layout.
+    const new_root = layout_set.applyPreset(
+        alloc,
+        preset,
+        pane_ids_buf[0..pane_count],
+        window.sx,
+        window.sy,
+    ) catch return;
+
+    // Free old layout tree.
+    if (window.layout_root) |old| {
+        old.deinit();
+    }
+    window.layout_root = new_root;
 }
 
 fn cmdSelectLayout(ctx: *Context, args: []const []const u8) CmdError!void {
