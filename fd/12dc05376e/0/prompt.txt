@@ -15,3 +15,7 @@ Replace to `agentmux` repository name to `zmux`
 ---
 
 $autopilot Replace to `agentmux` repository name to `zmux`
+
+---
+
+$commit
