@@ -1,0 +1,25 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "df54e3d41449",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "src/render/vulkan.zig"
+  ],
+  "sessions": [
+    {
+      "metadata": "/df/54e3d41449/0/metadata.json",
+      "transcript": "/df/54e3d41449/0/full.jsonl",
+      "content_hash": "/df/54e3d41449/0/content_hash.txt",
+      "prompt": "/df/54e3d41449/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 953,
+    "cache_creation_tokens": 2324920,
+    "cache_read_tokens": 78025581,
+    "output_tokens": 77243,
+    "api_call_count": 319
+  }
+}
