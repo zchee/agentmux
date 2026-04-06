@@ -1,0 +1,26 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "eb0e8a6bd1ad",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "src/protocol.zig",
+    "src/server.zig"
+  ],
+  "sessions": [
+    {
+      "metadata": "/eb/0e8a6bd1ad/0/metadata.json",
+      "transcript": "/eb/0e8a6bd1ad/0/full.jsonl",
+      "content_hash": "/eb/0e8a6bd1ad/0/content_hash.txt",
+      "prompt": "/eb/0e8a6bd1ad/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 63,
+    "cache_creation_tokens": 417709,
+    "cache_read_tokens": 8202961,
+    "output_tokens": 2019,
+    "api_call_count": 21
+  }
+}
