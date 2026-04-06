@@ -3,3 +3,36 @@
 ---
 
 /autopilot "Full Zig Port of tmux"
+
+---
+
+<task-notification>
+<task-id>a62d48291d7f91245</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-zchee-src-github-com-zchee-agentmux/715a3c97-eb4e-41f0-85c6-aba05ad3f169/tasks/a62d48291d7f91245.output</output-file>
+<status>completed</status>
+<summary>Agent "Add missing CSI sequences" completed</summary>
+<result>Both `zig build` and `zig build test` complete cleanly with no errors or warnings.
+
+## Changes Made
+
+- `/Users/zchee/src/github.com/zchee/agentmux/src/screen/writer.zig:200-207`: Added `eraseChars` method that blanks `n` cells at the cursor position in-place without shifting.
+
+- `/Users/zchee/src/github.com/zchee/agentmux/src/input_handler.zig:145-169`: Added five new CSI handlers before the existing `'n'` case: `'X'` (ECH - erase characters), `'b'` (REP - repeat last character), `'s'` (ANSI cursor save), `'u'` (ANSI cursor restore), `'g'` (TBC - tab clear, no-op).
+
+- `/Users/zchee/src/github.com/zchee/agentmux/src/input_handler.zig:406-421`: Added `test "process ECH erase characters"` verifying that `\x1b[4X` erases 4 cells at col 3 (0-based) while leaving surrounding characters intact.
+
+## Verification
+
+- Build: `zig build` -&gt; pass (no output)
+- Tests: `zig build test` -&gt; pass (no output, Zig silent on all-pass)
+
+## Summary
+
+Implemented ECH (`CSI X`), REP (`CSI b`), ANSI cursor save/restore (`CSI s`/`CSI u`), and TBC (`CSI g`) escape sequence handlers, backed by the new `eraseChars` writer method, with a focused test confirming ECH behavior.</result>
+<usage><total_tokens>29847</total_tokens><tool_uses>7</tool_uses><duration_ms>50616</duration_ms></usage>
+</task-notification>
+
+---
+
+/autopilot
