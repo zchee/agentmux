@@ -3,7 +3,7 @@
   "checkpoint_id": "22c0198097c2",
   "strategy": "manual-commit",
   "branch": "main",
-  "checkpoints_count": 1,
+  "checkpoints_count": 2,
   "files_touched": [
     "src/cmd/cmd.zig",
     "src/cmd/config_shell_test.zig",
@@ -36,6 +36,12 @@
       "metadata": "/22/c0198097c2/3/metadata.json",
       "transcript": "/22/c0198097c2/3/full.jsonl",
       "content_hash": "/22/c0198097c2/3/content_hash.txt",
+      "prompt": ""
+    },
+    {
+      "metadata": "/22/c0198097c2/4/metadata.json",
+      "transcript": "/22/c0198097c2/4/full.jsonl",
+      "content_hash": "/22/c0198097c2/4/content_hash.txt",
       "prompt": ""
     }
   ],
