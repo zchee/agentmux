@@ -21,16 +21,28 @@ fn getenv(name: [:0]const u8) ?[]const u8 {
     return std.mem.sliceTo(val, 0);
 }
 
+const SocketDirEnv = struct {
+    zmux_tmpdir: ?[]const u8 = null,
+    xdg_runtime_dir: ?[]const u8 = null,
+    tmpdir: ?[]const u8 = null,
+};
+
+fn defaultSocketDirFromEnv(alloc: std.mem.Allocator, target_os: Os, env: SocketDirEnv) ![]const u8 {
+    const dir = env.zmux_tmpdir orelse switch (target_os) {
+        .linux => env.xdg_runtime_dir orelse env.tmpdir orelse "/tmp",
+        else => env.tmpdir orelse "/tmp",
+    };
+    return try alloc.dupe(u8, dir);
+}
+
 /// Get the default socket path for zmux.
-/// Uses $ZMUX_TMPDIR, $TMPDIR, or /tmp.
+/// Uses $ZMUX_TMPDIR, Linux $XDG_RUNTIME_DIR, $TMPDIR, or /tmp.
 pub fn defaultSocketDir(alloc: std.mem.Allocator) ![]const u8 {
-    if (getenv("ZMUX_TMPDIR")) |dir| {
-        return try alloc.dupe(u8, dir);
-    }
-    if (getenv("TMPDIR")) |dir| {
-        return try alloc.dupe(u8, dir);
-    }
-    return try alloc.dupe(u8, "/tmp");
+    return defaultSocketDirFromEnv(alloc, os, .{
+        .zmux_tmpdir = getenv("ZMUX_TMPDIR"),
+        .xdg_runtime_dir = getenv("XDG_RUNTIME_DIR"),
+        .tmpdir = getenv("TMPDIR"),
+    });
 }
 
 /// Get the process name for a given PID.
@@ -99,4 +111,38 @@ fn getProcessCwdLinux(alloc: std.mem.Allocator, pid: std.posix.pid_t) !?[]const 
     if (n < 0) return null;
     const len: usize = @intCast(n);
     return try alloc.dupe(u8, target_buf[0..len]);
+}
+
+test "defaultSocketDir prefers Linux XDG runtime dir before TMPDIR" {
+    const alloc = std.testing.allocator;
+    const dir = try defaultSocketDirFromEnv(alloc, .linux, .{
+        .xdg_runtime_dir = "/run/user/1000",
+        .tmpdir = "/tmp/zmux-test",
+    });
+    defer alloc.free(dir);
+
+    try std.testing.expectEqualStrings("/run/user/1000", dir);
+}
+
+test "defaultSocketDir ignores Linux XDG runtime dir on macOS" {
+    const alloc = std.testing.allocator;
+    const dir = try defaultSocketDirFromEnv(alloc, .macos, .{
+        .xdg_runtime_dir = "/run/user/1000",
+        .tmpdir = "/var/folders/zmux-test",
+    });
+    defer alloc.free(dir);
+
+    try std.testing.expectEqualStrings("/var/folders/zmux-test", dir);
+}
+
+test "defaultSocketDir always honors ZMUX_TMPDIR first" {
+    const alloc = std.testing.allocator;
+    const dir = try defaultSocketDirFromEnv(alloc, .linux, .{
+        .zmux_tmpdir = "/custom/zmux",
+        .xdg_runtime_dir = "/run/user/1000",
+        .tmpdir = "/tmp/zmux-test",
+    });
+    defer alloc.free(dir);
+
+    try std.testing.expectEqualStrings("/custom/zmux", dir);
 }
