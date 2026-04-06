@@ -76,6 +76,10 @@ pub const MetalRenderer = if (builtin.os.tag == .macos) struct {
         extern "c" fn objc_msgSend(receiver: ?*anyopaque, sel: ?*anyopaque, buf: ?*anyopaque, offset: u64, index: u64) void;
     };
 
+    const msg_ptr_u64_u64 = struct {
+        extern "c" fn objc_msgSend(receiver: ?*anyopaque, sel: ?*anyopaque, buf: ?*const anyopaque, len: u64, enc: u64) ?*anyopaque;
+    };
+
     fn sel(name: [*:0]const u8) ?*anyopaque {
         return objc.sel_registerName(name);
     }
@@ -166,12 +170,7 @@ pub const MetalRenderer = if (builtin.os.tag == .macos) struct {
         const raw = msg.objc_msgSend(ns_class, alloc_sel) orelse return null;
         // initWithBytes:length:encoding:  (NSUTF8StringEncoding = 4)
         const init_sel = sel("initWithBytes:length:encoding:") orelse return null;
-        _ = init_sel;
-        // Simplified: use stringWithUTF8String: with null-terminated copy
-        _ = data;
-        _ = raw;
-        // Return the allocated string (caller must release)
-        return msg.objc_msgSend(ns_class, sel("string"));
+        return msg_ptr_u64_u64.objc_msgSend(raw, init_sel, @ptrCast(data.ptr), data.len, 4);
     }
 
     fn createPipelineState(device: *anyopaque, library: *anyopaque) ?*anyopaque {
