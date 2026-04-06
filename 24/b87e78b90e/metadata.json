@@ -1,0 +1,42 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "24b87e78b90e",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "AGENTS.md",
+    "src/AGENTS.md",
+    "src/cmd/AGENTS.md",
+    "src/config/AGENTS.md",
+    "src/control/AGENTS.md",
+    "src/copy/AGENTS.md",
+    "src/core/AGENTS.md",
+    "src/hooks/AGENTS.md",
+    "src/keybind/AGENTS.md",
+    "src/layout/AGENTS.md",
+    "src/mode/AGENTS.md",
+    "src/platform/AGENTS.md",
+    "src/render/AGENTS.md",
+    "src/render/shaders/AGENTS.md",
+    "src/screen/AGENTS.md",
+    "src/status/AGENTS.md",
+    "src/tabs/AGENTS.md",
+    "src/terminal/AGENTS.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/24/b87e78b90e/0/metadata.json",
+      "transcript": "/24/b87e78b90e/0/full.jsonl",
+      "content_hash": "/24/b87e78b90e/0/content_hash.txt",
+      "prompt": "/24/b87e78b90e/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 67,
+    "cache_creation_tokens": 232803,
+    "cache_read_tokens": 1437579,
+    "output_tokens": 30329,
+    "api_call_count": 23
+  }
+}
