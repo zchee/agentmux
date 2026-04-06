@@ -381,3 +381,35 @@ Team implement-screenshot-driven-om: worker panes stalled, no progress 3m1s. Nex
 ---
 
 Team implement-screenshot-driven-om: worker panes stalled, no progress 3m31s. Next: omx team status implement-screenshot-driven-om; read worker messages; unblock/reassign or shu... [OMX_TMUX_INJECT]
+
+---
+
+Team implement-screenshot-driven-om: 23 msg(s) for leader. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown implement-screenshot-driven-om. [OMX_TMUX_INJECT]
+
+---
+
+Team implement-screenshot-driven-om: 28 msg(s) for leader. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown implement-screenshot-driven-om. [OMX_TMUX_INJECT]
+
+---
+
+Team implement-screenshot-driven-om: worker panes stalled, no progress 2m. Next: omx team status implement-screenshot-driven-om; read worker messages; unblock/reassign or shutdo... [OMX_TMUX_INJECT]Team implement-screenshot-driven-om: worker panes stalled, no progress 2m. Next: omx team status implement-screenshot-driven-om; read worker messages; unblock/reassign or shutdo... [OMX_TMUX_INJECT]
+
+---
+
+[OMX] All 3 workers idle. Team implement-screenshot-driven-om is complete and waiting on leader action. Next: decide whether to reconcile/merge results or gracefully shut down: ... [OMX_TMUX_INJECT]
+
+---
+
+[OMX] All 3 workers idle. Team implement-screenshot-driven-om is complete and waiting on leader action. Next: decide whether to reconcile/merge results or gracefully shut down: ... [OMX_TMUX_INJECT]
+
+---
+
+[OMX] All 3 workers idle. Team implement-screenshot-driven-om is complete and waiting on leader action. Next: decide whether to reconcile/merge results or gracefully shut down: ... [OMX_TMUX_INJECT]
+
+---
+
+Cleanup (or squash) 4e25c18e1a16...7bb2a376ad7a commits. Splits if necessary.
+
+---
+
+Cleanup (or squash) 4e25c18e1a16...7bb2a376ad7a commits. Splits if necessary.
