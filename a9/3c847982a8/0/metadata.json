@@ -1,0 +1,38 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "a93c847982a8",
+  "session_id": "cf4618ba-7f51-4a75-bef9-5fa32a9f003b",
+  "strategy": "manual-commit",
+  "created_at": "2026-04-06T05:56:27.18734Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "src/render/metal.zig",
+    "src/render/vulkan.zig"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-6[1m]",
+  "turn_id": "3d88c5850f7d",
+  "token_usage": {
+    "input_tokens": 1061,
+    "cache_creation_tokens": 2700144,
+    "cache_read_tokens": 91316035,
+    "output_tokens": 84640,
+    "api_call_count": 355
+  },
+  "session_metrics": {
+    "turn_count": 13
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-04-06T05:56:22.184207Z",
+    "agent_lines": 50,
+    "agent_removed": 3,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 50,
+    "total_lines_changed": 53,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
+}
