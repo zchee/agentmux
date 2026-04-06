@@ -41,9 +41,8 @@ pub const Mode = packed struct(u32) {
 const SavedState = struct {
     cx: u32 = 0,
     cy: u32 = 0,
-    cstyle: CursorStyle = .steady_bar,
+    cstyle: CursorStyle = .steady_block,
     cell: Cell = Cell.blank,
-    cstyle: CursorStyle = .steady_bar,
     origin_mode: bool = false,
 };
 
@@ -88,8 +87,8 @@ pub const Screen = struct {
             .grid = Grid.init(alloc, init_cols, init_rows, hlimit),
             .cx = 0,
             .cy = 0,
-            .cstyle = .steady_bar,
-            .default_cstyle = .steady_bar,
+            .cstyle = .steady_block,
+            .default_cstyle = .steady_block,
             .rupper = 0,
             .rlower = init_rows -| 1,
             .cell = Cell.blank,
@@ -207,7 +206,6 @@ pub const Screen = struct {
             .cy = self.cy,
             .cstyle = self.cstyle,
             .cell = self.cell,
-            .cstyle = self.cstyle,
             .origin_mode = self.mode.origin,
         };
     }
@@ -218,7 +216,6 @@ pub const Screen = struct {
         self.cy = @min(self.saved.cy, self.grid.rows -| 1);
         self.cstyle = self.saved.cstyle;
         self.cell = self.saved.cell;
-        self.cstyle = self.saved.cstyle;
         self.mode.origin = self.saved.origin_mode;
     }
 
@@ -232,7 +229,6 @@ pub const Screen = struct {
             .cy = self.cy,
             .cstyle = self.cstyle,
             .cell = self.cell,
-            .cstyle = self.cstyle,
             .origin_mode = self.mode.origin,
         };
 
@@ -272,7 +268,6 @@ pub const Screen = struct {
         self.cy = @min(self.alt_saved.cy, self.grid.rows -| 1);
         self.cstyle = self.alt_saved.cstyle;
         self.cell = self.alt_saved.cell;
-        self.cstyle = self.alt_saved.cstyle;
         self.mode.origin = self.alt_saved.origin_mode;
         self.mode.alt_screen = false;
         self.rupper = 0;
@@ -307,6 +302,8 @@ test "screen init" {
     try std.testing.expectEqual(@as(u32, 24), screen.rows());
     try std.testing.expectEqual(@as(u32, 0), screen.cx);
     try std.testing.expectEqual(@as(u32, 0), screen.cy);
+    try std.testing.expectEqual(CursorStyle.steady_block, screen.cstyle);
+    try std.testing.expectEqual(CursorStyle.steady_block, screen.default_cstyle);
 }
 
 test "cursor movement" {

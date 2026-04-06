@@ -264,11 +264,11 @@ pub const Server = struct {
             self.loadConfigFile(path);
             return;
         }
-        // Try ~/.config/agentmux/agentmux.conf
+        // Try ~/.config/zmux/zmux.conf
         const home = std.c.getenv("HOME") orelse return;
         const home_slice = std.mem.sliceTo(home, 0);
         var buf: [4096]u8 = undefined;
-        const path = std.fmt.bufPrint(&buf, "{s}/.config/agentmux/agentmux.conf", .{home_slice}) catch return;
+        const path = std.fmt.bufPrint(&buf, "{s}/.config/zmux/zmux.conf", .{home_slice}) catch return;
         self.loadConfigFile(path);
     }
 
@@ -1080,7 +1080,7 @@ pub const Server = struct {
             out.writeBytes("\x1b[0m");
         }
 
-        self.restoreActivePaneCursor(&out, window);
+        restoreActiveCursor(&out, active_cursor);
 
         out.flush();
 
@@ -1098,19 +1098,6 @@ pub const Server = struct {
 
         if (total > 0) {
             try protocol.sendMessage(client_fd, .output, rendered[0..total]);
-        }
-    }
-
-    fn restoreActivePaneCursor(self: *Server, out: *output_mod.Output, window: *Window) void {
-        const active = window.active_pane orelse return;
-        const ps = self.session_loop.getPane(active.id) orelse return;
-
-        out.cursorTo(active.xoff + ps.screen.cx, active.yoff + ps.screen.cy);
-        if (ps.screen.mode.cursor_visible) {
-            out.showCursor();
-            out.setCursorStyle(@intFromEnum(ps.screen.cstyle));
-        } else {
-            out.hideCursor();
         }
     }
 
@@ -1339,7 +1326,7 @@ test "commandAllowsMissingSession includes if-shell" {
 }
 
 test "renderComposedToClient restores single-pane cursor after status bar" {
-    var server = try Server.init(std.testing.allocator, "/tmp/agentmux-render-single-pane.sock");
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-render-single-pane.sock");
     defer server.deinit();
 
     const session = try Session.init(std.testing.allocator, "demo");
@@ -1368,11 +1355,11 @@ test "renderComposedToClient restores single-pane cursor after status bar" {
     defer msg.deinit();
 
     try std.testing.expectEqual(protocol.MessageType.output, msg.msg_type);
-    try std.testing.expect(std.mem.endsWith(u8, msg.payload, "\x1b[2;5H\x1b[?25h\x1b[6 q"));
+    try std.testing.expect(std.mem.endsWith(u8, msg.payload, "\x1b[2;5H\x1b[?25h\x1b[2 q"));
 }
 
 test "renderComposedToClient preserves active-pane cursor style in multi-pane mode" {
-    var server = try Server.init(std.testing.allocator, "/tmp/agentmux-render-multi-pane.sock");
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-render-multi-pane.sock");
     defer server.deinit();
 
     const session = try Session.init(std.testing.allocator, "demo");
