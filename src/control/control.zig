@@ -23,25 +23,25 @@ pub const ControlClient = struct {
         _ = std.c.write(self.fd, "\n", 1);
     }
 
-    /// Send a %begin guard.
-    pub fn sendBegin(self: *ControlClient, time_val: i64, number: u32) void {
+    fn sendGuard(self: *ControlClient, comptime prefix: []const u8, time_val: i64, number: u32, flags: u32) void {
         var buf: [128]u8 = undefined;
-        const line = std.fmt.bufPrint(&buf, "%begin {d} {d}", .{ time_val, number }) catch return;
+        const line = std.fmt.bufPrint(&buf, "{s} {d} {d} {d}", .{ prefix, time_val, number, flags }) catch return;
         self.writeLine(line);
+    }
+
+    /// Send a %begin guard.
+    pub fn sendBegin(self: *ControlClient, time_val: i64, number: u32, flags: u32) void {
+        self.sendGuard("%begin", time_val, number, flags);
     }
 
     /// Send an %end guard.
-    pub fn sendEnd(self: *ControlClient, time_val: i64, number: u32) void {
-        var buf: [128]u8 = undefined;
-        const line = std.fmt.bufPrint(&buf, "%end {d} {d}", .{ time_val, number }) catch return;
-        self.writeLine(line);
+    pub fn sendEnd(self: *ControlClient, time_val: i64, number: u32, flags: u32) void {
+        self.sendGuard("%end", time_val, number, flags);
     }
 
     /// Send a %error guard.
-    pub fn sendError(self: *ControlClient, time_val: i64, number: u32) void {
-        var buf: [128]u8 = undefined;
-        const line = std.fmt.bufPrint(&buf, "%error {d} {d}", .{ time_val, number }) catch return;
-        self.writeLine(line);
+    pub fn sendError(self: *ControlClient, time_val: i64, number: u32, flags: u32) void {
+        self.sendGuard("%error", time_val, number, flags);
     }
 
     /// Send %output notification.
@@ -121,10 +121,8 @@ pub const ControlClient = struct {
     }
 
     /// Send %exit notification (server shutting down).
-    pub fn sendExit(self: *ControlClient, reason: []const u8) void {
-        var buf: [256]u8 = undefined;
-        const line = std.fmt.bufPrint(&buf, "%exit {s}", .{reason}) catch return;
-        self.writeLine(line);
+    pub fn sendExit(self: *ControlClient) void {
+        self.writeLine("%exit");
     }
 
     /// Deactivate control mode.
@@ -139,4 +137,26 @@ test "control output encoding" {
     try std.testing.expect(ctrl.active);
     ctrl.deactivate();
     try std.testing.expect(!ctrl.active);
+}
+
+test "control guards and exit use tmux-like line format" {
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    var ctrl = ControlClient.init(fds[1]);
+    ctrl.sendBegin(123, 7, 0);
+    ctrl.sendEnd(123, 7, 0);
+    ctrl.sendError(123, 7, 0);
+    ctrl.sendExit();
+
+    var buf: [256]u8 = undefined;
+    const n = std.c.read(fds[0], &buf, buf.len);
+    try std.testing.expect(n > 0);
+    const output = buf[0..@intCast(n)];
+    try std.testing.expect(std.mem.indexOf(u8, output, "%begin 123 7 0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "%end 123 7 0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "%error 123 7 0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "%exit\n") != null);
 }

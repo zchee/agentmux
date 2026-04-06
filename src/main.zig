@@ -260,6 +260,11 @@ fn detachStdio() void {
 
 fn runCommandMode(alloc: std.mem.Allocator, flags: *const Flags, socket_path: []const u8) !void {
     var client = client_mod.Client.init(alloc, socket_path);
+    client.identify_flags = .{
+        .utf8 = flags.utf8_flag,
+        .control_mode = flags.control_mode,
+        .terminal_256 = flags.force_256,
+    };
     client.connect() catch |err| switch (err) {
         error.ConnectFailed => {
             try autostartServer(alloc, socket_path, flags.config_file);
