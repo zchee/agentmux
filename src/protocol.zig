@@ -141,7 +141,8 @@ pub fn readExact(fd: std.posix.fd_t, buf: []u8) !void {
     while (read_total < buf.len) {
         const rc = std.c.read(fd, buf[read_total..].ptr, buf.len - read_total);
         if (rc < 0) switch (std.posix.errno(rc)) {
-            .INTR, .AGAIN => continue,
+            .INTR => continue,
+            .AGAIN => return error.WouldBlock,
             else => return error.ReadFailed,
         };
         if (rc == 0) return error.UnexpectedEof;

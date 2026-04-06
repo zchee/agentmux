@@ -581,6 +581,7 @@ pub const Server = struct {
                 self.removeClient(client_idx);
                 return;
             },
+            error.WouldBlock => return err, // no data yet, propagate to caller
             else => return err,
         };
         defer message.deinit();
@@ -880,10 +881,14 @@ pub const Server = struct {
         };
 
         // Process up to a few messages (identify + command typically).
+        // Break on WouldBlock (no more data) without removing the client.
         var count: usize = 0;
         while (count < 8) : (count += 1) {
             if (client_idx >= self.clients.items.len) break;
-            self.handleClientReadable(client_idx) catch break;
+            self.handleClientReadable(client_idx) catch |err| switch (err) {
+                error.WouldBlock => break, // no more data, normal for non-blocking
+                else => break,
+            };
         }
     }
 
