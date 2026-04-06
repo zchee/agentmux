@@ -1,0 +1,1 @@
+$deep-interview --deep "Stil `./zig-out/bin/agentmux new -s test`, the cursor doesn't show the bar style. /Users/zchee/Documents/Screenshots/Screenshot 2026-04-06 at 22.18.47.png. Fix it."
