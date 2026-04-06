@@ -17,7 +17,8 @@ pub const FormatContext = struct {
 
 /// Expand a tmux format string.
 /// Supports: #S (session), #W (window), #I (window index), #P (pane index),
-/// #T (title), #H (hostname), #{variable_name} long form.
+/// #T (title), #H (hostname), #{variable_name} long form,
+/// #{?var,true,false} conditional, #{==:a,b} equality, #{l:str} string length.
 pub fn expand(alloc: std.mem.Allocator, fmt: []const u8, ctx: *const FormatContext) ![]u8 {
     var result: std.ArrayListAligned(u8, null) = .empty;
     errdefer result.deinit(alloc);
@@ -180,7 +181,6 @@ fn findComma(s: []const u8) ?usize {
     }
     return null;
 }
-
 
 fn resolveVariable(name: []const u8, ctx: *const FormatContext) []const u8 {
     if (std.mem.eql(u8, name, "session_name")) return ctx.session_name;
