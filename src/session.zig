@@ -8,9 +8,15 @@ const Style = @import("status/style.zig").Style;
 extern "c" fn time(timer: ?*i64) i64;
 
 pub const Session = struct {
+    pub const StatusPosition = enum {
+        top,
+        bottom,
+    };
+
     id: u32,
     name: []const u8,
     created_at: i64,
+    status_next_refresh_at: i64,
 
     windows: std.ArrayListAligned(*Window, null),
     active_window: ?*Window,
@@ -44,6 +50,8 @@ pub const Session = struct {
         },
         status_left: []u8,
         status_right: []u8,
+        status_position: StatusPosition = .bottom,
+        status_interval: u32 = 15,
         visual_activity: bool = false,
     };
 
@@ -73,6 +81,7 @@ pub const Session = struct {
             .id = next_id,
             .name = owned_name,
             .created_at = now,
+            .status_next_refresh_at = 0,
             .windows = .empty,
             .active_window = null,
             .last_window = null,

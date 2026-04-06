@@ -112,6 +112,53 @@ test "set-option updates status-left and status-right" {
     try std.testing.expectEqualStrings("[custom-right]", session.options.status_right);
 }
 
+test "set-option updates status-style, status-position, and status-interval" {
+    var server = try initServer();
+    defer server.deinit();
+
+    const session = try makeSession("demo");
+    try server.sessions.append(std.testing.allocator, session);
+
+    var registry = cmd.Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.registerBuiltins();
+
+    var ctx = initContext(&server, session, &registry, null);
+    try registry.execute(&ctx, "set-option", &.{ "status-style", "fg=white,bg=black,bold" });
+    try registry.execute(&ctx, "set-option", &.{ "status-position", "top" });
+    try registry.execute(&ctx, "set-option", &.{ "status-interval", "3" });
+
+    try std.testing.expectEqual(@import("../core/colour.zig").Colour.white, session.options.status_style.fg);
+    try std.testing.expectEqual(@import("../core/colour.zig").Colour.black, session.options.status_style.bg);
+    try std.testing.expect(session.options.status_style.attrs.bold);
+    try std.testing.expectEqual(.top, session.options.status_position);
+    try std.testing.expectEqual(@as(u32, 3), session.options.status_interval);
+}
+
+test "set-option -g persists status defaults for future sessions" {
+    var server = try initServer();
+    defer server.deinit();
+
+    var registry = cmd.Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.registerBuiltins();
+
+    var ctx = initContext(&server, null, &registry, null);
+    try registry.execute(&ctx, "set-option", &.{ "-g", "status-left", "[cfg-left]" });
+    try registry.execute(&ctx, "set-option", &.{ "-g", "status-right", "[cfg-right]" });
+    try registry.execute(&ctx, "set-option", &.{ "-g", "status-position", "top" });
+    try registry.execute(&ctx, "set-option", &.{ "-g", "status-interval", "9" });
+
+    const session = try makeSession("demo");
+    defer session.deinit();
+    try server.applySessionStatusDefaults(session);
+
+    try std.testing.expectEqualStrings("[cfg-left]", session.options.status_left);
+    try std.testing.expectEqualStrings("[cfg-right]", session.options.status_right);
+    try std.testing.expectEqual(.top, session.options.status_position);
+    try std.testing.expectEqual(@as(u32, 9), session.options.status_interval);
+}
+
 test "show-options -v emits value only" {
     var server = try initServer();
     defer server.deinit();

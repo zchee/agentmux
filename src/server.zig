@@ -16,6 +16,8 @@ const key_string = @import("keybind/string.zig");
 const hooks_mod = @import("hooks/hooks.zig");
 const output_mod = @import("terminal/output.zig");
 const status_fmt = @import("status/format.zig");
+const status_mod = @import("status/status.zig");
+const status_style = @import("status/style.zig");
 const log = @import("core/log.zig");
 const signals = @import("signals.zig");
 const builtin = @import("builtin");
@@ -61,6 +63,7 @@ pub const Server = struct {
     prompt_history: std.ArrayListAligned([]const u8, null),
     acl_entries: std.ArrayListAligned(AclEntry, null),
     global_default_shell: ?[:0]u8,
+    session_status_defaults: SessionStatusDefaults,
     window_defaults: WindowOptionDefaults,
     config_file: ?[]const u8,
     messages: std.ArrayListAligned([]u8, null),
@@ -88,6 +91,20 @@ pub const Server = struct {
         remain_on_exit: bool = false,
     };
 
+    pub const SessionStatusDefaults = struct {
+        base_index: u32 = 0,
+        status: bool = true,
+        status_style: status_style.Style = .{
+            .fg = .green,
+            .bg = .black,
+            .attrs = .{},
+        },
+        status_left: []u8,
+        status_right: []u8,
+        status_position: Session.StatusPosition = .bottom,
+        status_interval: u32 = 15,
+    };
+
     pub fn init(alloc: std.mem.Allocator, socket_path: []const u8) !Server {
         var bm = binding_mod.BindingManager.init(alloc);
         try bm.setupDefaults();
@@ -96,6 +113,10 @@ pub const Server = struct {
         errdefer alloc.free(default_mode_keys);
         const default_window_status_format = try alloc.dupe(u8, "#I:#W#F");
         errdefer alloc.free(default_window_status_format);
+        const default_status_left = try alloc.dupe(u8, "[#S]");
+        errdefer alloc.free(default_status_left);
+        const default_status_right = try alloc.dupe(u8, "#H");
+        errdefer alloc.free(default_status_right);
 
         return .{
             .listen_fd = -1,
@@ -113,6 +134,10 @@ pub const Server = struct {
             .prompt_history = .empty,
             .acl_entries = .empty,
             .global_default_shell = null,
+            .session_status_defaults = .{
+                .status_left = default_status_left,
+                .status_right = default_status_right,
+            },
             .window_defaults = .{
                 .mode_keys = default_mode_keys,
                 .window_status_format = default_window_status_format,
@@ -160,6 +185,8 @@ pub const Server = struct {
         for (self.acl_entries.items) |entry| self.allocator.free(entry.user);
         self.acl_entries.deinit(self.allocator);
         if (self.global_default_shell) |shell| self.allocator.free(shell);
+        self.allocator.free(self.session_status_defaults.status_left);
+        self.allocator.free(self.session_status_defaults.status_right);
         self.allocator.free(self.window_defaults.mode_keys);
         self.allocator.free(self.window_defaults.window_status_format);
         for (self.messages.items) |msg| self.allocator.free(msg);
@@ -181,6 +208,17 @@ pub const Server = struct {
         window.options.overrides = .{};
     }
 
+    pub fn applySessionStatusDefaults(self: *const Server, session: *Session) !void {
+        session.options.base_index = self.session_status_defaults.base_index;
+        session.options.status = self.session_status_defaults.status;
+        session.options.status_style = self.session_status_defaults.status_style;
+        try session.setStatusLeft(self.session_status_defaults.status_left);
+        try session.setStatusRight(self.session_status_defaults.status_right);
+        session.options.status_position = self.session_status_defaults.status_position;
+        session.options.status_interval = self.session_status_defaults.status_interval;
+        session.status_next_refresh_at = 0;
+    }
+
     pub fn addMessage(self: *Server, msg: []const u8) void {
         const owned = self.allocator.dupe(u8, msg) catch return;
         self.messages.append(self.allocator, owned) catch {
@@ -195,12 +233,27 @@ pub const Server = struct {
         style: u3,
     };
 
-    fn getActiveCursorState(self: *Server, window: *Window) ?ActiveCursorState {
+    fn statusContentOffset(session: *const Session) u32 {
+        return if (session.options.status and session.options.status_position == .top) 1 else 0;
+    }
+
+    fn statusRow(session: *const Session, rows: u32) ?u32 {
+        if (!session.options.status or rows == 0) return null;
+        return if (session.options.status_position == .top) 0 else rows - 1;
+    }
+
+    fn statusContentRows(session: *const Session, rows: u32) u32 {
+        if (!session.options.status or rows == 0) return rows;
+        return rows - 1;
+    }
+
+    fn getActiveCursorState(self: *Server, session: *const Session, window: *Window) ?ActiveCursorState {
         const active = window.active_pane orelse return null;
         const ps = self.session_loop.getPane(active.id) orelse return null;
+        const yoff = statusContentOffset(session);
         return .{
             .col = active.xoff + ps.screen.cx,
-            .row = active.yoff + ps.screen.cy,
+            .row = active.yoff + ps.screen.cy + yoff,
             .visible = ps.screen.mode.cursor_visible,
             .style = @intFromEnum(ps.screen.cstyle),
         };
@@ -214,6 +267,129 @@ pub const Server = struct {
             out.setCursorStyle(active.style);
         } else {
             out.hideCursor();
+        }
+    }
+
+    fn hostname() []const u8 {
+        const host = std.c.getenv("HOSTNAME") orelse std.c.getenv("HOST");
+        return if (host) |value| std.mem.sliceTo(value, 0) else "";
+    }
+
+    fn paneIndex(window: *const Window, pane: *const Pane) u32 {
+        for (window.panes.items, 0..) |candidate, idx| {
+            if (candidate == pane) return @intCast(idx);
+        }
+        return 0;
+    }
+
+    fn windowIndex(session: *const Session, window: *const Window) u32 {
+        for (session.windows.items, 0..) |candidate, idx| {
+            if (candidate == window) {
+                return session.options.base_index + @as(u32, @intCast(idx));
+            }
+        }
+        return session.options.base_index;
+    }
+
+    fn windowFlags(session: *const Session, window: *const Window) []const u8 {
+        if (session.active_window == window) return "*";
+        if (window.flags.bell) return "!";
+        if (window.flags.activity) return "#";
+        if (window.flags.silence) return "~";
+        return "-";
+    }
+
+    fn buildWindowStatusList(self: *Server, alloc: std.mem.Allocator, session: *const Session) ![]u8 {
+        _ = self;
+        var windows: std.ArrayListAligned(u8, null) = .empty;
+        errdefer windows.deinit(alloc);
+
+        const host_name = hostname();
+        for (session.windows.items, 0..) |window, idx| {
+            if (idx > 0) {
+                try windows.append(alloc, ' ');
+            }
+
+            const active_pane = window.active_pane;
+            const fmt_ctx = status_fmt.FormatContext{
+                .session_name = session.name,
+                .session_id = session.id,
+                .window_name = window.name,
+                .window_index = windowIndex(session, window),
+                .window_active = session.active_window == window,
+                .window_flags = windowFlags(session, window),
+                .pane_index = if (active_pane) |pane| paneIndex(window, pane) else 0,
+                .host = host_name,
+            };
+            const expanded = try status_fmt.expand(alloc, window.options.window_status_format, &fmt_ctx);
+            defer alloc.free(expanded);
+            try windows.appendSlice(alloc, expanded);
+        }
+
+        return try windows.toOwnedSlice(alloc);
+    }
+
+    fn renderStatusBar(self: *Server, out: *output_mod.Output, session: *const Session, window: *const Window, cols: u32, rows: u32) !void {
+        const row = statusRow(session, rows) orelse return;
+        const host_name = hostname();
+        const active_pane = window.active_pane;
+        const fmt_ctx = status_fmt.FormatContext{
+            .session_name = session.name,
+            .session_id = session.id,
+            .window_name = window.name,
+            .window_index = windowIndex(session, window),
+            .window_active = true,
+            .window_flags = windowFlags(session, window),
+            .pane_index = if (active_pane) |pane| paneIndex(window, pane) else 0,
+            .host = host_name,
+        };
+
+        const left = try status_fmt.expand(self.allocator, session.options.status_left, &fmt_ctx);
+        defer self.allocator.free(left);
+        const right = try status_fmt.expand(self.allocator, session.options.status_right, &fmt_ctx);
+        defer self.allocator.free(right);
+        const center = try self.buildWindowStatusList(self.allocator, session);
+        defer self.allocator.free(center);
+
+        const status_bar = status_mod.StatusBar{
+            .left = session.options.status_left,
+            .right = session.options.status_right,
+            .style = session.options.status_style,
+            .interval = session.options.status_interval,
+            .enabled = session.options.status,
+        };
+        const line = try status_bar.renderSections(self.allocator, cols, left, center, right);
+        defer self.allocator.free(line);
+
+        out.cursorTo(0, row);
+        out.attrReset();
+        out.setAttrs(status_bar.style.attrs);
+        out.setFg(status_bar.style.fg);
+        out.setBg(status_bar.style.bg);
+        out.writeBytes(line);
+        out.attrReset();
+    }
+
+    fn refreshStatusClientsIfDue(self: *Server) void {
+        var now: i64 = 0;
+        _ = time(&now);
+
+        for (self.clients.items) |client| {
+            const session = client.session orelse continue;
+            if (!session.options.status or session.options.status_interval == 0) continue;
+
+            if (session.status_next_refresh_at == 0) {
+                session.status_next_refresh_at = now + @as(i64, @intCast(session.options.status_interval));
+                continue;
+            }
+            if (now < session.status_next_refresh_at) continue;
+
+            const window = session.active_window orelse continue;
+            const pane = window.active_pane orelse continue;
+            const pane_state = self.session_loop.getPane(pane.id) orelse continue;
+            pane_state.dirty.markAllDirty();
+            self.renderComposedToClient(client.fd, session, pane_state) catch {};
+            session.status_next_refresh_at = now + @as(i64, @intCast(session.options.status_interval));
         }
     }
 
@@ -353,6 +529,7 @@ pub const Server = struct {
     pub fn createSession(self: *Server, name: []const u8, shell: [:0]const u8, cols: u32, rows: u32) !*Session {
         const session = try Session.init(self.allocator, name);
         errdefer session.deinit();
+        try self.applySessionStatusDefaults(session);
 
         const window = try Window.init(self.allocator, name, cols, rows);
         errdefer window.deinit();
@@ -479,6 +656,7 @@ pub const Server = struct {
             .func = @ptrCast(&struct {
                 fn check(ctx: *anyopaque) void {
                     const server: *Server = @ptrCast(@alignCast(ctx));
+                    server.refreshStatusClientsIfDue();
                     if (signals.SignalHandler.shouldExit()) {
                         server.stop();
                         if (builtin.os.tag == .macos) {
@@ -567,6 +745,7 @@ pub const Server = struct {
             .func = @ptrCast(&struct {
                 fn check(ctx: *anyopaque) void {
                     const server: *Server = @ptrCast(@alignCast(ctx));
+                    server.refreshStatusClientsIfDue();
                     if (signals.SignalHandler.shouldExit()) {
                         server.stop();
                         if (builtin.os.tag == .linux) {
@@ -588,6 +767,7 @@ pub const Server = struct {
         var pollfds: [max_fds]std.c.pollfd = undefined;
 
         while (self.running) {
+            self.refreshStatusClientsIfDue();
             if (signals.SignalHandler.shouldExit()) {
                 self.stop();
                 break;
@@ -619,7 +799,10 @@ pub const Server = struct {
 
             const result = std.c.poll(pollfds[0..nfds].ptr, @intCast(nfds), 100);
             if (result < 0) continue;
-            if (result == 0) continue;
+            if (result == 0) {
+                self.refreshStatusClientsIfDue();
+                continue;
+            }
 
             if (nfds > 0 and pollfds[0].revents & POLLIN != 0) {
                 self.acceptClient() catch {};
@@ -1081,50 +1264,29 @@ pub const Server = struct {
             return error.NoPaneState;
         };
         const pane_count = window.panes.items.len;
-        const active_cursor = self.getActiveCursorState(window);
-
-        if (pane_count <= 1) {
-            // Single pane: render directly (fast path).
-            if (window.active_pane) |pane| {
-                if (self.session_loop.getPane(pane.id)) |ps| {
-                    ps.renderTo(&out);
-                }
-            }
-        } else {
-            // Multi-pane: render each pane at its offset, then draw borders.
-            out.hideCursor();
-            for (window.panes.items) |pane| {
-                if (self.session_loop.getPane(pane.id)) |ps| {
-                    redraw_mod.redrawAt(&ps.dirty, &ps.screen, &out, pane.xoff, pane.yoff);
-                }
-            }
-
-            // Draw borders between panes using layout info.
-            if (window.layout_root) |root| {
-                self.drawLayoutBorders(&out, root, window.sx, window.sy);
-            }
-        }
-
-        // Render status bar on the last row.
+        const active_cursor = self.getActiveCursorState(session, window);
         const cols: u32 = window.sx;
         const rows: u32 = window.sy;
+        const pane_yoff = statusContentOffset(session);
+        const pane_rows = statusContentRows(session, rows);
 
-        const fmt_ctx = status_fmt.FormatContext{
-            .session_name = session.name,
-            .window_name = window.name,
-        };
-        const status_bar = @import("status/status.zig").StatusBar.init();
-        const status_line = status_bar.render(self.allocator, cols, &fmt_ctx) catch null;
-        defer if (status_line) |sl| self.allocator.free(sl);
-
-        if (status_line) |sl| {
-            out.cursorTo(0, rows -| 1);
-            out.attrReset();
-            // Reverse video for status bar (like tmux default).
-            out.writeBytes("\x1b[7m");
-            out.writeBytes(sl);
-            out.writeBytes("\x1b[0m");
+        if (pane_count > 1) {
+            out.hideCursor();
         }
+        for (window.panes.items) |pane| {
+            if (self.session_loop.getPane(pane.id)) |ps| {
+                const available_rows = pane_rows -| pane.yoff;
+                redraw_mod.redrawAtClipped(&ps.dirty, &ps.screen, &out, pane.xoff, pane.yoff + pane_yoff, available_rows);
+            }
+        }
+
+        if (pane_count > 1) {
+            if (window.layout_root) |root| {
+                self.drawLayoutBorders(&out, root, window.sx, pane_rows, pane_yoff);
+            }
+        }
+
+        try self.renderStatusBar(&out, session, window, cols, rows);
 
         restoreActiveCursor(&out, active_cursor);
 
@@ -1148,13 +1310,20 @@ pub const Server = struct {
     }
 
     /// Recursively draw border lines between panes based on the layout tree.
-    fn drawLayoutBorders(self: *Server, out: *output_mod.Output, cell: *const @import("layout/layout.zig").LayoutCell, total_cols: u32, total_rows: u32) void {
+    fn drawLayoutBorders(
+        self: *Server,
+        out: *output_mod.Output,
+        cell: *const @import("layout/layout.zig").LayoutCell,
+        total_cols: u32,
+        total_rows: u32,
+        y_offset: u32,
+    ) void {
         if (cell.cell_type == .pane) return;
 
         const children = cell.children.items;
         if (children.len < 2) {
             for (children) |child| {
-                self.drawLayoutBorders(out, child, total_cols, total_rows);
+                self.drawLayoutBorders(out, child, total_cols, total_rows, y_offset);
             }
             return;
         }
@@ -1165,20 +1334,21 @@ pub const Server = struct {
                 // Vertical border: draw at (child.xoff + child.sx, child.yoff) to (child.xoff + child.sx, child.yoff + child.sy - 1)
                 const bx = child.xoff + child.sx;
                 const top = child.yoff;
-                const bottom = child.yoff + child.sy -| 1;
+                const bottom = @min(child.yoff + child.sy, total_rows) -| 1;
                 out.attrReset();
                 var y = top;
                 while (y <= bottom) : (y += 1) {
-                    out.cursorTo(bx, y);
+                    out.cursorTo(bx, y + y_offset);
                     out.writeBytes("\xe2\x94\x82"); // U+2502 │
                 }
             } else if (cell.cell_type == .vertical) {
                 // Horizontal border: draw at (child.xoff, child.yoff + child.sy) to (child.xoff + child.sx - 1, child.yoff + child.sy)
                 const by = child.yoff + child.sy;
+                if (by >= total_rows) continue;
                 const left = child.xoff;
                 const right = child.xoff + child.sx -| 1;
                 out.attrReset();
-                out.cursorTo(left, by);
+                out.cursorTo(left, by + y_offset);
                 var x = left;
                 while (x <= right) : (x += 1) {
                     out.writeBytes("\xe2\x94\x80"); // U+2500 ─
@@ -1188,7 +1358,7 @@ pub const Server = struct {
 
         // Recurse into children.
         for (children) |child| {
-            self.drawLayoutBorders(out, child, total_cols, total_rows);
+            self.drawLayoutBorders(out, child, total_cols, total_rows, y_offset);
         }
     }
 
@@ -1365,6 +1535,7 @@ fn commandErrorMessage(err: cmd.CmdError) []const u8 {
 }
 
 const POLLIN: i16 = 0x0001;
+extern "c" fn time(timer: ?*i64) i64;
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
@@ -1502,4 +1673,261 @@ test "renderComposedToClient preserves active-pane cursor style in multi-pane mo
 
     try std.testing.expectEqual(protocol.MessageType.output, msg.msg_type);
     try std.testing.expect(std.mem.endsWith(u8, msg.payload, "\x1b[2;19H\x1b[?25h\x1b[4 q"));
+}
+
+fn renderPayloadForTest(server: *Server, session: *Session, pane_state: ?*server_loop.PaneState) ![]u8 {
+    var client_pipe: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&client_pipe));
+    defer _ = std.c.close(client_pipe[0]);
+    defer _ = std.c.close(client_pipe[1]);
+
+    try server.renderComposedToClient(client_pipe[1], session, pane_state);
+
+    var msg = try protocol.recvMessageAlloc(std.testing.allocator, client_pipe[0]);
+    defer msg.deinit();
+
+    try std.testing.expectEqual(protocol.MessageType.output, msg.msg_type);
+    return try std.testing.allocator.dupe(u8, msg.payload);
+}
+
+test "renderComposedToClient uses configured status-left and status-right" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-render-status-configured.sock");
+    defer server.deinit();
+
+    const session = try Session.init(std.testing.allocator, "demo");
+    try server.sessions.append(server.allocator, session);
+    server.default_session = session;
+
+    const window = try Window.init(std.testing.allocator, "win", 32, 5);
+    try session.addWindow(window);
+
+    const pane = try Pane.init(std.testing.allocator, 32, 4);
+    try window.addPane(pane);
+    try server.session_loop.addPane(pane.id, -1, pane.sx, pane.sy);
+
+    try session.setStatusLeft("LEFT:#S");
+    try session.setStatusRight("RIGHT:#W");
+
+    const pane_state = server.session_loop.getPane(pane.id).?;
+    const payload = try renderPayloadForTest(&server, session, pane_state);
+    defer std.testing.allocator.free(payload);
+
+    try std.testing.expect(std.mem.indexOf(u8, payload, "LEFT:demo") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "RIGHT:win") != null);
+}
+
+test "renderComposedToClient omits configured status when disabled" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-render-status-disabled.sock");
+    defer server.deinit();
+
+    const session = try Session.init(std.testing.allocator, "demo");
+    try server.sessions.append(server.allocator, session);
+    server.default_session = session;
+
+    const window = try Window.init(std.testing.allocator, "win", 28, 4);
+    try session.addWindow(window);
+
+    const pane = try Pane.init(std.testing.allocator, 28, 3);
+    try window.addPane(pane);
+    try server.session_loop.addPane(pane.id, -1, pane.sx, pane.sy);
+
+    session.options.status = false;
+    try session.setStatusLeft("STATUS-DISABLED");
+
+    const pane_state = server.session_loop.getPane(pane.id).?;
+    const payload = try renderPayloadForTest(&server, session, pane_state);
+    defer std.testing.allocator.free(payload);
+
+    try std.testing.expect(std.mem.indexOf(u8, payload, "STATUS-DISABLED") == null);
+}
+
+test "renderComposedToClient includes window list output for active session" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-render-window-list.sock");
+    defer server.deinit();
+
+    const session = try Session.init(std.testing.allocator, "demo");
+    try server.sessions.append(server.allocator, session);
+    server.default_session = session;
+
+    const first = try Window.init(std.testing.allocator, "editor", 40, 5);
+    try session.addWindow(first);
+    const first_pane = try Pane.init(std.testing.allocator, 40, 4);
+    try first.addPane(first_pane);
+    try server.session_loop.addPane(first_pane.id, -1, first_pane.sx, first_pane.sy);
+
+    const second = try Window.init(std.testing.allocator, "shell", 40, 5);
+    try session.addWindow(second);
+    const second_pane = try Pane.init(std.testing.allocator, 40, 4);
+    try second.addPane(second_pane);
+    try server.session_loop.addPane(second_pane.id, -1, second_pane.sx, second_pane.sy);
+    session.selectWindow(second);
+
+    try session.setStatusLeft("");
+    try session.setStatusRight("");
+
+    const pane_state = server.session_loop.getPane(second_pane.id).?;
+    const payload = try renderPayloadForTest(&server, session, pane_state);
+    defer std.testing.allocator.free(payload);
+
+    const first_idx = std.mem.indexOf(u8, payload, "editor");
+    const second_idx = std.mem.indexOf(u8, payload, "shell");
+    try std.testing.expect(first_idx != null);
+    try std.testing.expect(second_idx != null);
+    try std.testing.expect(first_idx.? < second_idx.?);
+}
+
+test "renderComposedToClient applies status style, top position, and window markers" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-render-status-top.sock");
+    defer server.deinit();
+
+    const session = try Session.init(std.testing.allocator, "demo");
+    try server.sessions.append(server.allocator, session);
+    server.default_session = session;
+
+    const first = try Window.init(std.testing.allocator, "editor", 36, 5);
+    try session.addWindow(first);
+    const first_pane = try Pane.init(std.testing.allocator, 36, 4);
+    try first.addPane(first_pane);
+    try server.session_loop.addPane(first_pane.id, -1, first_pane.sx, first_pane.sy);
+
+    const second = try Window.init(std.testing.allocator, "shell", 36, 5);
+    try session.addWindow(second);
+    const second_pane = try Pane.init(std.testing.allocator, 36, 4);
+    try second.addPane(second_pane);
+    try server.session_loop.addPane(second_pane.id, -1, second_pane.sx, second_pane.sy);
+
+    try session.setStatusLeft("[#S]");
+    try session.setStatusRight("RIGHT");
+    session.options.status_style = .{
+        .fg = .white,
+        .bg = .black,
+        .attrs = .{ .bold = true },
+    };
+    session.options.status_position = .top;
+
+    const pane_state = server.session_loop.getPane(first_pane.id).?;
+    const payload = try renderPayloadForTest(&server, session, pane_state);
+    defer std.testing.allocator.free(payload);
+
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\x1b[1;1H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\x1b[1m\x1b[37m\x1b[40m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "0:editor* 1:shell-") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "RIGHT") != null);
+}
+
+test "loadDefaultConfig applies status defaults that reach composed render" {
+    var home_buf: [128]u8 = undefined;
+    const home_path = try std.fmt.bufPrint(&home_buf, "/tmp/zmux-test-home-status-{d}", .{std.c.getpid()});
+    const home_z = try std.testing.allocator.dupeZ(u8, home_path);
+    defer std.testing.allocator.free(home_z);
+    if (std.c.mkdir(home_z, 0o755) != 0) return error.Unexpected;
+
+    var file_buf: [192]u8 = undefined;
+    const legacy_path = try std.fmt.bufPrint(&file_buf, "{s}/.tmux.conf", .{home_path});
+    const legacy_z = try std.testing.allocator.dupeZ(u8, legacy_path);
+    defer std.testing.allocator.free(legacy_z);
+    defer {
+        _ = std.c.unlink(legacy_z);
+        _ = std.c.rmdir(home_z);
+    }
+
+    const fd = std.c.open(legacy_z, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
+    try std.testing.expect(fd >= 0);
+    defer _ = std.c.close(fd);
+    const content =
+        \\set -g status-left '[cfg-left]'
+        \\set -g status-right '[cfg-right]'
+        \\set -g status-style 'fg=white,bg=black,bold'
+        \\set -g status-position top
+        \\set -g status-interval 7
+        \\
+    ;
+    try std.testing.expectEqual(@as(isize, @intCast(content.len)), std.c.write(fd, content.ptr, content.len));
+
+    const old_home = if (std.c.getenv("HOME")) |home|
+        try std.testing.allocator.dupeZ(u8, std.mem.sliceTo(home, 0))
+    else
+        null;
+    defer {
+        if (old_home) |home| {
+            _ = setenv("HOME", home, 1);
+            std.testing.allocator.free(home);
+        } else {
+            _ = unsetenv("HOME");
+        }
+    }
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home_z, 1));
+
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-render-config-status.sock");
+    defer server.deinit();
+    server.loadDefaultConfig();
+
+    const session = try Session.init(std.testing.allocator, "demo");
+    try server.applySessionStatusDefaults(session);
+    try server.sessions.append(server.allocator, session);
+    server.default_session = session;
+
+    const window = try Window.init(std.testing.allocator, "win", 32, 5);
+    try session.addWindow(window);
+    const pane = try Pane.init(std.testing.allocator, 32, 4);
+    try window.addPane(pane);
+    try server.session_loop.addPane(pane.id, -1, pane.sx, pane.sy);
+
+    try std.testing.expectEqualStrings("[cfg-left]", session.options.status_left);
+    try std.testing.expectEqualStrings("[cfg-right]", session.options.status_right);
+    try std.testing.expectEqual(.top, session.options.status_position);
+    try std.testing.expectEqual(@as(u32, 7), session.options.status_interval);
+
+    const pane_state = server.session_loop.getPane(pane.id).?;
+    const payload = try renderPayloadForTest(&server, session, pane_state);
+    defer std.testing.allocator.free(payload);
+
+    try std.testing.expect(std.mem.indexOf(u8, payload, "[cfg-left]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "[cfg-right]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\x1b[1;1H") != null);
+}
+
+test "status interval refresh renders attached clients when due" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-status-refresh.sock");
+    defer server.deinit();
+
+    const session = try Session.init(std.testing.allocator, "demo");
+    try server.sessions.append(server.allocator, session);
+    server.default_session = session;
+
+    const window = try Window.init(std.testing.allocator, "win", 28, 4);
+    try session.addWindow(window);
+    const pane = try Pane.init(std.testing.allocator, 28, 3);
+    try window.addPane(pane);
+    try server.session_loop.addPane(pane.id, -1, pane.sx, pane.sy);
+    const pane_state = server.session_loop.getPane(pane.id).?;
+    pane_state.processPtyOutput("body");
+
+    try session.setStatusLeft("LEFT");
+    try session.setStatusRight("RIGHT");
+    session.options.status_interval = 1;
+    var now: i64 = 0;
+    _ = time(&now);
+    session.status_next_refresh_at = now - 1;
+
+    var client_pipe: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&client_pipe));
+    defer _ = std.c.close(client_pipe[0]);
+    defer _ = std.c.close(client_pipe[1]);
+
+    try server.clients.append(server.allocator, .{
+        .fd = client_pipe[1],
+        .session = session,
+        .identified = true,
+        .choose_tree_state = null,
+    });
+
+    server.refreshStatusClientsIfDue();
+
+    var msg = try protocol.recvMessageAlloc(std.testing.allocator, client_pipe[0]);
+    defer msg.deinit();
+    try std.testing.expectEqual(protocol.MessageType.output, msg.msg_type);
+    try std.testing.expect(std.mem.indexOf(u8, msg.payload, "LEFT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg.payload, "RIGHT") != null);
+    try std.testing.expect(session.status_next_refresh_at > now);
 }

@@ -19,7 +19,9 @@ const ChooseTreeItem = @import("../window.zig").ChooseTreeItem;
 const CellType = @import("../layout/layout.zig").CellType;
 const layout_set = @import("../layout/set.zig");
 const format_mod = @import("../status/format.zig");
+const style_mod = @import("../status/style.zig");
 const clipboard_mod = @import("../clipboard.zig");
+const colour_mod = @import("../core/colour.zig");
 const Server = @import("../server.zig").Server;
 
 /// Command execution context.
@@ -564,6 +566,12 @@ fn parseBooleanValue(value: []const u8) ?bool {
     return null;
 }
 
+fn parseStatusPositionValue(value: []const u8) ?Session.StatusPosition {
+    if (std.ascii.eqlIgnoreCase(value, "top")) return .top;
+    if (std.ascii.eqlIgnoreCase(value, "bottom")) return .bottom;
+    return null;
+}
+
 fn parsePrefixValue(value: []const u8) ?u21 {
     const parsed = key_string.stringToKey(value) orelse return null;
     if (parsed.mods.meta or parsed.mods.shift) return null;
@@ -573,6 +581,63 @@ fn parsePrefixValue(value: []const u8) ?u21 {
     if (parsed.key >= 'a' and parsed.key <= 'z') return parsed.key - 'a' + 1;
     if (parsed.key >= 'A' and parsed.key <= 'Z') return parsed.key - 'A' + 1;
     return null;
+}
+
+fn colourName(colour: colour_mod.Colour) []const u8 {
+    return switch (colour) {
+        .default => "default",
+        .palette => |idx| switch (idx) {
+            0 => "black",
+            1 => "red",
+            2 => "green",
+            3 => "yellow",
+            4 => "blue",
+            5 => "magenta",
+            6 => "cyan",
+            7 => "white",
+            8 => "brightblack",
+            9 => "brightred",
+            10 => "brightgreen",
+            11 => "brightyellow",
+            12 => "brightblue",
+            13 => "brightmagenta",
+            14 => "brightcyan",
+            15 => "brightwhite",
+            else => "",
+        },
+        .rgb => "",
+    };
+}
+
+fn formatColour(buf: []u8, colour: colour_mod.Colour) []const u8 {
+    const named = colourName(colour);
+    if (named.len > 0) return named;
+    return switch (colour) {
+        .default => "default",
+        .palette => |idx| std.fmt.bufPrint(buf, "colour{d}", .{idx}) catch "default",
+        .rgb => |rgb| std.fmt.bufPrint(buf, "#{x:0>2}{x:0>2}{x:0>2}", .{ rgb.r, rgb.g, rgb.b }) catch "default",
+    };
+}
+
+fn formatStyleValue(buf: []u8, style: style_mod.Style) []const u8 {
+    var fg_tmp: [32]u8 = undefined;
+    var bg_tmp: [32]u8 = undefined;
+    var written = std.fmt.bufPrint(buf, "fg={s},bg={s}", .{
+        formatColour(fg_tmp[0..], style.fg),
+        formatColour(bg_tmp[0..], style.bg),
+    }) catch return "fg=default,bg=default";
+
+    if (style.attrs.bold) written = std.fmt.bufPrint(buf, "{s},bold", .{written}) catch return "fg=default,bg=default";
+    if (style.attrs.dim) written = std.fmt.bufPrint(buf, "{s},dim", .{written}) catch return "fg=default,bg=default";
+    if (style.attrs.italic) written = std.fmt.bufPrint(buf, "{s},italics", .{written}) catch return "fg=default,bg=default";
+    if (style.attrs.underline) written = std.fmt.bufPrint(buf, "{s},underscore", .{written}) catch return "fg=default,bg=default";
+    if (style.attrs.blink) written = std.fmt.bufPrint(buf, "{s},blink", .{written}) catch return "fg=default,bg=default";
+    if (style.attrs.reverse) written = std.fmt.bufPrint(buf, "{s},reverse", .{written}) catch return "fg=default,bg=default";
+    if (style.attrs.hidden) written = std.fmt.bufPrint(buf, "{s},hidden", .{written}) catch return "fg=default,bg=default";
+    if (style.attrs.strikethrough) written = std.fmt.bufPrint(buf, "{s},strikethrough", .{written}) catch return "fg=default,bg=default";
+    if (style.attrs.overline) written = std.fmt.bufPrint(buf, "{s},overline", .{written}) catch return "fg=default,bg=default";
+
+    return written;
 }
 
 fn isWindowOptionName(name: []const u8) bool {
@@ -2227,6 +2292,10 @@ fn cmdShowOptions(ctx: *Context, args: []const []const u8) CmdError!void {
         } else if (std.mem.eql(u8, name, "status")) {
             const v = if (session.options.status) "on" else "off";
             if (is_value_only) try writeOutput(ctx, "{s}\n", .{v}) else try writeOutput(ctx, "status {s}\n", .{v});
+        } else if (std.mem.eql(u8, name, "status-style")) {
+            var buf: [128]u8 = undefined;
+            const value = formatStyleValue(buf[0..], session.options.status_style);
+            if (is_value_only) try writeOutput(ctx, "{s}\n", .{value}) else try writeOutput(ctx, "status-style {s}\n", .{value});
         } else if (std.mem.eql(u8, name, "prefix")) {
             const pk = session.options.prefix_key;
             if (pk >= 1 and pk <= 26) {
@@ -2239,6 +2308,11 @@ fn cmdShowOptions(ctx: *Context, args: []const []const u8) CmdError!void {
             if (is_value_only) try writeOutput(ctx, "{s}\n", .{session.options.status_left}) else try writeOutput(ctx, "status-left {s}\n", .{session.options.status_left});
         } else if (std.mem.eql(u8, name, "status-right")) {
             if (is_value_only) try writeOutput(ctx, "{s}\n", .{session.options.status_right}) else try writeOutput(ctx, "status-right {s}\n", .{session.options.status_right});
+        } else if (std.mem.eql(u8, name, "status-position")) {
+            const value = if (session.options.status_position == .top) "top" else "bottom";
+            if (is_value_only) try writeOutput(ctx, "{s}\n", .{value}) else try writeOutput(ctx, "status-position {s}\n", .{value});
+        } else if (std.mem.eql(u8, name, "status-interval")) {
+            if (is_value_only) try writeOutput(ctx, "{d}\n", .{session.options.status_interval}) else try writeOutput(ctx, "status-interval {d}\n", .{session.options.status_interval});
         } else if (std.mem.eql(u8, name, "visual-activity")) {
             const v = if (session.options.visual_activity) "on" else "off";
             if (is_value_only) try writeOutput(ctx, "{s}\n", .{v}) else try writeOutput(ctx, "visual-activity {s}\n", .{v});
@@ -2257,8 +2331,14 @@ fn cmdShowOptions(ctx: *Context, args: []const []const u8) CmdError!void {
         try writeOutput(ctx, "prefix C-{c}\n", .{@as(u8, @intCast(pk + 'a' - 1))});
     }
     try writeOutput(ctx, "status {s}\n", .{if (session.options.status) "on" else "off"});
+    {
+        var buf: [128]u8 = undefined;
+        try writeOutput(ctx, "status-style {s}\n", .{formatStyleValue(buf[0..], session.options.status_style)});
+    }
     try writeOutput(ctx, "status-left {s}\n", .{session.options.status_left});
     try writeOutput(ctx, "status-right {s}\n", .{session.options.status_right});
+    try writeOutput(ctx, "status-position {s}\n", .{if (session.options.status_position == .top) "top" else "bottom"});
+    try writeOutput(ctx, "status-interval {d}\n", .{session.options.status_interval});
     try writeOutput(ctx, "visual-activity {s}\n", .{if (session.options.visual_activity) "on" else "off"});
 }
 
@@ -3451,6 +3531,7 @@ fn cmdSetOption(ctx: *Context, args: []const []const u8) CmdError!void {
             return;
         }
         if (is_global) {
+            restoreGlobalSessionOption(ctx.server, opt_name);
             for (ctx.server.sessions.items) |s| {
                 restoreDefaultOption(s, opt_name);
             }
@@ -3511,6 +3592,12 @@ fn restoreDefaultOption(session: *Session, name: []const u8) void {
         session.options.mouse = false;
     } else if (std.mem.eql(u8, name, "status")) {
         session.options.status = true;
+    } else if (std.mem.eql(u8, name, "status-style")) {
+        session.options.status_style = .{
+            .fg = .green,
+            .bg = .black,
+            .attrs = .{},
+        };
     } else if (std.mem.eql(u8, name, "prefix")) {
         session.options.prefix_key = 0x02; // C-b
     } else if (std.mem.eql(u8, name, "visual-activity")) {
@@ -3527,7 +3614,12 @@ fn restoreDefaultOption(session: *Session, name: []const u8) void {
         const owned = alloc.dupe(u8, "#H") catch return;
         alloc.free(session.options.status_right);
         session.options.status_right = owned;
+    } else if (std.mem.eql(u8, name, "status-position")) {
+        session.options.status_position = .bottom;
+    } else if (std.mem.eql(u8, name, "status-interval")) {
+        session.options.status_interval = 15;
     }
+    session.status_next_refresh_at = 0;
 }
 
 fn applySessionOption(session: *Session, name: []const u8, value: []const u8) !void {
@@ -3541,6 +3633,12 @@ fn applySessionOption(session: *Session, name: []const u8, value: []const u8) !v
     }
     if (std.mem.eql(u8, name, "status")) {
         session.options.status = parseBooleanValue(value) orelse return error.InvalidArgs;
+        session.status_next_refresh_at = 0;
+        return;
+    }
+    if (std.mem.eql(u8, name, "status-style")) {
+        session.options.status_style = style_mod.parse(value);
+        session.status_next_refresh_at = 0;
         return;
     }
     if (std.mem.eql(u8, name, "prefix")) {
@@ -3560,6 +3658,7 @@ fn applySessionOption(session: *Session, name: []const u8, value: []const u8) !v
         const owned = try alloc.dupe(u8, value);
         alloc.free(session.options.status_left);
         session.options.status_left = owned;
+        session.status_next_refresh_at = 0;
         return;
     }
     if (std.mem.eql(u8, name, "status-right")) {
@@ -3567,9 +3666,46 @@ fn applySessionOption(session: *Session, name: []const u8, value: []const u8) !v
         const owned = try alloc.dupe(u8, value);
         alloc.free(session.options.status_right);
         session.options.status_right = owned;
+        session.status_next_refresh_at = 0;
+        return;
+    }
+    if (std.mem.eql(u8, name, "status-position")) {
+        session.options.status_position = parseStatusPositionValue(value) orelse return error.InvalidArgs;
+        session.status_next_refresh_at = 0;
+        return;
+    }
+    if (std.mem.eql(u8, name, "status-interval")) {
+        session.options.status_interval = std.fmt.parseInt(u32, value, 10) catch return error.InvalidArgs;
+        session.status_next_refresh_at = 0;
         return;
     }
     return error.CommandFailed;
+}
+
+fn restoreGlobalSessionOption(server: *Server, name: []const u8) void {
+    if (std.mem.eql(u8, name, "base-index")) {
+        server.session_status_defaults.base_index = 0;
+    } else if (std.mem.eql(u8, name, "status")) {
+        server.session_status_defaults.status = true;
+    } else if (std.mem.eql(u8, name, "status-style")) {
+        server.session_status_defaults.status_style = .{
+            .fg = .green,
+            .bg = .black,
+            .attrs = .{},
+        };
+    } else if (std.mem.eql(u8, name, "status-left")) {
+        const owned = server.allocator.dupe(u8, "[#S]") catch return;
+        server.allocator.free(server.session_status_defaults.status_left);
+        server.session_status_defaults.status_left = owned;
+    } else if (std.mem.eql(u8, name, "status-right")) {
+        const owned = server.allocator.dupe(u8, "#H") catch return;
+        server.allocator.free(server.session_status_defaults.status_right);
+        server.session_status_defaults.status_right = owned;
+    } else if (std.mem.eql(u8, name, "status-position")) {
+        server.session_status_defaults.status_position = .bottom;
+    } else if (std.mem.eql(u8, name, "status-interval")) {
+        server.session_status_defaults.status_interval = 15;
+    }
 }
 
 fn applyGlobalOption(server: *Server, name: []const u8, value: []const u8) !void {
@@ -3585,6 +3721,24 @@ fn applyGlobalOption(server: *Server, name: []const u8, value: []const u8) !void
         const owned = try server.allocator.dupeZ(u8, value);
         if (server.global_default_shell) |old| server.allocator.free(old);
         server.global_default_shell = owned;
+    } else if (std.mem.eql(u8, name, "base-index")) {
+        server.session_status_defaults.base_index = std.fmt.parseInt(u32, value, 10) catch return error.InvalidArgs;
+    } else if (std.mem.eql(u8, name, "status")) {
+        server.session_status_defaults.status = parseBooleanValue(value) orelse return error.InvalidArgs;
+    } else if (std.mem.eql(u8, name, "status-style")) {
+        server.session_status_defaults.status_style = style_mod.parse(value);
+    } else if (std.mem.eql(u8, name, "status-left")) {
+        const owned = try server.allocator.dupe(u8, value);
+        server.allocator.free(server.session_status_defaults.status_left);
+        server.session_status_defaults.status_left = owned;
+    } else if (std.mem.eql(u8, name, "status-right")) {
+        const owned = try server.allocator.dupe(u8, value);
+        server.allocator.free(server.session_status_defaults.status_right);
+        server.session_status_defaults.status_right = owned;
+    } else if (std.mem.eql(u8, name, "status-position")) {
+        server.session_status_defaults.status_position = parseStatusPositionValue(value) orelse return error.InvalidArgs;
+    } else if (std.mem.eql(u8, name, "status-interval")) {
+        server.session_status_defaults.status_interval = std.fmt.parseInt(u32, value, 10) catch return error.InvalidArgs;
     }
 }
 

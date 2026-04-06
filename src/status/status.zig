@@ -34,27 +34,47 @@ pub const StatusBar = struct {
         const right = try format.expand(alloc, self.right, ctx);
         defer alloc.free(right);
 
-        // Build the status line: left + padding + right
+        return self.renderSections(alloc, cols, left, "", right);
+    }
+
+    /// Render the status bar with explicit left/window-list/right sections.
+    pub fn renderSections(
+        self: *const StatusBar,
+        alloc: std.mem.Allocator,
+        cols: u32,
+        left: []const u8,
+        center: []const u8,
+        right: []const u8,
+    ) ![]u8 {
+        if (!self.enabled or cols == 0) {
+            return try alloc.alloc(u8, 0);
+        }
+
+        var leading: std.ArrayListAligned(u8, null) = .empty;
+        defer leading.deinit(alloc);
+
+        if (left.len > 0) {
+            try leading.appendSlice(alloc, left);
+        }
+        if (center.len > 0) {
+            if (leading.items.len > 0) {
+                try leading.append(alloc, ' ');
+            }
+            try leading.appendSlice(alloc, center);
+        }
+
         var line: std.ArrayListAligned(u8, null) = .empty;
         errdefer line.deinit(alloc);
 
-        // Add left section
-        const left_len = @min(left.len, cols);
-        try line.appendSlice(alloc, left[0..left_len]);
-
-        // Calculate padding
         const right_len = @min(right.len, cols);
-        const used = left_len + right_len;
-        if (used < cols) {
-            // Fill middle with spaces
-            const padding = cols - @as(u32, @intCast(used));
-            var p: u32 = 0;
-            while (p < padding) : (p += 1) {
-                try line.append(alloc, ' ');
-            }
+        const leading_budget = cols - right_len;
+        const leading_len = @min(leading.items.len, leading_budget);
+        try line.appendSlice(alloc, leading.items[0..leading_len]);
+
+        while (line.items.len < leading_budget) {
+            try line.append(alloc, ' ');
         }
 
-        // Add right section
         try line.appendSlice(alloc, right[0..right_len]);
 
         return try line.toOwnedSlice(alloc);
@@ -85,4 +105,16 @@ test "status bar disabled" {
     const result = try bar.render(alloc, 80, &ctx);
     defer alloc.free(result);
     try std.testing.expectEqual(@as(usize, 0), result.len);
+}
+
+test "status bar render sections keeps window list between left and right" {
+    const alloc = std.testing.allocator;
+    const bar = StatusBar.init();
+
+    const result = try bar.renderSections(alloc, 32, "[demo]", "0:editor* 1:shell-", "12:34");
+    defer alloc.free(result);
+
+    try std.testing.expectEqual(@as(usize, 32), result.len);
+    try std.testing.expect(std.mem.indexOf(u8, result, "0:editor* 1:shell-") != null);
+    try std.testing.expect(std.mem.endsWith(u8, result, "12:34"));
 }

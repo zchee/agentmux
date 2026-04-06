@@ -89,6 +89,18 @@ pub const options_table = [_]OptionDef{
         .default_value = .{ .string = "#H" },
     },
     .{
+        .name = "status-position",
+        .scope = .session,
+        .option_type = .string,
+        .default_value = .{ .string = "bottom" },
+    },
+    .{
+        .name = "status-interval",
+        .scope = .session,
+        .option_type = .number,
+        .default_value = .{ .number = 15 },
+    },
+    .{
         .name = "mouse",
         .scope = .session,
         .option_type = .boolean,
@@ -153,7 +165,7 @@ test "options_table has expected entries" {
     }
 
     try std.testing.expectEqual(@as(usize, 4), server_count);
-    try std.testing.expectEqual(@as(usize, 8), session_count);
+    try std.testing.expectEqual(@as(usize, 10), session_count);
     try std.testing.expectEqual(@as(usize, 4), window_count);
     try std.testing.expectEqual(@as(usize, 0), pane_count);
 }

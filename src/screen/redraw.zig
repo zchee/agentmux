@@ -149,12 +149,18 @@ fn colourEql(a: colour.Colour, b: colour.Colour) bool {
 
 /// Redraw dirty lines from screen to output at a given offset within a larger composed view.
 pub fn redrawAt(tracker: *DirtyTracker, scr: *Screen, out: *Output, xoff: u32, yoff: u32) void {
+    redrawAtClipped(tracker, scr, out, xoff, yoff, scr.grid.rows);
+}
+
+/// Redraw dirty lines from screen to output at a given offset, clipped to at most max_rows.
+pub fn redrawAtClipped(tracker: *DirtyTracker, scr: *Screen, out: *Output, xoff: u32, yoff: u32, max_rows: u32) void {
     var cur_fg: colour.Colour = .default;
     var cur_bg: colour.Colour = .default;
     var cur_attrs: colour.Attributes = .{};
 
     var y: u32 = 0;
-    while (y < scr.grid.rows) : (y += 1) {
+    const row_limit = @min(scr.grid.rows, max_rows);
+    while (y < row_limit) : (y += 1) {
         if (!tracker.isDirty(y)) continue;
 
         out.cursorTo(xoff, yoff + y);

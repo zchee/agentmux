@@ -19,7 +19,7 @@ A terminal multiplexer written in [Zig](https://ziglang.org/), feature-compatibl
 - Key binding engine with prefix key (default: `C-b`) and key tables
 - tmux-compatible configuration file syntax with startup fallback from `~/.config/zmux/zmux.conf` to legacy `~/.tmux.conf`
 - Dozens of built-in tmux-equivalent commands and aliases (`new-session`, `split-window`, `select-pane`, etc.)
-- Status bar with format string expansion (`#S`, `#W`, `#{pane_current_path}`, etc.)
+- Status bar primitives with tmux-style option storage and basic format string expansion (`#S`, `#W`, `#{pane_current_path}`, etc.)
 - Style parsing (`fg=red,bg=blue,bold`)
 - Copy mode with vi and emacs key bindings, incremental search, visual selection
 - Paste buffer stack
@@ -223,7 +223,7 @@ set -g mouse on
 # Status bar
 set -g status-style 'fg=white,bg=black'
 set -g status-left '[#S] '
-set -g status-right ' %H:%M'
+set -g status-right ' #H'
 
 # Key bindings
 bind-key C-a send-prefix
@@ -233,6 +233,16 @@ bind-key '%' split-window -h
 # vi copy mode
 set -g mode-keys vi
 ```
+
+> [!NOTE]
+> Statusline parity is still being tightened against tmux-visible behavior. The
+> current codebase stores tmux-style status options and expands the common
+> `#...` format tokens used by the status line (`#S`, `#W`, `#I`, `#P`, `#T`,
+> `#H`, and long-form `#{...}` helpers such as conditionals and equality
+> checks), but full composed-render parity for window-list output,
+> `window-status-format`, `%...` time formats, `status-position`, and
+> `status-interval` should be treated as in progress until the render path is
+> fully driven by effective session and window state.
 
 ## Differences from tmux
 

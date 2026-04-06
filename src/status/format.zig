@@ -1,5 +1,21 @@
 const std = @import("std");
 
+const ClockTm = extern struct {
+    tm_sec: i32,
+    tm_min: i32,
+    tm_hour: i32,
+    tm_mday: i32,
+    tm_mon: i32,
+    tm_year: i32,
+    tm_wday: i32,
+    tm_yday: i32,
+    tm_isdst: i32,
+};
+
+extern "c" fn time(timer: ?*i64) i64;
+extern "c" fn localtime(timer: *const i64) ?*ClockTm;
+extern "c" fn strftime(buf: [*]u8, maxsize: usize, format: [*:0]const u8, tm: *const ClockTm) usize;
+
 /// Context for format string expansion.
 pub const FormatContext = struct {
     session_name: []const u8 = "",
@@ -7,6 +23,7 @@ pub const FormatContext = struct {
     window_name: []const u8 = "",
     window_index: u32 = 0,
     window_active: bool = false,
+    window_flags: []const u8 = "",
     pane_index: u32 = 0,
     pane_title: []const u8 = "",
     pane_current_path: []const u8 = "",
@@ -25,6 +42,13 @@ pub fn expand(alloc: std.mem.Allocator, fmt: []const u8, ctx: *const FormatConte
 
     var i: usize = 0;
     while (i < fmt.len) {
+        if (fmt[i] == '%') {
+            const start = i;
+            while (i < fmt.len and fmt[i] != '#') : (i += 1) {}
+            try appendTimeFormatSegment(alloc, &result, fmt[start..i]);
+            continue;
+        }
+
         if (fmt[i] != '#') {
             try result.append(alloc, fmt[i]);
             i += 1;
@@ -45,6 +69,10 @@ pub fn expand(alloc: std.mem.Allocator, fmt: []const u8, ctx: *const FormatConte
             },
             'W' => {
                 try result.appendSlice(alloc, ctx.window_name);
+                i += 1;
+            },
+            'F' => {
+                try result.appendSlice(alloc, ctx.window_flags);
                 i += 1;
             },
             'I' => {
@@ -185,11 +213,34 @@ fn findComma(s: []const u8) ?usize {
 fn resolveVariable(name: []const u8, ctx: *const FormatContext) []const u8 {
     if (std.mem.eql(u8, name, "session_name")) return ctx.session_name;
     if (std.mem.eql(u8, name, "window_name")) return ctx.window_name;
+    if (std.mem.eql(u8, name, "window_flags")) return ctx.window_flags;
     if (std.mem.eql(u8, name, "pane_title")) return ctx.pane_title;
     if (std.mem.eql(u8, name, "pane_current_path")) return ctx.pane_current_path;
     if (std.mem.eql(u8, name, "host")) return ctx.host;
     if (std.mem.eql(u8, name, "client_name")) return ctx.client_name;
     return "";
+}
+
+fn appendTimeFormatSegment(alloc: std.mem.Allocator, result: *std.ArrayListAligned(u8, null), fmt_segment: []const u8) !void {
+    if (fmt_segment.len == 0) return;
+
+    const fmt_z = try alloc.dupeZ(u8, fmt_segment);
+    defer alloc.free(fmt_z);
+
+    var now: i64 = 0;
+    _ = time(&now);
+    const tm = localtime(&now) orelse {
+        try result.appendSlice(alloc, fmt_segment);
+        return;
+    };
+
+    var buf: [128]u8 = undefined;
+    const written = strftime(&buf, buf.len, fmt_z, tm);
+    if (written == 0) {
+        try result.appendSlice(alloc, fmt_segment);
+        return;
+    }
+    try result.appendSlice(alloc, buf[0..written]);
 }
 
 test "expand simple" {
@@ -268,4 +319,25 @@ test "expand numeric long form" {
     const result = try expand(std.testing.allocator, "#{window_index}.#{pane_index} s#{session_id}", &ctx);
     defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("3.1 s7", result);
+}
+
+test "expand window flags token" {
+    const ctx = FormatContext{
+        .window_index = 2,
+        .window_name = "shell",
+        .window_flags = "*",
+    };
+    const result = try expand(std.testing.allocator, "#I:#W#F", &ctx);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("2:shell*", result);
+}
+
+test "expand strftime segment" {
+    const ctx = FormatContext{};
+    const result = try expand(std.testing.allocator, " %H:%M", &ctx);
+    defer std.testing.allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 6), result.len);
+    try std.testing.expectEqual(@as(u8, ' '), result[0]);
+    try std.testing.expectEqual(@as(u8, ':'), result[3]);
 }
