@@ -87,6 +87,7 @@ pub const Server = struct {
     pub const WindowOptionDefaults = struct {
         mode_keys: []u8,
         window_status_format: []u8,
+        window_status_current_format: []u8,
         aggressive_resize: bool = false,
         remain_on_exit: bool = false,
     };
@@ -113,6 +114,8 @@ pub const Server = struct {
         errdefer alloc.free(default_mode_keys);
         const default_window_status_format = try alloc.dupe(u8, "#I:#W#F");
         errdefer alloc.free(default_window_status_format);
+        const default_window_status_current_format = try alloc.dupe(u8, "#I:#W#F");
+        errdefer alloc.free(default_window_status_current_format);
         const default_status_left = try alloc.dupe(u8, "[#S]");
         errdefer alloc.free(default_status_left);
         const default_status_right = try alloc.dupe(u8, "#H");
@@ -141,6 +144,7 @@ pub const Server = struct {
             .window_defaults = .{
                 .mode_keys = default_mode_keys,
                 .window_status_format = default_window_status_format,
+                .window_status_current_format = default_window_status_current_format,
             },
             .config_file = null,
             .messages = .empty,
@@ -189,6 +193,7 @@ pub const Server = struct {
         self.allocator.free(self.session_status_defaults.status_right);
         self.allocator.free(self.window_defaults.mode_keys);
         self.allocator.free(self.window_defaults.window_status_format);
+        self.allocator.free(self.window_defaults.window_status_current_format);
         for (self.messages.items) |msg| self.allocator.free(msg);
         self.messages.deinit(self.allocator);
         if (builtin.os.tag == .macos) {
@@ -203,6 +208,7 @@ pub const Server = struct {
     pub fn applyWindowDefaults(self: *const Server, window: *Window) !void {
         try window.setModeKeys(self.window_defaults.mode_keys);
         try window.setWindowStatusFormat(self.window_defaults.window_status_format);
+        try window.setWindowStatusCurrentFormat(self.window_defaults.window_status_current_format);
         window.options.aggressive_resize = self.window_defaults.aggressive_resize;
         window.options.remain_on_exit = self.window_defaults.remain_on_exit;
         window.options.overrides = .{};
@@ -321,7 +327,11 @@ pub const Server = struct {
                 .pane_index = if (active_pane) |pane| paneIndex(window, pane) else 0,
                 .host = host_name,
             };
-            const expanded = try status_fmt.expand(alloc, window.options.window_status_format, &fmt_ctx);
+            const status_format = if (session.active_window == window)
+                window.options.window_status_current_format
+            else
+                window.options.window_status_format;
+            const expanded = try status_fmt.expand(alloc, status_format, &fmt_ctx);
             defer alloc.free(expanded);
             try windows.appendSlice(alloc, expanded);
         }
@@ -1592,6 +1602,7 @@ test "loadDefaultConfig falls back to legacy tmux path and stores window default
     const content =
         \\bind-key -n C-a display-message legacy
         \\set -g mode-keys vi
+        \\set -g window-status-current-format '#[bold]#I:#W#F'
         \\
     ;
     try std.testing.expectEqual(@as(isize, @intCast(content.len)), std.c.write(fd, content.ptr, content.len));
@@ -1616,6 +1627,7 @@ test "loadDefaultConfig falls back to legacy tmux path and stores window default
     server.loadDefaultConfig();
 
     try std.testing.expectEqualStrings("vi", server.window_defaults.mode_keys);
+    try std.testing.expectEqualStrings("#[bold]#I:#W#F", server.window_defaults.window_status_current_format);
 
     const root = server.binding_manager.tables.get("root") orelse return error.ExpectedRootTable;
     const c_a = key_string.stringToKey("C-a") orelse return error.ExpectedKey;
@@ -2025,4 +2037,33 @@ test "renderComposedToClient handles tmux-style conditional branches and quoted 
     try std.testing.expect(std.mem.indexOf(u8, payload, " demo ") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "up") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "\x1b[44m") != null);
+}
+
+test "renderComposedToClient uses current window format for the active window" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-render-current-window-format.sock");
+    defer server.deinit();
+
+    const session = try Session.init(std.testing.allocator, "demo");
+    try server.sessions.append(server.allocator, session);
+    server.default_session = session;
+
+    const window = try Window.init(std.testing.allocator, "zsh", 64, 5);
+    try server.applyWindowDefaults(window);
+    try window.setWindowStatusFormat("  #{window_index}  #{window_name} ");
+    try window.setWindowStatusCurrentFormat("ACTIVE #{window_index} #{window_name}");
+    try session.addWindow(window);
+
+    const pane = try Pane.init(std.testing.allocator, 64, 4);
+    try window.addPane(pane);
+    try server.session_loop.addPane(pane.id, -1, pane.sx, pane.sy);
+
+    try session.setStatusLeft("");
+    try session.setStatusRight("");
+
+    const pane_state = server.session_loop.getPane(pane.id).?;
+    const payload = try renderPayloadForTest(&server, session, pane_state);
+    defer std.testing.allocator.free(payload);
+
+    try std.testing.expect(std.mem.indexOf(u8, payload, "ACTIVE 0 zsh") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "  0  zsh ") == null);
 }

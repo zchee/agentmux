@@ -643,6 +643,7 @@ fn formatStyleValue(buf: []u8, style: style_mod.Style) []const u8 {
 fn isWindowOptionName(name: []const u8) bool {
     return std.mem.eql(u8, name, "mode-keys") or
         std.mem.eql(u8, name, "window-status-format") or
+        std.mem.eql(u8, name, "window-status-current-format") or
         std.mem.eql(u8, name, "aggressive-resize") or
         std.mem.eql(u8, name, "remain-on-exit");
 }
@@ -656,6 +657,11 @@ fn applyWindowOption(window: *Window, name: []const u8, value: []const u8, is_ov
     if (std.mem.eql(u8, name, "window-status-format")) {
         try window.setWindowStatusFormat(value);
         window.options.overrides.window_status_format = is_override;
+        return;
+    }
+    if (std.mem.eql(u8, name, "window-status-current-format")) {
+        try window.setWindowStatusCurrentFormat(value);
+        window.options.overrides.window_status_current_format = is_override;
         return;
     }
     if (std.mem.eql(u8, name, "aggressive-resize")) {
@@ -676,6 +682,8 @@ fn restoreDefaultWindowOption(server: *const Server, window: *Window, name: []co
         applyWindowOption(window, name, server.window_defaults.mode_keys, false) catch {};
     } else if (std.mem.eql(u8, name, "window-status-format")) {
         applyWindowOption(window, name, server.window_defaults.window_status_format, false) catch {};
+    } else if (std.mem.eql(u8, name, "window-status-current-format")) {
+        applyWindowOption(window, name, server.window_defaults.window_status_current_format, false) catch {};
     } else if (std.mem.eql(u8, name, "aggressive-resize")) {
         window.options.aggressive_resize = server.window_defaults.aggressive_resize;
         window.options.overrides.aggressive_resize = false;
@@ -694,6 +702,10 @@ fn applyGlobalWindowOption(server: *Server, name: []const u8, value: []const u8)
         const owned = try server.allocator.dupe(u8, value);
         server.allocator.free(server.window_defaults.window_status_format);
         server.window_defaults.window_status_format = owned;
+    } else if (std.mem.eql(u8, name, "window-status-current-format")) {
+        const owned = try server.allocator.dupe(u8, value);
+        server.allocator.free(server.window_defaults.window_status_current_format);
+        server.window_defaults.window_status_current_format = owned;
     } else if (std.mem.eql(u8, name, "aggressive-resize")) {
         server.window_defaults.aggressive_resize = parseBooleanValue(value) orelse return error.InvalidArgs;
     } else if (std.mem.eql(u8, name, "remain-on-exit")) {
@@ -710,6 +722,10 @@ fn applyGlobalWindowOption(server: *Server, name: []const u8, value: []const u8)
                 }
             } else if (std.mem.eql(u8, name, "window-status-format")) {
                 if (!window.options.overrides.window_status_format) {
+                    applyWindowOption(window, name, value, false) catch {};
+                }
+            } else if (std.mem.eql(u8, name, "window-status-current-format")) {
+                if (!window.options.overrides.window_status_current_format) {
                     applyWindowOption(window, name, value, false) catch {};
                 }
             } else if (std.mem.eql(u8, name, "aggressive-resize")) {
@@ -734,6 +750,10 @@ fn restoreGlobalWindowOption(server: *Server, name: []const u8) void {
         const owned = server.allocator.dupe(u8, "#I:#W#F") catch return;
         server.allocator.free(server.window_defaults.window_status_format);
         server.window_defaults.window_status_format = owned;
+    } else if (std.mem.eql(u8, name, "window-status-current-format")) {
+        const owned = server.allocator.dupe(u8, "#I:#W#F") catch return;
+        server.allocator.free(server.window_defaults.window_status_current_format);
+        server.window_defaults.window_status_current_format = owned;
     } else if (std.mem.eql(u8, name, "aggressive-resize")) {
         server.window_defaults.aggressive_resize = false;
     } else if (std.mem.eql(u8, name, "remain-on-exit")) {
@@ -750,6 +770,10 @@ fn restoreGlobalWindowOption(server: *Server, name: []const u8) void {
                 }
             } else if (std.mem.eql(u8, name, "window-status-format")) {
                 if (!window.options.overrides.window_status_format) {
+                    restoreDefaultWindowOption(server, window, name);
+                }
+            } else if (std.mem.eql(u8, name, "window-status-current-format")) {
+                if (!window.options.overrides.window_status_current_format) {
                     restoreDefaultWindowOption(server, window, name);
                 }
             } else if (std.mem.eql(u8, name, "aggressive-resize")) {
@@ -787,6 +811,18 @@ fn showWindowOptionValue(ctx: *Context, name: []const u8, is_global: bool, is_va
             try writeOutput(ctx, "{s}\n", .{value});
         } else {
             try writeOutput(ctx, "window-status-format {s}\n", .{value});
+        }
+        return true;
+    }
+    if (std.mem.eql(u8, name, "window-status-current-format")) {
+        const value = if (is_global)
+            ctx.server.window_defaults.window_status_current_format
+        else
+            (ctx.window orelse return CmdError.WindowNotFound).options.window_status_current_format;
+        if (is_value_only) {
+            try writeOutput(ctx, "{s}\n", .{value});
+        } else {
+            try writeOutput(ctx, "window-status-current-format {s}\n", .{value});
         }
         return true;
     }
@@ -2250,6 +2286,7 @@ fn cmdShowOptions(ctx: *Context, args: []const []const u8) CmdError!void {
         };
         if (!first and !is_quiet) return CmdError.CommandFailed;
         _ = try showWindowOptionValue(&target_ctx, "window-status-format", is_global, is_value_only);
+        _ = try showWindowOptionValue(&target_ctx, "window-status-current-format", is_global, is_value_only);
         _ = try showWindowOptionValue(&target_ctx, "aggressive-resize", is_global, is_value_only);
         _ = try showWindowOptionValue(&target_ctx, "remain-on-exit", is_global, is_value_only);
         return;

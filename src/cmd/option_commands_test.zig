@@ -283,12 +283,15 @@ test "set-option -g window option updates defaults for future windows" {
 
     var ctx = initContext(&server, session, &registry, null);
     try registry.execute(&ctx, "set-option", &.{ "-g", "mode-keys", "vi" });
+    try registry.execute(&ctx, "set-option", &.{ "-g", "window-status-current-format", "ACTIVE" });
     try std.testing.expectEqualStrings("vi", server.window_defaults.mode_keys);
+    try std.testing.expectEqualStrings("ACTIVE", server.window_defaults.window_status_current_format);
 
     const future_window = try Window.init(std.testing.allocator, "future", 80, 24);
     defer future_window.deinit();
     try server.applyWindowDefaults(future_window);
     try std.testing.expectEqualStrings("vi", future_window.options.mode_keys);
+    try std.testing.expectEqualStrings("ACTIVE", future_window.options.window_status_current_format);
 }
 
 test "set-window-option -u restores inherited global default" {
@@ -328,13 +331,19 @@ test "set-option -g window option preserves local override" {
 
     var ctx = initContext(&server, session, &registry, null);
     try registry.execute(&ctx, "set-window-option", &.{ "window-status-format", "custom-format" });
+    try registry.execute(&ctx, "set-window-option", &.{ "window-status-current-format", "custom-current-format" });
     try registry.execute(&ctx, "set-option", &.{ "-g", "window-status-format", "global-format" });
+    try registry.execute(&ctx, "set-option", &.{ "-g", "window-status-current-format", "global-current-format" });
 
     const active = session.active_window orelse return error.MissingWindow;
     try std.testing.expectEqualStrings("custom-format", active.options.window_status_format);
+    try std.testing.expectEqualStrings("custom-current-format", active.options.window_status_current_format);
     try std.testing.expect(active.options.overrides.window_status_format);
+    try std.testing.expect(active.options.overrides.window_status_current_format);
     try std.testing.expectEqualStrings("global-format", second.options.window_status_format);
+    try std.testing.expectEqualStrings("global-current-format", second.options.window_status_current_format);
     try std.testing.expect(!second.options.overrides.window_status_format);
+    try std.testing.expect(!second.options.overrides.window_status_current_format);
 }
 
 test "set-environment sets variable on session" {

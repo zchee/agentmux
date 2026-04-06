@@ -133,6 +133,7 @@ pub const Window = struct {
     pub const Options = struct {
         mode_keys: []u8,
         window_status_format: []u8,
+        window_status_current_format: []u8,
         aggressive_resize: bool = false,
         remain_on_exit: bool = false,
         overrides: OverrideFlags = .{},
@@ -141,9 +142,10 @@ pub const Window = struct {
     pub const OverrideFlags = packed struct(u8) {
         mode_keys: bool = false,
         window_status_format: bool = false,
+        window_status_current_format: bool = false,
         aggressive_resize: bool = false,
         remain_on_exit: bool = false,
-        _padding: u4 = 0,
+        _padding: u3 = 0,
     };
 
     pub const Flags = packed struct(u16) {
@@ -165,6 +167,8 @@ pub const Window = struct {
         errdefer alloc.free(mode_keys);
         const window_status_format = try alloc.dupe(u8, "#I:#W#F");
         errdefer alloc.free(window_status_format);
+        const window_status_current_format = try alloc.dupe(u8, "#I:#W#F");
+        errdefer alloc.free(window_status_current_format);
         w.* = .{
             .id = next_id,
             .name = owned_name,
@@ -178,6 +182,7 @@ pub const Window = struct {
             .options = .{
                 .mode_keys = mode_keys,
                 .window_status_format = window_status_format,
+                .window_status_current_format = window_status_current_format,
             },
             .flags = .{},
             .allocator = alloc,
@@ -196,6 +201,7 @@ pub const Window = struct {
         }
         self.allocator.free(self.options.mode_keys);
         self.allocator.free(self.options.window_status_format);
+        self.allocator.free(self.options.window_status_current_format);
         self.allocator.free(self.name);
         self.allocator.destroy(self);
     }
@@ -425,6 +431,12 @@ pub const Window = struct {
         const owned = try self.allocator.dupe(u8, value);
         self.allocator.free(self.options.window_status_format);
         self.options.window_status_format = owned;
+    }
+
+    pub fn setWindowStatusCurrentFormat(self: *Window, value: []const u8) !void {
+        const owned = try self.allocator.dupe(u8, value);
+        self.allocator.free(self.options.window_status_current_format);
+        self.options.window_status_current_format = owned;
     }
 };
 

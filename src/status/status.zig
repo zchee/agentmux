@@ -1,6 +1,12 @@
 const std = @import("std");
 const format = @import("format.zig");
 const style_mod = @import("style.zig");
+const utf8 = @import("../core/utf8.zig");
+
+fn decodeVisibleChar(text: []const u8, index: usize) ?utf8.Char {
+    if (index >= text.len) return null;
+    return utf8.decode(text[index..]);
+}
 
 fn visibleLen(text: []const u8) usize {
     var len: usize = 0;
@@ -10,8 +16,14 @@ fn visibleLen(text: []const u8) usize {
             i = end;
             continue;
         }
-        len += 1;
-        i += 1;
+
+        if (decodeVisibleChar(text, i)) |ch| {
+            len += ch.width();
+            i += ch.len;
+        } else {
+            len += 1;
+            i += 1;
+        }
     }
     return len;
 }
@@ -30,11 +42,68 @@ fn appendVisiblePrefix(
             i = end;
             continue;
         }
-        try out.append(alloc, text[i]);
-        i += 1;
-        visible += 1;
+
+        if (decodeVisibleChar(text, i)) |ch| {
+            const width = ch.width();
+            if (visible + width > max_visible) break;
+            try out.appendSlice(alloc, ch.slice());
+            i += ch.len;
+            visible += width;
+        } else {
+            try out.append(alloc, text[i]);
+            i += 1;
+            visible += 1;
+        }
     }
     return visible;
+}
+
+fn endsWithVisibleSpace(text: []const u8) bool {
+    var saw_visible = false;
+    var last_space = false;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (style_mod.markerEnd(text, i)) |end| {
+            i = end;
+            continue;
+        }
+
+        if (decodeVisibleChar(text, i)) |ch| {
+            if (ch.width() > 0) {
+                saw_visible = true;
+                last_space = std.ascii.isWhitespace(ch.bytes[0]) and ch.len == 1;
+            }
+            i += ch.len;
+        } else {
+            saw_visible = true;
+            last_space = std.ascii.isWhitespace(text[i]);
+            i += 1;
+        }
+    }
+
+    return saw_visible and last_space;
+}
+
+fn startsWithVisibleSpace(text: []const u8) bool {
+    var i: usize = 0;
+    while (i < text.len) {
+        if (style_mod.markerEnd(text, i)) |end| {
+            i = end;
+            continue;
+        }
+
+        if (decodeVisibleChar(text, i)) |ch| {
+            if (ch.width() == 0) {
+                i += ch.len;
+                continue;
+            }
+            return std.ascii.isWhitespace(ch.bytes[0]) and ch.len == 1;
+        }
+
+        return std.ascii.isWhitespace(text[i]);
+    }
+
+    return false;
 }
 
 /// Status bar configuration and rendering.
@@ -92,7 +161,7 @@ pub const StatusBar = struct {
             try leading.appendSlice(alloc, left);
         }
         if (center.len > 0) {
-            if (leading.items.len > 0) {
+            if (leading.items.len > 0 and !endsWithVisibleSpace(leading.items) and !startsWithVisibleSpace(center)) {
                 try leading.append(alloc, ' ');
             }
             try leading.appendSlice(alloc, center);
@@ -165,4 +234,38 @@ test "status bar render sections ignores inline style markers for width" {
     try std.testing.expectEqual(@as(usize, 20), visibleLen(result));
     try std.testing.expect(std.mem.indexOf(u8, result, "#[fg=green]LEFT") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "#[bold]RIGHT") != null);
+}
+
+test "status bar render sections does not add duplicate separator when left already ends with space" {
+    const alloc = std.testing.allocator;
+    const bar = StatusBar.init();
+
+    const result = try bar.renderSections(alloc, 16, "LEFT ", "CENTER", "");
+    defer alloc.free(result);
+
+    try std.testing.expect(std.mem.indexOf(u8, result, "LEFT  CENTER") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "LEFT CENTER") != null);
+}
+
+test "status bar render sections preserves separator when left lacks trailing space" {
+    const alloc = std.testing.allocator;
+    const bar = StatusBar.init();
+
+    const result = try bar.renderSections(alloc, 16, "LEFT", "CENTER", "");
+    defer alloc.free(result);
+
+    try std.testing.expect(std.mem.indexOf(u8, result, "LEFTCENTER") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "LEFT CENTER") != null);
+}
+
+test "status bar render sections counts utf8 glyph width instead of bytes" {
+    const alloc = std.testing.allocator;
+    const bar = StatusBar.init();
+
+    const result = try bar.renderSections(alloc, 8, "A", "", "BC");
+    defer alloc.free(result);
+
+    try std.testing.expectEqual(@as(usize, 8), visibleLen(result));
+    try std.testing.expect(std.mem.indexOf(u8, result, "A") != null);
+    try std.testing.expect(std.mem.endsWith(u8, result, "BC"));
 }

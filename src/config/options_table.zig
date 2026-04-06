@@ -131,6 +131,12 @@ pub const options_table = [_]OptionDef{
         .default_value = .{ .string = "#I:#W#F" },
     },
     .{
+        .name = "window-status-current-format",
+        .scope = .window,
+        .option_type = .string,
+        .default_value = .{ .string = "#I:#W#F" },
+    },
+    .{
         .name = "aggressive-resize",
         .scope = .window,
         .option_type = .boolean,
@@ -166,7 +172,7 @@ test "options_table has expected entries" {
 
     try std.testing.expectEqual(@as(usize, 4), server_count);
     try std.testing.expectEqual(@as(usize, 10), session_count);
-    try std.testing.expectEqual(@as(usize, 4), window_count);
+    try std.testing.expectEqual(@as(usize, 5), window_count);
     try std.testing.expectEqual(@as(usize, 0), pane_count);
 }
 
