@@ -1,0 +1,1 @@
+$autopilot "The status line rendering is still strange. /Users/zchee/Documents/Screenshots/Screenshot 2026-04-07 at 6.41.08.png"
