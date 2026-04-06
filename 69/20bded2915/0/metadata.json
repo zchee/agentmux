@@ -1,0 +1,35 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "6920bded2915",
+  "session_id": "019d63d5-4bf0-73c0-be32-2a4a6729bdf9",
+  "strategy": "manual-commit",
+  "created_at": "2026-04-06T20:47:57.27287Z",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "README.md"
+  ],
+  "agent": "Codex",
+  "turn_id": "fa24a2844f57",
+  "token_usage": {
+    "input_tokens": 9241878,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 8766080,
+    "output_tokens": 55350,
+    "api_call_count": 90
+  },
+  "session_metrics": {
+    "turn_count": 4
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-04-06T20:47:56.273026Z",
+    "agent_lines": 7,
+    "agent_removed": 8,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 7,
+    "total_lines_changed": 15,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
+}
