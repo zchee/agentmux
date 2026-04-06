@@ -4,7 +4,8 @@ A terminal multiplexer written in [Zig](https://ziglang.org/), feature-compatibl
 
 ## Status
 
-**Work in progress.** The core architecture is implemented (58 source files, ~10,800 LOC). The binary builds, unit tests pass, and the module pipeline is wired end-to-end. GPU shader implementations and integration testing are in progress.
+> [!IMPORTANT]
+> **Work in progress.** The core architecture is implemented (58 source files, ~10,800 LOC). The binary builds, unit tests pass, and the module pipeline is wired end-to-end. GPU shader implementations and integration testing are in progress.
 
 ## Features
 
@@ -101,13 +102,13 @@ Client                            Server
 | Output          |           |  |   +---+---+  +---+---+            |
 +-----------------+           |  |       |          |                |
                               |  |       v          v                |
-                              |  |   VT Parser                      |
+                              |  |   VT Parser                       |
                               |  |       |                           |
-                              |  |   Input Handler                  |
+                              |  |   Input Handler                   |
                               |  |       |                           |
-                              |  |   Screen + Grid                  |
+                              |  |   Screen + Grid                   |
                               |  |       |                           |
-                              |  |   Dirty Tracker                  |
+                              |  |   Dirty Tracker                   |
                               |  |       |                           |
                               |  |   Redraw --> GPU Renderer         |
                               |  |              or TTY Output        |
