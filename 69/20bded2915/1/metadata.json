@@ -1,0 +1,33 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "6920bded2915",
+  "session_id": "019d6489-8e9c-7790-856c-642bab67f6b5",
+  "strategy": "manual-commit",
+  "created_at": "2026-04-06T20:47:57.950932Z",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "README.md"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.4",
+  "turn_id": "8ac4ab80ceaf",
+  "token_usage": {
+    "input_tokens": 2184751,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 2007424,
+    "output_tokens": 17273,
+    "api_call_count": 29
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-04-06T20:47:57.290619Z",
+    "agent_lines": 7,
+    "agent_removed": 8,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 7,
+    "total_lines_changed": 15,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
+}
