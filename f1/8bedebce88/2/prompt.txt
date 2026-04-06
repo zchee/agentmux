@@ -1,1 +1,5 @@
 $autopilot .omx/specs/deep-interview-reimplementing-tmux-in-zig-language.md
+
+---
+
+$commit
