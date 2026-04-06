@@ -12,11 +12,23 @@ const c = struct {
         winp: ?*const anyopaque,
     ) i32;
 
+    extern "c" fn forkpty(
+        amaster: *std.c.fd_t,
+        name: ?[*]u8,
+        termp: ?*const anyopaque,
+        winp: ?*const anyopaque,
+    ) std.c.pid_t;
+
     extern "c" fn execvp(
         file: [*:0]const u8,
         argv: [*:null]const ?[*:0]const u8,
     ) i32;
+
+    extern "c" fn tcgetattr(fd: std.c.fd_t, termios_p: *std.c.termios) i32;
+    extern "c" fn tcsetattr(fd: std.c.fd_t, optional_actions: i32, termios_p: *const std.c.termios) i32;
 };
+
+const TCSANOW: i32 = 0;
 
 /// PTY management for a terminal pane.
 pub const Pty = struct {
@@ -60,26 +72,23 @@ pub const Pty = struct {
 
     /// Fork a child process attached to this PTY.
     pub fn forkExec(self: *Pty, shell: [:0]const u8, cwd: ?[:0]const u8) !void {
-        const pid = std.c.fork();
+        if (self.master_fd >= 0) {
+            _ = std.c.close(self.master_fd);
+            self.master_fd = -1;
+        }
+        if (self.slave_fd >= 0) {
+            _ = std.c.close(self.slave_fd);
+            self.slave_fd = -1;
+        }
+
+        var master: std.c.fd_t = -1;
+        var name_buf: [256]u8 = .{0} ** 256;
+        const pid = c.forkpty(&master, &name_buf, null, null);
         if (pid < 0) return Error.ForkptyFailed;
 
         if (pid == 0) {
             // Child process
-            _ = std.c.close(self.master_fd);
-            _ = std.c.setsid();
-
-            // Set controlling terminal (TIOCSCTTY)
-            // TIOCSCTTY - set controlling terminal
-            const TIOCSCTTY = if (builtin.os.tag == .linux) @as(i32, 0x540E) else @as(i32, @bitCast(@as(u32, 0x20007461)));
-            _ = std.c.ioctl(self.slave_fd, TIOCSCTTY, @as(usize, 0));
-
-            // Redirect stdio
-            _ = std.c.dup2(self.slave_fd, 0);
-            _ = std.c.dup2(self.slave_fd, 1);
-            _ = std.c.dup2(self.slave_fd, 2);
-            if (self.slave_fd > 2) {
-                _ = std.c.close(self.slave_fd);
-            }
+            configureInteractiveTermios(0);
 
             if (cwd) |dir| {
                 _ = std.c.chdir(dir);
@@ -91,9 +100,12 @@ pub const Pty = struct {
         }
 
         // Parent
-        self.pid = pid;
-        _ = std.c.close(self.slave_fd);
+        setNonBlocking(master) catch return Error.SetNonBlockFailed;
+        self.master_fd = master;
         self.slave_fd = -1;
+        self.pid = pid;
+        self.tty_name = name_buf;
+        self.tty_name_len = std.mem.indexOfScalar(u8, &name_buf, 0) orelse name_buf.len;
     }
 
     /// Read data from the PTY master.
@@ -149,4 +161,47 @@ fn setNonBlocking(fd: std.c.fd_t) !void {
     if (flags < 0) return Pty.Error.SetNonBlockFailed;
     const result = std.c.fcntl(fd, std.c.F.SETFL, flags | @as(i32, @bitCast(std.c.O{ .NONBLOCK = true })));
     if (result < 0) return Pty.Error.SetNonBlockFailed;
+}
+
+fn configureInteractiveTermios(fd: std.c.fd_t) void {
+    var termios: std.c.termios = undefined;
+    if (c.tcgetattr(fd, &termios) != 0) return;
+
+    const iflag_bits = @typeInfo(@TypeOf(termios.iflag)).@"struct".backing_integer.?;
+    const oflag_bits = @typeInfo(@TypeOf(termios.oflag)).@"struct".backing_integer.?;
+    const cflag_bits = @typeInfo(@TypeOf(termios.cflag)).@"struct".backing_integer.?;
+    const lflag_bits = @typeInfo(@TypeOf(termios.lflag)).@"struct".backing_integer.?;
+
+    const iflag_on: iflag_bits = @bitCast(std.c.tc_iflag_t{
+        .BRKINT = true,
+        .ICRNL = true,
+        .IXON = true,
+    });
+    const iflag_off: iflag_bits = @bitCast(std.c.tc_iflag_t{
+        .IGNCR = true,
+        .INLCR = true,
+        .ISTRIP = true,
+    });
+    const oflag_on: oflag_bits = @bitCast(std.c.tc_oflag_t{
+        .OPOST = true,
+    });
+    const cflag_on: cflag_bits = @bitCast(std.c.tc_cflag_t{
+        .CREAD = true,
+        .CSIZE = .CS8,
+    });
+    const lflag_on: lflag_bits = @bitCast(std.c.tc_lflag_t{
+        .ECHO = true,
+        .ICANON = true,
+        .IEXTEN = true,
+        .ISIG = true,
+    });
+
+    termios.iflag = @bitCast((@as(iflag_bits, @bitCast(termios.iflag)) | iflag_on) & ~iflag_off);
+    termios.oflag = @bitCast(@as(oflag_bits, @bitCast(termios.oflag)) | oflag_on);
+    termios.cflag = @bitCast(@as(cflag_bits, @bitCast(termios.cflag)) | cflag_on);
+    termios.lflag = @bitCast(@as(lflag_bits, @bitCast(termios.lflag)) | lflag_on);
+    termios.cc[@intFromEnum(std.c.V.MIN)] = 1;
+    termios.cc[@intFromEnum(std.c.V.TIME)] = 0;
+
+    _ = c.tcsetattr(fd, TCSANOW, &termios);
 }

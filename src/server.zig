@@ -603,9 +603,7 @@ pub const Server = struct {
     }
 
     pub fn run(self: *Server) !void {
-        if (builtin.os.tag == .macos) {
-            return self.runGcd();
-        }
+        if (builtin.os.tag == .macos) return self.runPoll();
         if (builtin.os.tag == .linux) {
             return self.runIoUring();
         }
@@ -654,7 +652,7 @@ pub const Server = struct {
                 if (server.findClientIndex(fd)) |client_idx| {
                     server.handleClientReadable(client_idx) catch {};
                 } else {
-                    server.handlePtyReadable(fd);
+                    server.drainPaneReadable(fd);
                 }
             }
         };
@@ -690,6 +688,8 @@ pub const Server = struct {
             .func = @ptrCast(&struct {
                 fn check(ctx: *anyopaque) void {
                     const server: *Server = @ptrCast(@alignCast(ctx));
+                    server.drainAllClients();
+                    server.drainAllPanes();
                     server.refreshStatusClientsIfDue();
                     if (signals.SignalHandler.shouldExit()) {
                         server.stop();
@@ -744,7 +744,7 @@ pub const Server = struct {
                     if (server.findClientIndex(fd)) |client_idx| {
                         server.handleClientReadable(client_idx) catch {};
                     } else {
-                        server.handlePtyReadable(fd);
+                        server.drainPaneReadable(fd);
                     }
                 }
             }.handleEvent),
@@ -779,6 +779,8 @@ pub const Server = struct {
             .func = @ptrCast(&struct {
                 fn check(ctx: *anyopaque) void {
                     const server: *Server = @ptrCast(@alignCast(ctx));
+                    server.drainAllClients();
+                    server.drainAllPanes();
                     server.refreshStatusClientsIfDue();
                     if (signals.SignalHandler.shouldExit()) {
                         server.stop();
@@ -801,6 +803,8 @@ pub const Server = struct {
         var pollfds: [max_fds]std.c.pollfd = undefined;
 
         while (self.running) {
+            self.drainAllClients();
+            self.drainAllPanes();
             self.refreshStatusClientsIfDue();
             if (signals.SignalHandler.shouldExit()) {
                 self.stop();
@@ -834,6 +838,8 @@ pub const Server = struct {
             const result = std.c.poll(pollfds[0..nfds].ptr, @intCast(nfds), 100);
             if (result < 0) continue;
             if (result == 0) {
+                self.drainAllClients();
+                self.drainAllPanes();
                 self.refreshStatusClientsIfDue();
                 continue;
             }
@@ -849,7 +855,7 @@ pub const Server = struct {
                 if (self.findClientIndex(fd)) |client_idx| {
                     self.handleClientReadable(client_idx) catch {};
                 } else {
-                    self.handlePtyReadable(fd);
+                    self.drainPaneReadable(fd);
                 }
             }
         }
@@ -1033,6 +1039,21 @@ pub const Server = struct {
         //   - attach-session: prev was null or different session
         // Send exit_ack for non-attaching commands (list-sessions, etc.).
         if (ctx.session != null and (prev_session == null or prev_session != ctx.session)) {
+            if (ctx.session) |session| {
+                if (session.active_window) |window| {
+                    if (window.active_pane) |pane| {
+                        var attempts: usize = 0;
+                        while (attempts < 20) : (attempts += 1) {
+                            sleepMs(50);
+                            self.drainPaneReadable(pane.fd);
+                        }
+                        if (self.session_loop.getPane(pane.id)) |pane_state| {
+                            pane_state.dirty.markAllDirty();
+                            self.renderComposedToClient(client.fd, session, pane_state) catch {};
+                        }
+                    }
+                }
+            }
             try protocol.sendMessage(client.fd, .ready, &.{});
         } else {
             try protocol.sendMessageWithFlags(client.fd, .exit_ack, 0, &.{});
@@ -1046,11 +1067,13 @@ pub const Server = struct {
         const pane = window.active_pane orelse return;
         if (pane.fd < 0 or payload.len == 0) return;
 
+        self.drainPaneReadable(pane.fd);
+
         // Pass escape sequences (multi-byte starting with ESC) directly to the PTY.
         if (payload.len > 1 and payload[0] == 0x1b) {
             // Check for SGR mouse sequence: ESC[<btn;x;yM or ESC[<btn;x;ym
             if (self.parseSgrMouse(payload, window, pane)) return;
-            _ = std.c.write(pane.fd, payload.ptr, payload.len);
+            writePaneAll(pane.fd, payload);
             return;
         }
 
@@ -1069,7 +1092,8 @@ pub const Server = struct {
             if (self.binding_manager.processKey(key, mods)) |command_str| {
                 self.executeBindingCommand(client_idx, command_str);
             } else {
-                _ = std.c.write(pane.fd, @ptrCast(&byte), 1);
+                const out: [1]u8 = .{byte};
+                writePaneAll(pane.fd, &out);
             }
         }
     }
@@ -1205,18 +1229,24 @@ pub const Server = struct {
         try protocol.sendMessageWithFlags(fd, .exit_ack, exit_code, &.{});
     }
 
-    fn handlePtyReadable(self: *Server, fd: std.c.fd_t) void {
-        const pane = self.findPaneByFd(fd) orelse return;
+    fn handlePtyReadable(self: *Server, fd: std.c.fd_t) usize {
+        const pane = self.findPaneByFd(fd) orelse return 0;
         var buf: [4096]u8 = undefined;
         const n = std.c.read(fd, &buf, buf.len);
-        if (n <= 0) {
+        if (n < 0) {
+            switch (std.posix.errno(n)) {
+                .AGAIN, .INTR => return 0,
+                else => return 0,
+            }
+        }
+        if (n == 0) {
             // EOF on PTY — pane process exited.
             if (!pane.flags.exited) {
                 pane.flags.exited = true;
                 self.fireHooks(.pane_exited);
 
                 // Check remain-on-exit: if set, write "Pane is dead" overlay.
-                const session = self.findSessionForPaneFd(fd) orelse return;
+                const session = self.findSessionForPaneFd(fd) orelse return 0;
                 for (session.windows.items) |window| {
                     for (window.panes.items) |wp| {
                         if (wp == pane and window.options.remain_on_exit) {
@@ -1226,12 +1256,12 @@ pub const Server = struct {
                                 @import("input_handler.zig").processBytes(&ps.parser, &ps.screen, dead_msg);
                                 ps.dirty.markAllDirty();
                             }
-                            return; // Don't remove the pane.
+                            return 0; // Don't remove the pane.
                         }
                     }
                 }
             }
-            return;
+            return 0;
         }
 
         const pane_state = self.session_loop.getPane(pane.id);
@@ -1239,7 +1269,7 @@ pub const Server = struct {
             ps.processPtyOutput(buf[0..@intCast(n)]);
         }
 
-        const session = self.findSessionForPaneFd(fd) orelse return;
+        const session = self.findSessionForPaneFd(fd) orelse return 0;
 
         // Auto-rename: update window name from foreground process.
         if (pane.pid > 0) {
@@ -1263,6 +1293,32 @@ pub const Server = struct {
                     protocol.sendMessage(client.fd, .output, buf[0..@intCast(n)]) catch {};
                 };
             }
+        }
+
+        return @intCast(n);
+    }
+
+    fn drainPaneReadable(self: *Server, fd: std.c.fd_t) void {
+        var count: usize = 0;
+        while (count < 32) : (count += 1) {
+            if (self.handlePtyReadable(fd) == 0) break;
+        }
+    }
+
+    fn drainAllPanes(self: *Server) void {
+        for (self.sessions.items) |session| {
+            for (session.windows.items) |window| {
+                for (window.panes.items) |pane| {
+                    if (pane.fd >= 0) self.drainPaneReadable(pane.fd);
+                }
+            }
+        }
+    }
+
+    fn drainAllClients(self: *Server) void {
+        var idx: usize = 0;
+        while (idx < self.clients.items.len) : (idx += 1) {
+            self.drainClient(idx);
         }
     }
 
@@ -1499,7 +1555,7 @@ pub const Server = struct {
                 .func = @ptrCast(&struct {
                     fn handle(ctx: *anyopaque, fd: std.posix.fd_t, _: event_loop_mod.EventType) void {
                         const server: *Server = @ptrCast(@alignCast(ctx));
-                        server.handlePtyReadable(fd);
+                        server.drainPaneReadable(fd);
                     }
                 }.handle),
             };
@@ -1510,6 +1566,7 @@ pub const Server = struct {
             if (builtin.os.tag == .linux) {
                 if (self.uring_loop) |*uring| uring.addFd(pane.fd, .read, cb) catch {};
             }
+            self.drainPaneReadable(pane.fd);
         }
     }
 
@@ -1572,6 +1629,35 @@ const POLLIN: i16 = 0x0001;
 extern "c" fn time(timer: ?*i64) i64;
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+fn sleepMs(ms: u64) void {
+    var ts = std.c.timespec{
+        .sec = @intCast(ms / 1000),
+        .nsec = @intCast((ms % 1000) * std.time.ns_per_ms),
+    };
+    _ = std.c.nanosleep(&ts, null);
+}
+
+fn writePaneAll(fd: std.c.fd_t, data: []const u8) void {
+    var written: usize = 0;
+    while (written < data.len) {
+        const rc = std.c.write(fd, data[written..].ptr, data.len - written);
+        if (rc > 0) {
+            written += @intCast(rc);
+            continue;
+        }
+        if (rc < 0) {
+            switch (std.posix.errno(rc)) {
+                .AGAIN, .INTR => {
+                    sleepMs(1);
+                    continue;
+                },
+                else => return,
+            }
+        }
+        return;
+    }
+}
 
 test "commandAllowsMissingSession includes if-shell" {
     try std.testing.expect(commandAllowsMissingSession("if-shell"));
@@ -2066,4 +2152,344 @@ test "renderComposedToClient uses current window format for the active window" {
 
     try std.testing.expect(std.mem.indexOf(u8, payload, "ACTIVE 0 zsh") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "  0  zsh ") == null);
+}
+
+test "handlePtyReadable ignores EAGAIN on nonblocking panes" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-pty-eagain.sock");
+    defer server.deinit();
+
+    var pty = try Pty.openPty();
+    defer pty.close();
+
+    const session = try Session.init(std.testing.allocator, "demo");
+    try server.sessions.append(server.allocator, session);
+    server.default_session = session;
+
+    const window = try Window.init(std.testing.allocator, "win", 80, 24);
+    try session.addWindow(window);
+    const pane = try Pane.init(std.testing.allocator, 80, 24);
+    pane.fd = pty.master_fd;
+    pty.master_fd = -1;
+    try window.addPane(pane);
+    try server.session_loop.addPane(pane.id, pane.fd, pane.sx, pane.sy);
+
+    try std.testing.expectEqual(@as(usize, 0), server.handlePtyReadable(pane.fd));
+    try std.testing.expect(!pane.flags.exited);
+}
+
+test "createSession drains startup output so pane accepts input" {
+    const script_path = "/tmp/zmux-input-accepts-script.sh";
+    const proof_path = "/tmp/zmux-create-session-proof";
+
+    const script =
+        \\#!/bin/sh
+        \\i=0
+        \\while [ "$i" -lt 400 ]; do
+        \\  printf 'startup-line-%03d................................\n' "$i"
+        \\  i=$((i + 1))
+        \\done
+        \\while IFS= read -r line; do
+        \\  eval "$line"
+        \\done
+        \\
+    ;
+
+    var script_buf: [256]u8 = .{0} ** 256;
+    @memcpy(script_buf[0..script_path.len], script_path);
+    const script_z: [*:0]const u8 = @ptrCast(script_buf[0..script_path.len :0]);
+    _ = std.c.unlink(script_z);
+
+    const fd = std.c.open(script_z, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o755));
+    try std.testing.expect(fd >= 0);
+    defer _ = std.c.close(fd);
+    defer _ = std.c.unlink(script_z);
+    try std.testing.expectEqual(@as(isize, @intCast(script.len)), std.c.write(fd, script.ptr, script.len));
+
+    var proof_buf: [256]u8 = .{0} ** 256;
+    @memcpy(proof_buf[0..proof_path.len], proof_path);
+    const proof_z: [*:0]const u8 = @ptrCast(proof_buf[0..proof_path.len :0]);
+    _ = std.c.unlink(proof_z);
+    defer _ = std.c.unlink(proof_z);
+
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-create-session-input.sock");
+    defer server.deinit();
+
+    const session = try server.createSession("demo", script_path, 80, 24);
+    const pane = session.active_window.?.active_pane.?;
+
+    sleepMs(250);
+    server.drainPaneReadable(pane.fd);
+
+    const command = "touch /tmp/zmux-create-session-proof\r";
+    try std.testing.expectEqual(@as(isize, command.len), std.c.write(pane.fd, command.ptr, command.len));
+
+    sleepMs(250);
+    server.drainPaneReadable(pane.fd);
+
+    try std.testing.expectEqual(@as(c_int, 0), std.c.access(proof_z, 0));
+}
+
+test "handleClientKey forwards input bytes to interactive shells" {
+    const proof_path = "/tmp/zmux-handle-client-key-proof";
+    var proof_buf: [256]u8 = .{0} ** 256;
+    @memcpy(proof_buf[0..proof_path.len], proof_path);
+    const proof_z: [*:0]const u8 = @ptrCast(proof_buf[0..proof_path.len :0]);
+    _ = std.c.unlink(proof_z);
+    defer _ = std.c.unlink(proof_z);
+
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-handle-client-key.sock");
+    defer server.deinit();
+
+    const session = try server.createSession("demo", "/opt/homebrew/bin/zsh", 80, 24);
+    const pane = session.active_window.?.active_pane.?;
+
+    var client_pipe: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&client_pipe));
+    defer _ = std.c.close(client_pipe[0]);
+    defer _ = std.c.close(client_pipe[1]);
+
+    try server.clients.append(server.allocator, .{
+        .fd = client_pipe[1],
+        .session = session,
+        .identified = true,
+        .choose_tree_state = null,
+    });
+
+    var loops: usize = 0;
+    while (loops < 50) : (loops += 1) {
+        sleepMs(100);
+        server.drainPaneReadable(pane.fd);
+    }
+
+    server.handleClientKey(0, "touch /tmp/zmux-handle-client-key-proof\r");
+
+    loops = 0;
+    while (loops < 30) : (loops += 1) {
+        sleepMs(100);
+        server.drainPaneReadable(pane.fd);
+    }
+
+    try std.testing.expectEqual(@as(c_int, 0), std.c.access(proof_z, 0));
+}
+
+test "handleClientKey forwards input bytes even after config load" {
+    const cfg_path = "/tmp/zmux-handle-client-key.conf";
+    const proof_path = "/tmp/zmux-handle-client-key-config-proof";
+
+    var cfg_buf: [256]u8 = .{0} ** 256;
+    @memcpy(cfg_buf[0..cfg_path.len], cfg_path);
+    const cfg_z: [*:0]const u8 = @ptrCast(cfg_buf[0..cfg_path.len :0]);
+    _ = std.c.unlink(cfg_z);
+    defer _ = std.c.unlink(cfg_z);
+
+    const cfg_fd = std.c.open(cfg_z, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
+    try std.testing.expect(cfg_fd >= 0);
+    defer _ = std.c.close(cfg_fd);
+    const cfg = "set -g status-style fg=colour015,bg=colour235\n";
+    try std.testing.expectEqual(@as(isize, cfg.len), std.c.write(cfg_fd, cfg.ptr, cfg.len));
+
+    var proof_buf: [256]u8 = .{0} ** 256;
+    @memcpy(proof_buf[0..proof_path.len], proof_path);
+    const proof_z: [*:0]const u8 = @ptrCast(proof_buf[0..proof_path.len :0]);
+    _ = std.c.unlink(proof_z);
+    defer _ = std.c.unlink(proof_z);
+
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-handle-client-key-config.sock");
+    defer server.deinit();
+    try std.testing.expect(server.loadConfigFile(cfg_path));
+
+    const session = try server.createSession("demo", "/opt/homebrew/bin/zsh", 80, 24);
+    const pane = session.active_window.?.active_pane.?;
+
+    var client_pipe: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&client_pipe));
+    defer _ = std.c.close(client_pipe[0]);
+    defer _ = std.c.close(client_pipe[1]);
+
+    try server.clients.append(server.allocator, .{
+        .fd = client_pipe[1],
+        .session = session,
+        .identified = true,
+        .choose_tree_state = null,
+    });
+
+    var loops: usize = 0;
+    while (loops < 50) : (loops += 1) {
+        sleepMs(100);
+        server.drainPaneReadable(pane.fd);
+    }
+
+    server.handleClientKey(0, "touch /tmp/zmux-handle-client-key-config-proof\r");
+
+    loops = 0;
+    while (loops < 30) : (loops += 1) {
+        sleepMs(100);
+        server.drainPaneReadable(pane.fd);
+    }
+
+    try std.testing.expectEqual(@as(c_int, 0), std.c.access(proof_z, 0));
+}
+
+test "handleClientReadable forwards protocol key payloads to interactive shells" {
+    const proof_path = "/tmp/zmux-handle-client-readable-proof";
+    var proof_buf: [256]u8 = .{0} ** 256;
+    @memcpy(proof_buf[0..proof_path.len], proof_path);
+    const proof_z: [*:0]const u8 = @ptrCast(proof_buf[0..proof_path.len :0]);
+    _ = std.c.unlink(proof_z);
+    defer _ = std.c.unlink(proof_z);
+
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-handle-client-readable.sock");
+    defer server.deinit();
+
+    const session = try server.createSession("demo", "/opt/homebrew/bin/zsh", 80, 24);
+    const pane = session.active_window.?.active_pane.?;
+
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    try server.clients.append(server.allocator, .{
+        .fd = fds[0],
+        .session = session,
+        .identified = true,
+        .choose_tree_state = null,
+    });
+
+    var loops: usize = 0;
+    while (loops < 50) : (loops += 1) {
+        sleepMs(100);
+        server.drainPaneReadable(pane.fd);
+    }
+
+    try protocol.sendMessage(fds[1], .key, "touch /tmp/zmux-handle-client-readable-proof\r");
+    try server.handleClientReadable(0);
+
+    loops = 0;
+    while (loops < 30) : (loops += 1) {
+        sleepMs(100);
+        server.drainPaneReadable(pane.fd);
+    }
+
+    try std.testing.expectEqual(@as(c_int, 0), std.c.access(proof_z, 0));
+}
+
+test "handleClientReadable forwards protocol key payloads after config load" {
+    const cfg_path = "/tmp/zmux-handle-client-readable.conf";
+    const proof_path = "/tmp/zmux-handle-client-readable-config-proof";
+
+    var cfg_buf: [256]u8 = .{0} ** 256;
+    @memcpy(cfg_buf[0..cfg_path.len], cfg_path);
+    const cfg_z: [*:0]const u8 = @ptrCast(cfg_buf[0..cfg_path.len :0]);
+    _ = std.c.unlink(cfg_z);
+    defer _ = std.c.unlink(cfg_z);
+
+    const cfg_fd = std.c.open(cfg_z, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
+    try std.testing.expect(cfg_fd >= 0);
+    defer _ = std.c.close(cfg_fd);
+    const cfg = "set -g status-style fg=colour015,bg=colour235\n";
+    try std.testing.expectEqual(@as(isize, cfg.len), std.c.write(cfg_fd, cfg.ptr, cfg.len));
+
+    var proof_buf: [256]u8 = .{0} ** 256;
+    @memcpy(proof_buf[0..proof_path.len], proof_path);
+    const proof_z: [*:0]const u8 = @ptrCast(proof_buf[0..proof_path.len :0]);
+    _ = std.c.unlink(proof_z);
+    defer _ = std.c.unlink(proof_z);
+
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-handle-client-readable-config.sock");
+    defer server.deinit();
+    try std.testing.expect(server.loadConfigFile(cfg_path));
+
+    const session = try server.createSession("demo", "/opt/homebrew/bin/zsh", 80, 24);
+    const pane = session.active_window.?.active_pane.?;
+
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    try server.clients.append(server.allocator, .{
+        .fd = fds[0],
+        .session = session,
+        .identified = true,
+        .choose_tree_state = null,
+    });
+
+    var loops: usize = 0;
+    while (loops < 50) : (loops += 1) {
+        sleepMs(100);
+        server.drainPaneReadable(pane.fd);
+    }
+
+    try protocol.sendMessage(fds[1], .key, "touch /tmp/zmux-handle-client-readable-config-proof\r");
+    try server.handleClientReadable(0);
+
+    loops = 0;
+    while (loops < 30) : (loops += 1) {
+        sleepMs(100);
+        server.drainPaneReadable(pane.fd);
+    }
+
+    try std.testing.expectEqual(@as(c_int, 0), std.c.access(proof_z, 0));
+}
+
+test "protocol identify then new-session then key input reaches shell" {
+    const proof_path = "/tmp/zmux-identify-new-key-proof";
+    var proof_buf: [256]u8 = .{0} ** 256;
+    @memcpy(proof_buf[0..proof_path.len], proof_path);
+    const proof_z: [*:0]const u8 = @ptrCast(proof_buf[0..proof_path.len :0]);
+    _ = std.c.unlink(proof_z);
+    defer _ = std.c.unlink(proof_z);
+
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-identify-new-key.sock");
+    defer server.deinit();
+
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    try server.clients.append(server.allocator, .{
+        .fd = fds[0],
+        .session = null,
+        .identified = false,
+        .choose_tree_state = null,
+    });
+
+    const identify = protocol.IdentifyMsg{
+        .protocol_version = protocol.version,
+        .pid = std.c.getpid(),
+        .flags = .{},
+        .term_name = .{0} ** 64,
+        .tty_name = .{0} ** 64,
+        .cols = 120,
+        .rows = 24,
+        .xpixel = 0,
+        .ypixel = 0,
+    };
+    try protocol.sendMessage(fds[1], .identify, std.mem.asBytes(&identify));
+    try server.handleClientReadable(0);
+
+    try protocol.sendMessage(fds[1], .command, "new-session\x00-s\x00demo\x00");
+    try server.handleClientReadable(0);
+
+    const session = server.clients.items[0].session orelse return error.ExpectedSession;
+    const pane = session.active_window.?.active_pane.?;
+
+    var loops: usize = 0;
+    while (loops < 50) : (loops += 1) {
+        sleepMs(100);
+        server.drainPaneReadable(pane.fd);
+    }
+
+    try protocol.sendMessage(fds[1], .key, "touch /tmp/zmux-identify-new-key-proof\r");
+    try server.handleClientReadable(0);
+
+    loops = 0;
+    while (loops < 30) : (loops += 1) {
+        sleepMs(100);
+        server.drainPaneReadable(pane.fd);
+    }
+
+    try std.testing.expectEqual(@as(c_int, 0), std.c.access(proof_z, 0));
 }
