@@ -17,8 +17,8 @@ A terminal multiplexer written in [Zig](https://ziglang.org/), feature-compatibl
 - 5 preset layouts: even-horizontal, even-vertical, main-horizontal, main-vertical, tiled
 - Custom layout serialization (tmux-compatible checksum format)
 - Key binding engine with prefix key (default: `C-b`) and key tables
-- tmux-compatible configuration file syntax (`.tmux.conf`)
-- 37 built-in tmux-equivalent commands with 30 aliases (`new-session`, `split-window`, `select-pane`, etc.)
+- tmux-compatible configuration file syntax with startup fallback from `~/.config/zmux/zmux.conf` to legacy `~/.tmux.conf`
+- Dozens of built-in tmux-equivalent commands and aliases (`new-session`, `split-window`, `select-pane`, etc.)
 - Status bar with format string expansion (`#S`, `#W`, `#{pane_current_path}`, etc.)
 - Style parsing (`fg=red,bg=blue,bold`)
 - Copy mode with vi and emacs key bindings, incremental search, visual selection
@@ -165,7 +165,7 @@ src/
     options_table.zig      Default options
 
   cmd/
-    cmd.zig                Command registry + 34 tmux-equivalent commands
+    cmd.zig                Command registry + tmux-equivalent command handlers
 
   keybind/
     bindings.zig           Key tables, prefix key
@@ -211,7 +211,7 @@ src/
 
 ## Configuration
 
-zmux reads `~/.config/zmux/zmux.conf` on startup. The configuration syntax is compatible with tmux:
+zmux reads `~/.config/zmux/zmux.conf` on startup and falls back to `~/.tmux.conf`. The configuration syntax is compatible with tmux:
 
 ```tmux
 # Set prefix key

@@ -180,6 +180,7 @@ pub const BindingManager = struct {
 
         // Window management
         try prefix.bind('c', .{}, "new-window");
+        try prefix.bind('b', .{ .ctrl = true }, "send-prefix");
         try prefix.bind('n', .{}, "next-window");
         try prefix.bind('p', .{}, "previous-window");
         try prefix.bind('l', .{}, "last-window");
@@ -256,6 +257,11 @@ test "default deferred bindings produce explicit messages" {
     var mgr = BindingManager.init(std.testing.allocator);
     defer mgr.deinit();
     try mgr.setupDefaults();
+
+    _ = mgr.processKey('b', .{ .ctrl = true });
+    const send_prefix = mgr.processKey('b', .{ .ctrl = true });
+    try std.testing.expect(send_prefix != null);
+    try std.testing.expectEqualStrings("send-prefix", send_prefix.?);
 
     _ = mgr.processKey('b', .{ .ctrl = true });
     const choose_tree = mgr.processKey('w', .{});

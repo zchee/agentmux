@@ -38,6 +38,7 @@ pub const screen = struct {
 };
 pub const config = struct {
     pub const parser = @import("config/parser.zig");
+    pub const path = @import("config/path.zig");
     pub const options = @import("config/options.zig");
     pub const options_table = @import("config/options_table.zig");
 };
@@ -363,6 +364,7 @@ test {
     _ = screen.screen_mod;
     _ = screen.writer;
     _ = config.parser;
+    _ = config.path;
     _ = config.options;
     _ = config.options_table;
     _ = cmd;

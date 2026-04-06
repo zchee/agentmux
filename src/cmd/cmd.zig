@@ -1,6 +1,7 @@
 const std = @import("std");
 const protocol = @import("../protocol.zig");
 const config_parser = @import("../config/parser.zig");
+const config_path = @import("../config/path.zig");
 const binding_mod = @import("../keybind/bindings.zig");
 const key_string = @import("../keybind/string.zig");
 const paste_mod = @import("../copy/paste.zig");
@@ -572,6 +573,185 @@ fn parsePrefixValue(value: []const u8) ?u21 {
     if (parsed.key >= 'a' and parsed.key <= 'z') return parsed.key - 'a' + 1;
     if (parsed.key >= 'A' and parsed.key <= 'Z') return parsed.key - 'A' + 1;
     return null;
+}
+
+fn isWindowOptionName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "mode-keys") or
+        std.mem.eql(u8, name, "window-status-format") or
+        std.mem.eql(u8, name, "aggressive-resize") or
+        std.mem.eql(u8, name, "remain-on-exit");
+}
+
+fn applyWindowOption(window: *Window, name: []const u8, value: []const u8, is_override: bool) !void {
+    if (std.mem.eql(u8, name, "mode-keys")) {
+        try window.setModeKeys(value);
+        window.options.overrides.mode_keys = is_override;
+        return;
+    }
+    if (std.mem.eql(u8, name, "window-status-format")) {
+        try window.setWindowStatusFormat(value);
+        window.options.overrides.window_status_format = is_override;
+        return;
+    }
+    if (std.mem.eql(u8, name, "aggressive-resize")) {
+        window.options.aggressive_resize = parseBooleanValue(value) orelse return error.InvalidArgs;
+        window.options.overrides.aggressive_resize = is_override;
+        return;
+    }
+    if (std.mem.eql(u8, name, "remain-on-exit")) {
+        window.options.remain_on_exit = parseBooleanValue(value) orelse return error.InvalidArgs;
+        window.options.overrides.remain_on_exit = is_override;
+        return;
+    }
+    return error.CommandFailed;
+}
+
+fn restoreDefaultWindowOption(server: *const Server, window: *Window, name: []const u8) void {
+    if (std.mem.eql(u8, name, "mode-keys")) {
+        applyWindowOption(window, name, server.window_defaults.mode_keys, false) catch {};
+    } else if (std.mem.eql(u8, name, "window-status-format")) {
+        applyWindowOption(window, name, server.window_defaults.window_status_format, false) catch {};
+    } else if (std.mem.eql(u8, name, "aggressive-resize")) {
+        window.options.aggressive_resize = server.window_defaults.aggressive_resize;
+        window.options.overrides.aggressive_resize = false;
+    } else if (std.mem.eql(u8, name, "remain-on-exit")) {
+        window.options.remain_on_exit = server.window_defaults.remain_on_exit;
+        window.options.overrides.remain_on_exit = false;
+    }
+}
+
+fn applyGlobalWindowOption(server: *Server, name: []const u8, value: []const u8) !void {
+    if (std.mem.eql(u8, name, "mode-keys")) {
+        const owned = try server.allocator.dupe(u8, value);
+        server.allocator.free(server.window_defaults.mode_keys);
+        server.window_defaults.mode_keys = owned;
+    } else if (std.mem.eql(u8, name, "window-status-format")) {
+        const owned = try server.allocator.dupe(u8, value);
+        server.allocator.free(server.window_defaults.window_status_format);
+        server.window_defaults.window_status_format = owned;
+    } else if (std.mem.eql(u8, name, "aggressive-resize")) {
+        server.window_defaults.aggressive_resize = parseBooleanValue(value) orelse return error.InvalidArgs;
+    } else if (std.mem.eql(u8, name, "remain-on-exit")) {
+        server.window_defaults.remain_on_exit = parseBooleanValue(value) orelse return error.InvalidArgs;
+    } else {
+        return error.CommandFailed;
+    }
+
+    for (server.sessions.items) |session| {
+        for (session.windows.items) |window| {
+            if (std.mem.eql(u8, name, "mode-keys")) {
+                if (!window.options.overrides.mode_keys) {
+                    applyWindowOption(window, name, value, false) catch {};
+                }
+            } else if (std.mem.eql(u8, name, "window-status-format")) {
+                if (!window.options.overrides.window_status_format) {
+                    applyWindowOption(window, name, value, false) catch {};
+                }
+            } else if (std.mem.eql(u8, name, "aggressive-resize")) {
+                if (!window.options.overrides.aggressive_resize) {
+                    applyWindowOption(window, name, value, false) catch {};
+                }
+            } else if (std.mem.eql(u8, name, "remain-on-exit")) {
+                if (!window.options.overrides.remain_on_exit) {
+                    applyWindowOption(window, name, value, false) catch {};
+                }
+            }
+        }
+    }
+}
+
+fn restoreGlobalWindowOption(server: *Server, name: []const u8) void {
+    if (std.mem.eql(u8, name, "mode-keys")) {
+        const owned = server.allocator.dupe(u8, "emacs") catch return;
+        server.allocator.free(server.window_defaults.mode_keys);
+        server.window_defaults.mode_keys = owned;
+    } else if (std.mem.eql(u8, name, "window-status-format")) {
+        const owned = server.allocator.dupe(u8, "#I:#W#F") catch return;
+        server.allocator.free(server.window_defaults.window_status_format);
+        server.window_defaults.window_status_format = owned;
+    } else if (std.mem.eql(u8, name, "aggressive-resize")) {
+        server.window_defaults.aggressive_resize = false;
+    } else if (std.mem.eql(u8, name, "remain-on-exit")) {
+        server.window_defaults.remain_on_exit = false;
+    } else {
+        return;
+    }
+
+    for (server.sessions.items) |session| {
+        for (session.windows.items) |window| {
+            if (std.mem.eql(u8, name, "mode-keys")) {
+                if (!window.options.overrides.mode_keys) {
+                    restoreDefaultWindowOption(server, window, name);
+                }
+            } else if (std.mem.eql(u8, name, "window-status-format")) {
+                if (!window.options.overrides.window_status_format) {
+                    restoreDefaultWindowOption(server, window, name);
+                }
+            } else if (std.mem.eql(u8, name, "aggressive-resize")) {
+                if (!window.options.overrides.aggressive_resize) {
+                    restoreDefaultWindowOption(server, window, name);
+                }
+            } else if (std.mem.eql(u8, name, "remain-on-exit")) {
+                if (!window.options.overrides.remain_on_exit) {
+                    restoreDefaultWindowOption(server, window, name);
+                }
+            }
+        }
+    }
+}
+
+fn showWindowOptionValue(ctx: *Context, name: []const u8, is_global: bool, is_value_only: bool) CmdError!bool {
+    if (std.mem.eql(u8, name, "mode-keys")) {
+        const value = if (is_global)
+            ctx.server.window_defaults.mode_keys
+        else
+            (ctx.window orelse return CmdError.WindowNotFound).options.mode_keys;
+        if (is_value_only) {
+            try writeOutput(ctx, "{s}\n", .{value});
+        } else {
+            try writeOutput(ctx, "mode-keys {s}\n", .{value});
+        }
+        return true;
+    }
+    if (std.mem.eql(u8, name, "window-status-format")) {
+        const value = if (is_global)
+            ctx.server.window_defaults.window_status_format
+        else
+            (ctx.window orelse return CmdError.WindowNotFound).options.window_status_format;
+        if (is_value_only) {
+            try writeOutput(ctx, "{s}\n", .{value});
+        } else {
+            try writeOutput(ctx, "window-status-format {s}\n", .{value});
+        }
+        return true;
+    }
+    if (std.mem.eql(u8, name, "aggressive-resize")) {
+        const enabled = if (is_global)
+            ctx.server.window_defaults.aggressive_resize
+        else
+            (ctx.window orelse return CmdError.WindowNotFound).options.aggressive_resize;
+        const value = if (enabled) "on" else "off";
+        if (is_value_only) {
+            try writeOutput(ctx, "{s}\n", .{value});
+        } else {
+            try writeOutput(ctx, "aggressive-resize {s}\n", .{value});
+        }
+        return true;
+    }
+    if (std.mem.eql(u8, name, "remain-on-exit")) {
+        const enabled = if (is_global)
+            ctx.server.window_defaults.remain_on_exit
+        else
+            (ctx.window orelse return CmdError.WindowNotFound).options.remain_on_exit;
+        const value = if (enabled) "on" else "off";
+        if (is_value_only) {
+            try writeOutput(ctx, "{s}\n", .{value});
+        } else {
+            try writeOutput(ctx, "remain-on-exit {s}\n", .{value});
+        }
+        return true;
+    }
+    return false;
 }
 
 fn resolvePasteBuffer(ctx: *Context, name: ?[]const u8) CmdError!*paste_mod.PasteBuffer {
@@ -1194,6 +1374,7 @@ fn cmdBreakPane(ctx: *Context, args: []const []const u8) CmdError!void {
     const win_name = window_name orelse std.fmt.bufPrint(&name_buf, "pane-{d}", .{pane.id}) catch "pane";
     const new_window = Window.init(ctx.allocator, win_name, pane.sx, pane.sy) catch return CmdError.OutOfMemory;
     errdefer new_window.deinit();
+    ctx.server.applyWindowDefaults(new_window) catch return CmdError.OutOfMemory;
     new_window.addPane(pane) catch return CmdError.OutOfMemory;
     session.addWindow(new_window) catch return CmdError.OutOfMemory;
 
@@ -1940,13 +2121,22 @@ fn cmdUnbindKey(ctx: *Context, args: []const []const u8) CmdError!void {
 }
 
 fn cmdSetWindowOption(ctx: *Context, args: []const []const u8) CmdError!void {
-    return cmdSetOption(ctx, args);
+    var forwarded: std.ArrayListAligned([]const u8, null) = .empty;
+    defer forwarded.deinit(ctx.allocator);
+
+    try forwarded.append(ctx.allocator, "-w");
+    for (args) |arg| {
+        try forwarded.append(ctx.allocator, arg);
+    }
+    return cmdSetOption(ctx, forwarded.items);
 }
 
 fn cmdShowOptions(ctx: *Context, args: []const []const u8) CmdError!void {
     var is_hooks = false;
     var is_quiet = false;
     var is_value_only = false;
+    var is_window_scope = false;
+    var is_global = false;
     var option_name: ?[]const u8 = null;
 
     var i: usize = 0;
@@ -1957,16 +2147,47 @@ fn cmdShowOptions(ctx: *Context, args: []const []const u8) CmdError!void {
             is_quiet = true;
         } else if (std.mem.eql(u8, args[i], "-v")) {
             is_value_only = true;
+        } else if (std.mem.eql(u8, args[i], "-g")) {
+            is_global = true;
         } else if (std.mem.eql(u8, args[i], "-t") and i + 1 < args.len) {
             i += 1;
-        } else if (std.mem.eql(u8, args[i], "-A") or std.mem.eql(u8, args[i], "-g") or
-            std.mem.eql(u8, args[i], "-p") or std.mem.eql(u8, args[i], "-s") or
-            std.mem.eql(u8, args[i], "-w"))
+        } else if (std.mem.eql(u8, args[i], "-w")) {
+            is_window_scope = true;
+        } else if (std.mem.eql(u8, args[i], "-A") or std.mem.eql(u8, args[i], "-p") or
+            std.mem.eql(u8, args[i], "-s"))
         {
             // scope flags
         } else if (args[i].len > 0 and args[i][0] != '-') {
             option_name = args[i];
         }
+    }
+
+    if (is_window_scope or (option_name != null and isWindowOptionName(option_name.?))) {
+        var target_ctx = resolvedTargetContext(ctx, args);
+        if (option_name) |name| {
+            const found = showWindowOptionValue(&target_ctx, name, is_global, is_value_only) catch |err| switch (err) {
+                CmdError.WindowNotFound => {
+                    if (!is_quiet) return err;
+                    return;
+                },
+                else => return err,
+            };
+            if (!found and !is_quiet) return CmdError.CommandFailed;
+            return;
+        }
+
+        const first = showWindowOptionValue(&target_ctx, "mode-keys", is_global, is_value_only) catch |err| switch (err) {
+            CmdError.WindowNotFound => {
+                if (!is_quiet) return err;
+                return;
+            },
+            else => return err,
+        };
+        if (!first and !is_quiet) return CmdError.CommandFailed;
+        _ = try showWindowOptionValue(&target_ctx, "window-status-format", is_global, is_value_only);
+        _ = try showWindowOptionValue(&target_ctx, "aggressive-resize", is_global, is_value_only);
+        _ = try showWindowOptionValue(&target_ctx, "remain-on-exit", is_global, is_value_only);
+        return;
     }
 
     const session = ctx.session orelse {
@@ -2042,7 +2263,14 @@ fn cmdShowOptions(ctx: *Context, args: []const []const u8) CmdError!void {
 }
 
 fn cmdShowWindowOptions(ctx: *Context, args: []const []const u8) CmdError!void {
-    return cmdShowOptions(ctx, args);
+    var forwarded: std.ArrayListAligned([]const u8, null) = .empty;
+    defer forwarded.deinit(ctx.allocator);
+
+    try forwarded.append(ctx.allocator, "-w");
+    for (args) |arg| {
+        try forwarded.append(ctx.allocator, arg);
+    }
+    return cmdShowOptions(ctx, forwarded.items);
 }
 
 fn cmdSetEnvironment(ctx: *Context, args: []const []const u8) CmdError!void {
@@ -2366,6 +2594,7 @@ fn cmdNewWindow(ctx: *Context, args: []const []const u8) CmdError!void {
     const ts = terminalSize(ctx);
     const window = Window.init(ctx.allocator, name, ts.cols, ts.rows) catch return CmdError.OutOfMemory;
     errdefer window.deinit();
+    ctx.server.applyWindowDefaults(window) catch return CmdError.OutOfMemory;
 
     const pane = spawnWindowPane(ctx.allocator, defaultShellFromContext(ctx), ts.cols, ts.rows) catch |err| switch (err) {
         CmdError.OutOfMemory => return CmdError.OutOfMemory,
@@ -3207,6 +3436,20 @@ fn cmdSetOption(ctx: *Context, args: []const []const u8) CmdError!void {
     if (is_unset) {
         // Restore option to default value.
         const opt_name = if (index < args.len) args[index] else return;
+        if (isWindowOptionName(opt_name)) {
+            if (is_global) {
+                restoreGlobalWindowOption(ctx.server, opt_name);
+                return;
+            }
+
+            const target_ctx = resolvedTargetContext(ctx, args);
+            const window = target_ctx.window orelse {
+                if (!is_quiet) return CmdError.WindowNotFound;
+                return;
+            };
+            restoreDefaultWindowOption(ctx.server, window, opt_name);
+            return;
+        }
         if (is_global) {
             for (ctx.server.sessions.items) |s| {
                 restoreDefaultOption(s, opt_name);
@@ -3223,6 +3466,25 @@ fn cmdSetOption(ctx: *Context, args: []const []const u8) CmdError!void {
         if (!is_quiet) return CmdError.InvalidArgs;
         return;
     };
+
+    if (isWindowOptionName(name)) {
+        if (is_global) {
+            applyGlobalWindowOption(ctx.server, name, val) catch {
+                if (!is_quiet) return CmdError.CommandFailed;
+            };
+            return;
+        }
+
+        const target_ctx = resolvedTargetContext(ctx, args);
+        const window = target_ctx.window orelse {
+            if (!is_quiet) return CmdError.WindowNotFound;
+            return;
+        };
+        applyWindowOption(window, name, val, true) catch {
+            if (!is_quiet) return CmdError.CommandFailed;
+        };
+        return;
+    }
 
     // Global options are applied to all existing sessions and stored as
     // server defaults for future sessions.
@@ -3311,6 +3573,9 @@ fn applySessionOption(session: *Session, name: []const u8, value: []const u8) !v
 }
 
 fn applyGlobalOption(server: *Server, name: []const u8, value: []const u8) !void {
+    if (isWindowOptionName(name)) {
+        return applyGlobalWindowOption(server, name, value);
+    }
     // Apply to all existing sessions.
     for (server.sessions.items) |session| {
         applySessionOption(session, name, value) catch {};
@@ -3344,10 +3609,13 @@ fn cmdSourceFile(ctx: *Context, args: []const []const u8) CmdError!void {
     if (i >= args.len) return CmdError.InvalidArgs;
     const path = args[i];
 
+    const expanded_path = config_path.expandHomePath(ctx.allocator, path) catch return CmdError.OutOfMemory;
+    defer ctx.allocator.free(expanded_path);
+
     var path_buf: [4096]u8 = .{0} ** 4096;
-    if (path.len >= path_buf.len) return CmdError.CommandFailed;
-    @memcpy(path_buf[0..path.len], path);
-    const cpath: [*:0]const u8 = @ptrCast(path_buf[0..path.len :0]);
+    if (expanded_path.len >= path_buf.len) return CmdError.CommandFailed;
+    @memcpy(path_buf[0..expanded_path.len], expanded_path);
+    const cpath: [*:0]const u8 = @ptrCast(path_buf[0..expanded_path.len :0]);
     const fd = std.c.open(cpath, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
     if (fd < 0) {
         if (quiet) return;
@@ -4669,6 +4937,7 @@ fn cmdLinkWindow(ctx: *Context, args: []const []const u8) CmdError!void {
     // Create a new window with the same name in the destination session
     const new_window = Window.init(ctx.allocator, src_window.name, src_window.sx, src_window.sy) catch return CmdError.OutOfMemory;
     errdefer new_window.deinit();
+    ctx.server.applyWindowDefaults(new_window) catch return CmdError.OutOfMemory;
 
     const pane = spawnWindowPane(ctx.allocator, defaultShellFromContext(ctx), new_window.sx, new_window.sy) catch |err| switch (err) {
         CmdError.OutOfMemory => return CmdError.OutOfMemory,

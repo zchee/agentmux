@@ -178,6 +178,118 @@ test "show-options -H shows hooks" {
     try std.testing.expect(std.mem.indexOf(u8, msg.payload, "hook-fired") != null);
 }
 
+test "set-window-option updates active window options" {
+    var server = try initServer();
+    defer server.deinit();
+
+    const session = try makeSession("demo");
+    try server.sessions.append(std.testing.allocator, session);
+
+    var registry = cmd.Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.registerBuiltins();
+
+    var ctx = initContext(&server, session, &registry, null);
+    try registry.execute(&ctx, "set-window-option", &.{ "mode-keys", "vi" });
+    try registry.execute(&ctx, "set-window-option", &.{ "remain-on-exit", "on" });
+
+    const window = session.active_window orelse return error.MissingWindow;
+    try std.testing.expectEqualStrings("vi", window.options.mode_keys);
+    try std.testing.expect(window.options.remain_on_exit);
+}
+
+test "show-window-options -v emits window option value" {
+    var server = try initServer();
+    defer server.deinit();
+
+    const session = try makeSession("demo");
+    try server.sessions.append(std.testing.allocator, session);
+    const window = session.active_window orelse return error.MissingWindow;
+    try window.setModeKeys("vi");
+
+    var registry = cmd.Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.registerBuiltins();
+
+    const fds = try makePipe();
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    var ctx = initContext(&server, session, &registry, fds[1]);
+    try registry.execute(&ctx, "show-window-options", &.{ "-v", "mode-keys" });
+
+    var msg = try protocol.recvMessageAlloc(std.testing.allocator, fds[0]);
+    defer msg.deinit();
+    try std.testing.expectEqualStrings("vi\n", msg.payload);
+}
+
+test "set-option -g window option updates defaults for future windows" {
+    var server = try initServer();
+    defer server.deinit();
+
+    const session = try makeSession("demo");
+    try server.sessions.append(std.testing.allocator, session);
+
+    var registry = cmd.Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.registerBuiltins();
+
+    var ctx = initContext(&server, session, &registry, null);
+    try registry.execute(&ctx, "set-option", &.{ "-g", "mode-keys", "vi" });
+    try std.testing.expectEqualStrings("vi", server.window_defaults.mode_keys);
+
+    const future_window = try Window.init(std.testing.allocator, "future", 80, 24);
+    defer future_window.deinit();
+    try server.applyWindowDefaults(future_window);
+    try std.testing.expectEqualStrings("vi", future_window.options.mode_keys);
+}
+
+test "set-window-option -u restores inherited global default" {
+    var server = try initServer();
+    defer server.deinit();
+
+    const session = try makeSession("demo");
+    try server.sessions.append(std.testing.allocator, session);
+
+    var registry = cmd.Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.registerBuiltins();
+
+    var ctx = initContext(&server, session, &registry, null);
+    try registry.execute(&ctx, "set-option", &.{ "-g", "mode-keys", "vi" });
+    try registry.execute(&ctx, "set-window-option", &.{ "mode-keys", "emacs" });
+    try registry.execute(&ctx, "set-window-option", &.{ "-u", "mode-keys" });
+
+    const window = session.active_window orelse return error.MissingWindow;
+    try std.testing.expectEqualStrings("vi", window.options.mode_keys);
+    try std.testing.expect(!window.options.overrides.mode_keys);
+}
+
+test "set-option -g window option preserves local override" {
+    var server = try initServer();
+    defer server.deinit();
+
+    const session = try makeSession("demo");
+    try server.sessions.append(std.testing.allocator, session);
+    const second = try Window.init(std.testing.allocator, "second", 80, 24);
+    try server.applyWindowDefaults(second);
+    try session.addWindow(second);
+
+    var registry = cmd.Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.registerBuiltins();
+
+    var ctx = initContext(&server, session, &registry, null);
+    try registry.execute(&ctx, "set-window-option", &.{ "window-status-format", "custom-format" });
+    try registry.execute(&ctx, "set-option", &.{ "-g", "window-status-format", "global-format" });
+
+    const active = session.active_window orelse return error.MissingWindow;
+    try std.testing.expectEqualStrings("custom-format", active.options.window_status_format);
+    try std.testing.expect(active.options.overrides.window_status_format);
+    try std.testing.expectEqualStrings("global-format", second.options.window_status_format);
+    try std.testing.expect(!second.options.overrides.window_status_format);
+}
+
 test "set-environment sets variable on session" {
     var server = try initServer();
     defer server.deinit();

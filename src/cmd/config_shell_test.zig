@@ -2,6 +2,7 @@ const std = @import("std");
 const protocol = @import("../protocol.zig");
 const cmd = @import("cmd.zig");
 const BindingManager = @import("../keybind/bindings.zig").BindingManager;
+const key_string = @import("../keybind/string.zig");
 const Server = @import("../server.zig").Server;
 const Session = @import("../session.zig").Session;
 const Window = @import("../window.zig").Window;
@@ -65,6 +66,8 @@ fn makePipe() ![2]std.c.fd_t {
 }
 
 const POLLIN: i16 = 0x0001;
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
 const BlockingWait = struct {
     registry: *const cmd.Registry,
@@ -176,6 +179,68 @@ test "source-file parses escaped semicolons and line continuations for bind-key 
             "source-file ~/.tmux.conf ; display-message reloaded",
             command,
         ),
+        .none => return error.ExpectedCommand,
+    }
+}
+
+test "source-file expands leading tilde paths" {
+    var server = try initServer();
+    defer server.deinit();
+
+    var bindings = BindingManager.init(std.testing.allocator);
+    defer bindings.deinit();
+
+    var registry = cmd.Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.registerBuiltins();
+
+    var home_buf: [128]u8 = undefined;
+    const home_path = try std.fmt.bufPrint(&home_buf, "/tmp/zmux-source-home-{d}", .{std.c.getpid()});
+    const home_z = try std.testing.allocator.dupeZ(u8, home_path);
+    defer std.testing.allocator.free(home_z);
+    if (std.c.mkdir(home_z, 0o755) != 0) {
+        return error.Unexpected;
+    }
+
+    var file_buf: [160]u8 = undefined;
+    const config_path = try std.fmt.bufPrint(&file_buf, "{s}/.tmux.conf", .{home_path});
+    const config_z = try std.testing.allocator.dupeZ(u8, config_path);
+    defer std.testing.allocator.free(config_z);
+    defer {
+        _ = std.c.unlink(config_z);
+        _ = std.c.rmdir(home_z);
+    }
+
+    const fd = std.c.open(config_z, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
+    try std.testing.expect(fd >= 0);
+    defer _ = std.c.close(fd);
+    const content = "bind-key -n C-a display-message expanded\n";
+    try std.testing.expectEqual(@as(isize, @intCast(content.len)), std.c.write(fd, content.ptr, content.len));
+
+    const old_home = if (std.c.getenv("HOME")) |home|
+        try std.testing.allocator.dupeZ(u8, std.mem.sliceTo(home, 0))
+    else
+        null;
+    defer {
+        if (old_home) |home| {
+            _ = setenv("HOME", home, 1);
+            std.testing.allocator.free(home);
+        } else {
+            _ = unsetenv("HOME");
+        }
+    }
+
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home_z, 1));
+
+    var ctx = initContext(&server, null, &registry, null);
+    ctx.binding_manager = &bindings;
+    try registry.execute(&ctx, "source-file", &.{"~/.tmux.conf"});
+
+    const root = bindings.tables.get("root") orelse return error.ExpectedTable;
+    const c_a = key_string.stringToKey("C-a") orelse return error.ExpectedKey;
+    const action = root.lookup(c_a.key, c_a.mods) orelse return error.ExpectedBinding;
+    switch (action) {
+        .command => |command| try std.testing.expectEqualStrings("display-message expanded", command),
         .none => return error.ExpectedCommand,
     }
 }

@@ -10,7 +10,9 @@ const SessionLoop = server_loop.SessionLoop;
 const protocol = @import("protocol.zig");
 const cmd = @import("cmd/cmd.zig");
 const config_parser = @import("config/parser.zig");
+const config_path = @import("config/path.zig");
 const binding_mod = @import("keybind/bindings.zig");
+const key_string = @import("keybind/string.zig");
 const hooks_mod = @import("hooks/hooks.zig");
 const output_mod = @import("terminal/output.zig");
 const status_fmt = @import("status/format.zig");
@@ -59,6 +61,7 @@ pub const Server = struct {
     prompt_history: std.ArrayListAligned([]const u8, null),
     acl_entries: std.ArrayListAligned(AclEntry, null),
     global_default_shell: ?[:0]u8,
+    window_defaults: WindowOptionDefaults,
     config_file: ?[]const u8,
     messages: std.ArrayListAligned([]u8, null),
     marked_pane: ?*Pane,
@@ -78,9 +81,21 @@ pub const Server = struct {
         rows: u16 = 24,
     };
 
+    pub const WindowOptionDefaults = struct {
+        mode_keys: []u8,
+        window_status_format: []u8,
+        aggressive_resize: bool = false,
+        remain_on_exit: bool = false,
+    };
+
     pub fn init(alloc: std.mem.Allocator, socket_path: []const u8) !Server {
         var bm = binding_mod.BindingManager.init(alloc);
         try bm.setupDefaults();
+
+        const default_mode_keys = try alloc.dupe(u8, "emacs");
+        errdefer alloc.free(default_mode_keys);
+        const default_window_status_format = try alloc.dupe(u8, "#I:#W#F");
+        errdefer alloc.free(default_window_status_format);
 
         return .{
             .listen_fd = -1,
@@ -98,6 +113,10 @@ pub const Server = struct {
             .prompt_history = .empty,
             .acl_entries = .empty,
             .global_default_shell = null,
+            .window_defaults = .{
+                .mode_keys = default_mode_keys,
+                .window_status_format = default_window_status_format,
+            },
             .config_file = null,
             .messages = .empty,
             .marked_pane = null,
@@ -141,6 +160,8 @@ pub const Server = struct {
         for (self.acl_entries.items) |entry| self.allocator.free(entry.user);
         self.acl_entries.deinit(self.allocator);
         if (self.global_default_shell) |shell| self.allocator.free(shell);
+        self.allocator.free(self.window_defaults.mode_keys);
+        self.allocator.free(self.window_defaults.window_status_format);
         for (self.messages.items) |msg| self.allocator.free(msg);
         self.messages.deinit(self.allocator);
         if (builtin.os.tag == .macos) {
@@ -150,6 +171,14 @@ pub const Server = struct {
             if (self.uring_loop) |*loop| loop.deinit();
         }
         self.allocator.free(self.socket_path);
+    }
+
+    pub fn applyWindowDefaults(self: *const Server, window: *Window) !void {
+        try window.setModeKeys(self.window_defaults.mode_keys);
+        try window.setWindowStatusFormat(self.window_defaults.window_status_format);
+        window.options.aggressive_resize = self.window_defaults.aggressive_resize;
+        window.options.remain_on_exit = self.window_defaults.remain_on_exit;
+        window.options.overrides = .{};
     }
 
     pub fn addMessage(self: *Server, msg: []const u8) void {
@@ -229,13 +258,17 @@ pub const Server = struct {
     }
 
     /// Load a configuration file by executing it as commands.
-    pub fn loadConfigFile(self: *Server, path: []const u8) void {
+    /// Returns true once a file was successfully opened, even if it was empty.
+    pub fn loadConfigFile(self: *Server, path: []const u8) bool {
+        const expanded_path = config_path.expandHomePath(self.allocator, path) catch return false;
+        defer self.allocator.free(expanded_path);
+
         var path_buf: [4096]u8 = .{0} ** 4096;
-        if (path.len >= path_buf.len) return;
-        @memcpy(path_buf[0..path.len], path);
-        const cpath: [*:0]const u8 = @ptrCast(path_buf[0..path.len :0]);
+        if (expanded_path.len >= path_buf.len) return false;
+        @memcpy(path_buf[0..expanded_path.len], expanded_path);
+        const cpath: [*:0]const u8 = @ptrCast(path_buf[0..expanded_path.len :0]);
         const fd = std.c.open(cpath, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
-        if (fd < 0) return;
+        if (fd < 0) return false;
         defer _ = std.c.close(fd);
 
         var content_buf: [65536]u8 = undefined;
@@ -245,11 +278,11 @@ pub const Server = struct {
             if (n <= 0) break;
             total += @intCast(n);
         }
-        if (total == 0) return;
+        if (total == 0) return true;
 
         var registry = cmd.Registry.init(self.allocator);
         defer registry.deinit();
-        registry.registerBuiltins() catch return;
+        registry.registerBuiltins() catch return true;
 
         var ctx = cmd.Context{
             .server = self,
@@ -262,7 +295,7 @@ pub const Server = struct {
         };
 
         var parser = config_parser.ConfigParser.init(self.allocator, content_buf[0..total]);
-        var commands = parser.parseAll() catch return;
+        var commands = parser.parseAll() catch return true;
         defer {
             for (commands.items) |*command| command.deinit(self.allocator);
             commands.deinit(self.allocator);
@@ -271,20 +304,17 @@ pub const Server = struct {
         for (commands.items) |*command| {
             registry.executeParsed(&ctx, command) catch {};
         }
+        return true;
     }
 
     /// Load config from the standard paths.
     pub fn loadDefaultConfig(self: *Server) void {
         if (self.config_file) |path| {
-            self.loadConfigFile(path);
+            _ = self.loadConfigFile(path);
             return;
         }
-        // Try ~/.config/zmux/zmux.conf
-        const home = std.c.getenv("HOME") orelse return;
-        const home_slice = std.mem.sliceTo(home, 0);
-        var buf: [4096]u8 = undefined;
-        const path = std.fmt.bufPrint(&buf, "{s}/.config/zmux/zmux.conf", .{home_slice}) catch return;
-        self.loadConfigFile(path);
+        if (self.loadConfigFile("~/.config/zmux/zmux.conf")) return;
+        _ = self.loadConfigFile("~/.tmux.conf");
     }
 
     /// Fire all registered hooks for a given event type.
@@ -326,6 +356,7 @@ pub const Server = struct {
 
         const window = try Window.init(self.allocator, name, cols, rows);
         errdefer window.deinit();
+        try self.applyWindowDefaults(window);
 
         const pane = try Pane.init(self.allocator, cols, rows);
         errdefer pane.deinit();
@@ -1334,10 +1365,70 @@ fn commandErrorMessage(err: cmd.CmdError) []const u8 {
 }
 
 const POLLIN: i16 = 0x0001;
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
 test "commandAllowsMissingSession includes if-shell" {
     try std.testing.expect(commandAllowsMissingSession("if-shell"));
     try std.testing.expect(!commandAllowsMissingSession("send-prefix"));
+}
+
+test "loadDefaultConfig falls back to legacy tmux path and stores window defaults" {
+    var home_buf: [128]u8 = undefined;
+    const home_path = try std.fmt.bufPrint(&home_buf, "/tmp/zmux-test-home-{d}", .{std.c.getpid()});
+    const home_z = try std.testing.allocator.dupeZ(u8, home_path);
+    defer std.testing.allocator.free(home_z);
+    if (std.c.mkdir(home_z, 0o755) != 0) {
+        return error.Unexpected;
+    }
+
+    var file_buf: [160]u8 = undefined;
+    const legacy_path = try std.fmt.bufPrint(&file_buf, "{s}/.tmux.conf", .{home_path});
+    const legacy_z = try std.testing.allocator.dupeZ(u8, legacy_path);
+    defer std.testing.allocator.free(legacy_z);
+    defer {
+        _ = std.c.unlink(legacy_z);
+        _ = std.c.rmdir(home_z);
+    }
+
+    const fd = std.c.open(legacy_z, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
+    try std.testing.expect(fd >= 0);
+    defer _ = std.c.close(fd);
+    const content =
+        \\bind-key -n C-a display-message legacy
+        \\set -g mode-keys vi
+        \\
+    ;
+    try std.testing.expectEqual(@as(isize, @intCast(content.len)), std.c.write(fd, content.ptr, content.len));
+
+    const old_home = if (std.c.getenv("HOME")) |home|
+        try std.testing.allocator.dupeZ(u8, std.mem.sliceTo(home, 0))
+    else
+        null;
+    defer {
+        if (old_home) |home| {
+            _ = setenv("HOME", home, 1);
+            std.testing.allocator.free(home);
+        } else {
+            _ = unsetenv("HOME");
+        }
+    }
+
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home_z, 1));
+
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-default-config.sock");
+    defer server.deinit();
+    server.loadDefaultConfig();
+
+    try std.testing.expectEqualStrings("vi", server.window_defaults.mode_keys);
+
+    const root = server.binding_manager.tables.get("root") orelse return error.ExpectedRootTable;
+    const c_a = key_string.stringToKey("C-a") orelse return error.ExpectedKey;
+    const action = root.lookup(c_a.key, c_a.mods) orelse return error.ExpectedBinding;
+    switch (action) {
+        .command => |command| try std.testing.expectEqualStrings("display-message legacy", command),
+        .none => return error.ExpectedCommand,
+    }
 }
 
 test "renderComposedToClient restores single-pane cursor after status bar" {

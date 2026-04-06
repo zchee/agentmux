@@ -135,6 +135,15 @@ pub const Window = struct {
         window_status_format: []u8,
         aggressive_resize: bool = false,
         remain_on_exit: bool = false,
+        overrides: OverrideFlags = .{},
+    };
+
+    pub const OverrideFlags = packed struct(u8) {
+        mode_keys: bool = false,
+        window_status_format: bool = false,
+        aggressive_resize: bool = false,
+        remain_on_exit: bool = false,
+        _padding: u4 = 0,
     };
 
     pub const Flags = packed struct(u16) {
