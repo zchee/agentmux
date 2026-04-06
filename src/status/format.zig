@@ -1,4 +1,5 @@
 const std = @import("std");
+const style_mod = @import("style.zig");
 
 const ClockTm = extern struct {
     tm_sec: i32,
@@ -203,20 +204,98 @@ fn appendVariable(alloc: std.mem.Allocator, result: *std.ArrayListAligned(u8, nu
 
 /// Find the first top-level comma in s, respecting nested #{} depth.
 fn findComma(s: []const u8) ?usize {
-    var depth: usize = 0;
+    var format_depth: usize = 0;
+    var command_depth: usize = 0;
+    var command_quote: ?u8 = null;
+    var escaped = false;
     var j: usize = 0;
     while (j < s.len) {
-        if (s[j] == '#' and j + 1 < s.len and s[j + 1] == '{') {
-            depth += 1;
-            j += 2;
-            continue;
-        }
-        if (s[j] == '}' and depth > 0) {
-            depth -= 1;
+        const ch = s[j];
+
+        if (escaped) {
+            escaped = false;
             j += 1;
             continue;
         }
-        if (s[j] == ',' and depth == 0) return j;
+
+        if (command_quote) |quote| {
+            if (ch == '\\') {
+                escaped = true;
+                j += 1;
+                continue;
+            }
+            if (ch == quote) command_quote = null;
+            j += 1;
+            continue;
+        }
+
+        if (command_depth > 0 and (ch == '"' or ch == '\'' or ch == '`')) {
+            command_quote = ch;
+            j += 1;
+            continue;
+        }
+
+        if (ch == '\\') {
+            escaped = true;
+            j += 1;
+            continue;
+        }
+
+        if (ch == '#' and j + 1 < s.len) {
+            switch (s[j + 1]) {
+                '{' => {
+                    format_depth += 1;
+                    j += 2;
+                    continue;
+                },
+                '(' => {
+                    command_depth += 1;
+                    j += 2;
+                    continue;
+                },
+                '[' => {
+                    if (style_mod.markerEnd(s, j)) |end| {
+                        j = end;
+                        continue;
+                    }
+                },
+                else => {},
+            }
+        }
+
+        if (command_depth > 0) {
+            switch (ch) {
+                '(' => {
+                    command_depth += 1;
+                    j += 1;
+                    continue;
+                },
+                ')' => {
+                    command_depth -= 1;
+                    j += 1;
+                    continue;
+                },
+                else => {},
+            }
+        }
+
+        if (format_depth > 0) {
+            switch (ch) {
+                '{' => {
+                    format_depth += 1;
+                    j += 1;
+                    continue;
+                },
+                '}' => {
+                    format_depth -= 1;
+                    j += 1;
+                    continue;
+                },
+                else => {},
+            }
+        }
+
+        if (ch == ',' and format_depth == 0 and command_depth == 0) return j;
         j += 1;
     }
     return null;
@@ -465,4 +544,32 @@ test "expand shell command preserves inline styles around output" {
     const result = try expand(std.testing.allocator, "#[fg=green]#(printf up)#[default]", &ctx);
     defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("#[fg=green]up#[default]", result);
+}
+
+test "expand conditional ignores commas inside inline style branches" {
+    const ctx = FormatContext{
+        .client_name = "client",
+    };
+    const result = try expand(
+        std.testing.allocator,
+        "#{?client_name,#[fg=colour235#,bg=blue]ON,#[fg=colour238#,bg=colour235]OFF}",
+        &ctx,
+    );
+    defer std.testing.allocator.free(result);
+
+    try std.testing.expectEqualStrings("#[fg=colour235#,bg=blue]ON", result);
+}
+
+test "expand conditional ignores commas inside shell command branches" {
+    const ctx = FormatContext{
+        .session_name = "demo",
+    };
+    const result = try expand(
+        std.testing.allocator,
+        "#{?session_name,#(printf 'a,b'),fallback}",
+        &ctx,
+    );
+    defer std.testing.allocator.free(result);
+
+    try std.testing.expectEqualStrings("a,b", result);
 }

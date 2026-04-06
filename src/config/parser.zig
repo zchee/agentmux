@@ -176,12 +176,94 @@ pub const ConfigParser = struct {
     fn parseDoubleQuoted(self: *ConfigParser) Token {
         self.pos += 1; // skip opening "
         const start = self.pos;
-        while (self.pos < self.source.len and self.source[self.pos] != '"') {
-            if (self.source[self.pos] == '\\' and self.pos + 1 < self.source.len) {
-                self.pos += 2; // skip escape
-            } else {
+        var format_depth: usize = 0;
+        var command_depth: usize = 0;
+        var command_quote: ?u8 = null;
+        var escaped = false;
+
+        while (self.pos < self.source.len) {
+            const ch = self.source[self.pos];
+
+            if (escaped) {
+                escaped = false;
                 self.pos += 1;
+                continue;
             }
+
+            if (command_quote) |quote| {
+                if (ch == '\\' and self.pos + 1 < self.source.len) {
+                    escaped = true;
+                    self.pos += 1;
+                    continue;
+                }
+                if (ch == quote) command_quote = null;
+                self.pos += 1;
+                continue;
+            }
+
+            if (command_depth == 0 and format_depth == 0 and ch == '"') break;
+
+            if (command_depth > 0 and (ch == '"' or ch == '\'' or ch == '`')) {
+                command_quote = ch;
+                self.pos += 1;
+                continue;
+            }
+
+            if (ch == '\\' and self.pos + 1 < self.source.len) {
+                escaped = true;
+                self.pos += 1;
+                continue;
+            }
+
+            if (ch == '#' and self.pos + 1 < self.source.len) {
+                switch (self.source[self.pos + 1]) {
+                    '{' => {
+                        format_depth += 1;
+                        self.pos += 2;
+                        continue;
+                    },
+                    '(' => {
+                        command_depth += 1;
+                        self.pos += 2;
+                        continue;
+                    },
+                    else => {},
+                }
+            }
+
+            if (command_depth > 0) {
+                switch (ch) {
+                    '(' => {
+                        command_depth += 1;
+                        self.pos += 1;
+                        continue;
+                    },
+                    ')' => {
+                        command_depth -= 1;
+                        self.pos += 1;
+                        continue;
+                    },
+                    else => {},
+                }
+            }
+
+            if (format_depth > 0) {
+                switch (ch) {
+                    '{' => {
+                        format_depth += 1;
+                        self.pos += 1;
+                        continue;
+                    },
+                    '}' => {
+                        format_depth -= 1;
+                        self.pos += 1;
+                        continue;
+                    },
+                    else => {},
+                }
+            }
+
+            self.pos += 1;
         }
         const value = self.source[start..self.pos];
         if (self.pos < self.source.len) self.pos += 1; // skip closing "
@@ -361,4 +443,18 @@ test "parse backslash newline continuation in same command" {
     try std.testing.expectEqual(@as(usize, 2), cmds.items[0].args.items.len);
     try std.testing.expectEqualStrings("r", cmds.items[0].args.items[0]);
     try std.testing.expectEqualStrings("send-prefix", cmds.items[0].args.items[1]);
+}
+
+test "parse double quoted status-right preserves shell command quotes" {
+    const alloc = std.testing.allocator;
+    var parser = ConfigParser.init(alloc, "set -g status-right \"#(if true; then printf \"up\"; else printf \"down\"; fi)\"\n");
+    var cmds = try parser.parseAll();
+    defer {
+        for (cmds.items) |*c| c.deinit(alloc);
+        cmds.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), cmds.items.len);
+    try std.testing.expectEqualStrings("status-right", cmds.items[0].args.items[1]);
+    try std.testing.expectEqualStrings("#(if true; then printf \"up\"; else printf \"down\"; fi)", cmds.items[0].args.items[2]);
 }

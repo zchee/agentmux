@@ -343,10 +343,10 @@ pub const Server = struct {
         var i: usize = 0;
         while (i < line.len) {
             if (i + 1 < line.len and line[i] == '#' and line[i + 1] == '[') {
-                if (std.mem.indexOfScalarPos(u8, line, i + 2, ']')) |close| {
-                    active_style = status_style.apply(active_style, line[i .. close + 1]);
+                if (status_style.markerEnd(line, i)) |end| {
+                    active_style = status_style.apply(active_style, line[i..end]);
                     applyStatusStyle(out, active_style);
-                    i = close + 1;
+                    i = end;
                     continue;
                 }
             }
@@ -1991,4 +1991,38 @@ test "renderComposedToClient interprets inline status styles and shell segments"
     try std.testing.expect(std.mem.indexOf(u8, payload, "\x1b[1m\x1b[32m\x1b[48;5;235mLEFT") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "\x1b[0m\x1b[39m\x1b[49m") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "\x1b[38;2;102;99;97m\x1b[49mRIGHT") != null);
+}
+
+test "renderComposedToClient handles tmux-style conditional branches and quoted shell commands" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-render-status-conditional-shell.sock");
+    defer server.deinit();
+
+    const session = try Session.init(std.testing.allocator, "demo");
+    try server.sessions.append(server.allocator, session);
+    server.default_session = session;
+
+    const window = try Window.init(std.testing.allocator, "win", 96, 5);
+    try session.addWindow(window);
+
+    const pane = try Pane.init(std.testing.allocator, 96, 4);
+    try window.addPane(pane);
+    try server.session_loop.addPane(pane.id, -1, pane.sx, pane.sy);
+
+    try session.setStatusLeft("#{?session_name,#[fg=default#,bold#,bg=blue] #S ,#[fg=default#,bg=colour238] #S }");
+    try session.setStatusRight("#[fg=colour255,bold#,bg=default]#(if true; then printf \"up\"; else printf \"down\"; fi)");
+    session.options.status_style = .{
+        .fg = .white,
+        .bg = .black,
+        .attrs = .{},
+    };
+
+    const pane_state = server.session_loop.getPane(pane.id).?;
+    const payload = try renderPayloadForTest(&server, session, pane_state);
+    defer std.testing.allocator.free(payload);
+
+    try std.testing.expect(std.mem.indexOf(u8, payload, "bg=blue]") == null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "#(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, " demo ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "up") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\x1b[44m") != null);
 }

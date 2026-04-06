@@ -2,17 +2,11 @@ const std = @import("std");
 const format = @import("format.zig");
 const style_mod = @import("style.zig");
 
-fn styleMarkerEnd(text: []const u8, start: usize) ?usize {
-    if (start + 1 >= text.len or text[start] != '#' or text[start + 1] != '[') return null;
-    const close = std.mem.indexOfScalarPos(u8, text, start + 2, ']') orelse return null;
-    return close + 1;
-}
-
 fn visibleLen(text: []const u8) usize {
     var len: usize = 0;
     var i: usize = 0;
     while (i < text.len) {
-        if (styleMarkerEnd(text, i)) |end| {
+        if (style_mod.markerEnd(text, i)) |end| {
             i = end;
             continue;
         }
@@ -31,7 +25,7 @@ fn appendVisiblePrefix(
     var visible: usize = 0;
     var i: usize = 0;
     while (i < text.len and visible < max_visible) {
-        if (styleMarkerEnd(text, i)) |end| {
+        if (style_mod.markerEnd(text, i)) |end| {
             try out.appendSlice(alloc, text[i..end]);
             i = end;
             continue;

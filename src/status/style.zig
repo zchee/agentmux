@@ -14,6 +14,95 @@ pub const Style = struct {
     };
 };
 
+/// Return the byte index just after a tmux inline style marker `#[...]`.
+/// Handles nested tmux format and shell-command fragments that may contain
+/// characters which would otherwise look like marker terminators.
+pub fn markerEnd(text: []const u8, start: usize) ?usize {
+    if (start + 1 >= text.len or text[start] != '#' or text[start + 1] != '[') return null;
+
+    var i = start + 2;
+    var format_depth: usize = 0;
+    var command_depth: usize = 0;
+    var command_quote: ?u8 = null;
+    var escaped = false;
+
+    while (i < text.len) : (i += 1) {
+        const ch = text[i];
+
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+
+        if (command_quote) |quote| {
+            if (ch == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (ch == quote) command_quote = null;
+            continue;
+        }
+
+        if (command_depth > 0 and (ch == '"' or ch == '\'' or ch == '`')) {
+            command_quote = ch;
+            continue;
+        }
+
+        if (ch == '\\') {
+            escaped = true;
+            continue;
+        }
+
+        if (ch == '#' and i + 1 < text.len) {
+            switch (text[i + 1]) {
+                '{' => {
+                    format_depth += 1;
+                    i += 1;
+                    continue;
+                },
+                '(' => {
+                    command_depth += 1;
+                    i += 1;
+                    continue;
+                },
+                else => {},
+            }
+        }
+
+        if (command_depth > 0) {
+            switch (ch) {
+                '(' => {
+                    command_depth += 1;
+                    continue;
+                },
+                ')' => {
+                    command_depth -= 1;
+                    continue;
+                },
+                else => {},
+            }
+        }
+
+        if (format_depth > 0) {
+            switch (ch) {
+                '{' => {
+                    format_depth += 1;
+                    continue;
+                },
+                '}' => {
+                    format_depth -= 1;
+                    continue;
+                },
+                else => {},
+            }
+        }
+
+        if (ch == ']' and format_depth == 0 and command_depth == 0) return i + 1;
+    }
+
+    return null;
+}
+
 fn normalizeSpec(spec: []const u8) []const u8 {
     var remaining = spec;
     if (std.mem.startsWith(u8, remaining, "#[")) {
@@ -142,4 +231,9 @@ test "apply accepts tmux escaped commas inside inline fragments" {
     try std.testing.expectEqual(colour.Colour{ .rgb = .{ .r = 0x66, .g = 0x63, .b = 0x61 } }, s.fg);
     try std.testing.expectEqual(colour.Colour{ .palette = 238 }, s.bg);
     try std.testing.expect(s.attrs.bold);
+}
+
+test "markerEnd finds full inline fragment with tmux escaped commas" {
+    const marker = "#[fg=#666361#,bold#,bg=colour238]RIGHT";
+    try std.testing.expectEqual(@as(?usize, 33), markerEnd(marker, 0));
 }
