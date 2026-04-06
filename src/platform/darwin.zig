@@ -150,7 +150,7 @@ pub const GcdEventLoop = if (builtin.os.tag == .macos) struct {
     pub fn init(alloc: std.mem.Allocator) GcdEventLoop {
         return .{
             .allocator = alloc,
-            .queue = gcd.dispatch_queue_create("com.agentmux.eventloop", null),
+            .queue = gcd.dispatch_queue_create("com.zmux.eventloop", null),
             .stop_sem = gcd.dispatch_semaphore_create(0),
             .fd_sources = std.AutoHashMap(posix.fd_t, FdSourcePair).init(alloc),
             .timer_sources = std.AutoHashMap(u64, *TimerContext).init(alloc),

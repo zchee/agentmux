@@ -2,10 +2,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 const log = @import("log.zig");
 
-/// Agentmux allocator wrapper with leak detection.
+/// Zmux allocator wrapper with leak detection.
 /// In debug builds, wraps DebugAllocator for leak tracking.
 /// In release builds, uses the C allocator for performance.
-pub const AgentmuxAllocator = struct {
+pub const ZmuxAllocator = struct {
     backing: BackingAllocator,
 
     const BackingAllocator = if (builtin.mode == .Debug)
@@ -20,15 +20,15 @@ pub const AgentmuxAllocator = struct {
             }
         };
 
-    pub fn init() AgentmuxAllocator {
+    pub fn init() ZmuxAllocator {
         return .{ .backing = if (builtin.mode == .Debug) .init else .{} };
     }
 
-    pub fn allocator(self: *AgentmuxAllocator) std.mem.Allocator {
+    pub fn allocator(self: *ZmuxAllocator) std.mem.Allocator {
         return self.backing.allocator();
     }
 
-    pub fn deinit(self: *AgentmuxAllocator) void {
+    pub fn deinit(self: *ZmuxAllocator) void {
         if (builtin.mode == .Debug) {
             const result = self.backing.deinit();
             if (result == .leak) {

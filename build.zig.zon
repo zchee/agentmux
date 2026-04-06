@@ -1,7 +1,7 @@
 .{
-    .name = .agentmux,
+    .name = .zmux,
     .version = "0.1.0",
-    .fingerprint = 0xe18d41e726bb20e4,
+    .fingerprint = 0x695fb32a4c107a80,
     .minimum_zig_version = "0.14.0",
     .paths = .{
         "build.zig",

@@ -1,4 +1,4 @@
-# agentmux project gitattributes file
+# zmux project gitattributes file
 #  https://github.com/github-linguist/linguist/blob/main/docs/overrides.md
 
 * text=auto eol=lf

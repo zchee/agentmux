@@ -4,7 +4,7 @@
 # src
 
 ## Purpose
-All application source code for agentmux. The root module is `main.zig`, which re-exports every submodule and serves as the entry point for both the binary and the test suite. Top-level files implement the client/server architecture, while subdirectories organize domain-specific functionality.
+All application source code for zmux. The root module is `main.zig`, which re-exports every submodule and serves as the entry point for both the binary and the test suite. Top-level files implement the client/server architecture, while subdirectories organize domain-specific functionality.
 
 ## Key Files
 

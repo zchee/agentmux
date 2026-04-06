@@ -1,4 +1,4 @@
-# agentmux
+# zmux
 
 A terminal multiplexer written in [Zig](https://ziglang.org/), feature-compatible with [tmux](https://github.com/tmux/tmux) and extended with GPU-accelerated rendering, image protocol support, and a native tab UI.
 
@@ -62,7 +62,7 @@ zig build
 ```sh
 zig build run
 # or
-./zig-out/bin/agentmux
+./zig-out/bin/zmux
 ```
 
 ### Test
@@ -74,7 +74,7 @@ zig build test
 ### Command-line options
 
 ```
-agentmux [-2CDuVv] [-c shell-command] [-f config-file] [-L socket-name] [-S socket-path] [command [flags]]
+zmux [-2CDuVv] [-c shell-command] [-f config-file] [-L socket-name] [-S socket-path] [command [flags]]
 
   -2    Force 256 colors
   -C    Start in control mode
@@ -210,7 +210,7 @@ src/
 
 ## Configuration
 
-agentmux reads `~/.agentmux.conf` and `/etc/agentmux.conf` on startup. The configuration syntax is compatible with tmux:
+zmux reads `~/.config/zmux/zmux.conf` on startup. The configuration syntax is compatible with tmux:
 
 ```tmux
 # Set prefix key
@@ -235,7 +235,7 @@ set -g mode-keys vi
 
 ## Differences from tmux
 
-| Feature | tmux | agentmux |
+| Feature | tmux | zmux |
 |---------|------|------|
 | Language | C | Zig |
 | Event loop | libevent | GCD (macOS) / io_uring (Linux) |

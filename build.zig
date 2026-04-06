@@ -35,7 +35,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const exe = b.addExecutable(.{
-        .name = "agentmux",
+        .name = "zmux",
         .root_module = root_mod,
     });
     b.installArtifact(exe);
@@ -46,7 +46,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         run_cmd.addArgs(args);
     }
-    const run_step = b.step("run", "Run agentmux");
+    const run_step = b.step("run", "Run zmux");
     run_step.dependOn(&run_cmd.step);
 
     // Unit tests

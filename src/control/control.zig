@@ -1,7 +1,7 @@
 const std = @import("std");
 
 /// Control mode client state.
-/// In control mode, tmux/agentmux outputs machine-readable notifications
+/// In control mode, tmux/zmux outputs machine-readable notifications
 /// instead of terminal rendering. Used by tmux plugins and integrations.
 pub const ControlClient = struct {
     fd: std.c.fd_t,

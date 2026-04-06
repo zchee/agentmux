@@ -97,7 +97,7 @@ const cmd_config_shell_test = @import("cmd/config_shell_test.zig");
 const cmd_pane_commands_test = @import("cmd/pane_commands_test.zig");
 const log = core.log;
 
-const version_string = "agentmux 0.1.0";
+const version_string = "zmux 0.1.0";
 const default_socket_name = "default";
 
 fn writeStdout(s: []const u8) void {
@@ -177,7 +177,7 @@ fn resolveSocketPath(alloc: std.mem.Allocator, flags: *const Flags) ![]u8 {
     if (flags.socket_path) |path| {
         return try alloc.dupe(u8, path);
     }
-    if (getenv("AGENTMUX_SOCKET_PATH")) |path| {
+    if (getenv("ZMUX_SOCKET_PATH")) |path| {
         return try alloc.dupe(u8, path);
     }
 
@@ -185,12 +185,12 @@ fn resolveSocketPath(alloc: std.mem.Allocator, flags: *const Flags) ![]u8 {
     defer alloc.free(socket_dir);
     const socket_name = if (flags.socket_name) |sn|
         sn
-    else if (getenv("AGENTMUX_SOCKET_NAME")) |sn|
+    else if (getenv("ZMUX_SOCKET_NAME")) |sn|
         sn
     else
         default_socket_name;
 
-    return try std.fmt.allocPrint(alloc, "{s}/agentmux-{d}/{s}", .{
+    return try std.fmt.allocPrint(alloc, "{s}/zmux-{d}/{s}", .{
         socket_dir,
         std.c.getuid(),
         socket_name,
@@ -287,16 +287,16 @@ fn runCommandMode(alloc: std.mem.Allocator, flags: *const Flags, socket_path: []
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    var agentmux_alloc = core.allocator_mod.AgentmuxAllocator.init();
-    defer agentmux_alloc.deinit();
-    const alloc = agentmux_alloc.allocator();
+    var zmux_alloc = core.allocator_mod.ZmuxAllocator.init();
+    defer zmux_alloc.deinit();
+    const alloc = zmux_alloc.allocator();
 
     var flags = parseArgs(alloc, init.args);
     defer flags.deinit(alloc);
 
     if (flags.print_help) {
         writeStdout(
-            \\usage: agentmux [-2CDhuVv] [-c shell-command] [-f file] [-L socket-name]
+            \\usage: zmux [-2CDhuVv] [-c shell-command] [-f file] [-L socket-name]
             \\                [-S socket-path] [command [flags]]
             \\
             \\options:
@@ -313,7 +313,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             \\  -v            Enable verbose logging (repeat for more)
             \\
             \\commands:
-            \\  Run 'agentmux list-commands' for a list of available commands.
+            \\  Run 'zmux list-commands' for a list of available commands.
             \\
         );
         return;

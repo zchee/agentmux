@@ -10,7 +10,7 @@ Shared utility modules used across the entire codebase. Provides the custom allo
 
 | File | Description |
 |------|-------------|
-| `allocator.zig` | `AgentmuxAllocator` u2014 custom allocator wrapping `std.heap.c_allocator` with tracking |
+| `allocator.zig` | `ZmuxAllocator` u2014 custom allocator wrapping `std.heap.c_allocator` with tracking |
 | `colour.zig` | `Colour` union (default/palette/RGB), named constants, `Attributes` flags, tmux-style colour parsing |
 | `environ.zig` | `Environ` u2014 key-value environment variable store with get/set/unset/inherit |
 | `event_loop.zig` | Event loop abstraction u2014 interfaces for platform-specific event loops (GCD, io_uring) |

@@ -7,7 +7,7 @@ const Pane = @import("../window.zig").Pane;
 const protocol = @import("../protocol.zig");
 
 fn initServer() !Server {
-    return Server.init(std.testing.allocator, "/tmp/agentmux-buffer-cmd-test.sock");
+    return Server.init(std.testing.allocator, "/tmp/zmux-buffer-cmd-test.sock");
 }
 
 fn makeSession(server: *Server, name: []const u8) !*Session {

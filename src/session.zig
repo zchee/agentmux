@@ -4,7 +4,7 @@ const Pane = @import("window.zig").Pane;
 const Environ = @import("core/environ.zig").Environ;
 const Style = @import("status/style.zig").Style;
 
-/// An agentmux session. Contains windows and tracks attached clients.
+/// A zmux session. Contains windows and tracks attached clients.
 extern "c" fn time(timer: ?*i64) i64;
 
 pub const Session = struct {

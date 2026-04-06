@@ -1146,7 +1146,11 @@ fn cmdBreakPane(ctx: *Context, args: []const []const u8) CmdError!void {
             const pid = std.fmt.parseInt(u32, spec[1..], 10) catch return CmdError.InvalidArgs;
             var found = false;
             for (window.panes.items) |p| {
-                if (p.id == pid) { pane = p; found = true; break; }
+                if (p.id == pid) {
+                    pane = p;
+                    found = true;
+                    break;
+                }
             }
             if (!found) return CmdError.PaneNotFound;
         } else {
@@ -1163,7 +1167,10 @@ fn cmdBreakPane(ctx: *Context, args: []const []const u8) CmdError!void {
 
     // Remove from source window without destroying
     for (window.panes.items, 0..) |p, idx| {
-        if (p == pane) { _ = window.panes.orderedRemove(idx); break; }
+        if (p == pane) {
+            _ = window.panes.orderedRemove(idx);
+            break;
+        }
     }
     if (window.last_pane == pane) window.last_pane = null;
     if (window.active_pane == pane) {
@@ -1216,7 +1223,10 @@ fn cmdCapturePane(ctx: *Context, args: []const []const u8) CmdError!void {
             if (spec.len >= 2 and spec[0] == '%') {
                 const pid = std.fmt.parseInt(u32, spec[1..], 10) catch return CmdError.InvalidArgs;
                 for (win.panes.items) |p| {
-                    if (p.id == pid) { target_pane = p; break; }
+                    if (p.id == pid) {
+                        target_pane = p;
+                        break;
+                    }
                 }
             }
         } else if (args[i].len > 0 and args[i][0] == '-') {
@@ -1304,11 +1314,18 @@ fn cmdJoinPane(ctx: *Context, args: []const []const u8) CmdError!void {
         if (src_str.len >= 2 and src_str[0] == '%') {
             const pid = std.fmt.parseInt(u32, src_str[1..], 10) catch continue;
             for (win.panes.items) |p| {
-                if (p.id == pid) { src_pane = p; src_window = win; break; }
+                if (p.id == pid) {
+                    src_pane = p;
+                    src_window = win;
+                    break;
+                }
             }
         } else {
             const idx = std.fmt.parseInt(usize, src_str, 10) catch continue;
-            if (idx < win.panes.items.len) { src_pane = win.panes.items[idx]; src_window = win; }
+            if (idx < win.panes.items.len) {
+                src_pane = win.panes.items[idx];
+                src_window = win;
+            }
         }
         if (src_pane != null) break;
     }
@@ -1324,7 +1341,10 @@ fn cmdJoinPane(ctx: *Context, args: []const []const u8) CmdError!void {
 
     // Remove from source without destroying
     for (src_win.panes.items, 0..) |p, idx| {
-        if (p == pane) { _ = src_win.panes.orderedRemove(idx); break; }
+        if (p == pane) {
+            _ = src_win.panes.orderedRemove(idx);
+            break;
+        }
     }
     if (src_win.last_pane == pane) src_win.last_pane = null;
     if (src_win.active_pane == pane) {
@@ -1334,7 +1354,11 @@ fn cmdJoinPane(ctx: *Context, args: []const []const u8) CmdError!void {
 
     if (src_win.panes.items.len == 0) {
         const empty = session.removeWindow(src_win);
-        if (empty) { ctx.session = null; ctx.server.removeSession(session); return; }
+        if (empty) {
+            ctx.session = null;
+            ctx.server.removeSession(session);
+            return;
+        }
     }
 
     dst_window.splitActivePane(pane, direction, percent) catch return CmdError.CommandFailed;
@@ -1370,7 +1394,10 @@ fn cmdPipePane(ctx: *Context, args: []const []const u8) CmdError!void {
             if (spec.len >= 2 and spec[0] == '%') {
                 const pid = std.fmt.parseInt(u32, spec[1..], 10) catch return CmdError.InvalidArgs;
                 for (window.panes.items) |p| {
-                    if (p.id == pid) { target_pane = p; break; }
+                    if (p.id == pid) {
+                        target_pane = p;
+                        break;
+                    }
                 }
             }
         } else if (args[i].len > 0 and args[i][0] != '-') {
@@ -1446,7 +1473,10 @@ fn cmdRespawnPane(ctx: *Context, args: []const []const u8) CmdError!void {
             if (spec.len >= 2 and spec[0] == '%') {
                 const pid = std.fmt.parseInt(u32, spec[1..], 10) catch return CmdError.InvalidArgs;
                 for (window.panes.items) |p| {
-                    if (p.id == pid) { target_pane = p; break; }
+                    if (p.id == pid) {
+                        target_pane = p;
+                        break;
+                    }
                 }
             } else {
                 const idx = std.fmt.parseInt(usize, spec, 10) catch return CmdError.InvalidArgs;
@@ -1488,7 +1518,6 @@ fn cmdRespawnPane(ctx: *Context, args: []const []const u8) CmdError!void {
     pane.pid = pty.pid;
     ctx.server.trackPane(pane, pane.sx, pane.sy) catch return CmdError.CommandFailed;
 }
-
 
 // -- Stub for unimplemented commands --
 
@@ -1936,12 +1965,12 @@ fn cmdShowOptions(ctx: *Context, args: []const []const u8) CmdError!void {
 
     if (is_hooks) {
         const all_hooks = [_]hooks_mod.HookType{
-            .after_new_session,    .after_new_window,   .after_split_window,
-            .after_select_pane,    .after_select_window,.after_resize_pane,
-            .after_rename_session, .after_rename_window,.client_attached,
-            .client_detached,      .client_resized,     .pane_exited,
-            .pane_focus_in,        .pane_focus_out,     .window_linked,
-            .window_unlinked,      .session_closed,     .session_renamed,
+            .after_new_session,    .after_new_window,    .after_split_window,
+            .after_select_pane,    .after_select_window, .after_resize_pane,
+            .after_rename_session, .after_rename_window, .client_attached,
+            .client_detached,      .client_resized,      .pane_exited,
+            .pane_focus_in,        .pane_focus_out,      .window_linked,
+            .window_unlinked,      .session_closed,      .session_renamed,
             .window_renamed,
         };
         for (all_hooks) |ht| {
@@ -2411,7 +2440,10 @@ fn cmdSelectPane(ctx: *Context, args: []const []const u8) CmdError!void {
             // Select last active pane
             if (window.last_pane) |last| {
                 for (window.panes.items) |p| {
-                    if (p == last) { window.selectPane(last); return; }
+                    if (p == last) {
+                        window.selectPane(last);
+                        return;
+                    }
                 }
             }
             window.prevPane();
@@ -2601,10 +2633,16 @@ fn cmdSendKeys(ctx: *Context, args: []const []const u8) CmdError!void {
             i += 1;
         } else if (std.mem.eql(u8, arg, "-X")) {
             i += 1;
-            if (i < args.len) { copy_mode_cmd = args[i]; i += 1; }
+            if (i < args.len) {
+                copy_mode_cmd = args[i];
+                i += 1;
+            }
         } else if (std.mem.eql(u8, arg, "-N")) {
             i += 1;
-            if (i < args.len) { repeat_count = std.fmt.parseInt(u32, args[i], 10) catch 1; i += 1; }
+            if (i < args.len) {
+                repeat_count = std.fmt.parseInt(u32, args[i], 10) catch 1;
+                i += 1;
+            }
         } else if (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "-t")) {
             i += 2;
         } else {
@@ -2863,7 +2901,11 @@ fn cmdKillPane(ctx: *Context, args: []const []const u8) CmdError!void {
             const pane_id = std.fmt.parseInt(u32, spec[1..], 10) catch return CmdError.InvalidArgs;
             var found = false;
             for (window.panes.items) |p| {
-                if (p.id == pane_id) { pane = p; found = true; break; }
+                if (p.id == pane_id) {
+                    pane = p;
+                    found = true;
+                    break;
+                }
             }
             if (!found) return CmdError.PaneNotFound;
         } else {
@@ -2954,7 +2996,10 @@ fn cmdResizePane(ctx: *Context, args: []const []const u8) CmdError!void {
             if (spec.len >= 2 and spec[0] == '%') {
                 const pid = std.fmt.parseInt(u32, spec[1..], 10) catch return CmdError.InvalidArgs;
                 for (window.panes.items) |p| {
-                    if (p.id == pid) { pane = p; break; }
+                    if (p.id == pid) {
+                        pane = p;
+                        break;
+                    }
                 }
             } else if (std.fmt.parseInt(usize, spec, 10) catch null) |idx| {
                 if (idx < window.panes.items.len) pane = window.panes.items[idx];
@@ -3030,7 +3075,9 @@ fn cmdSwapPane(ctx: *Context, args: []const []const u8) CmdError!void {
             fn pane(win: *Window, spec: []const u8) ?*Pane {
                 if (spec.len >= 2 and spec[0] == '%') {
                     const pid = std.fmt.parseInt(u32, spec[1..], 10) catch return null;
-                    for (win.panes.items) |p| { if (p.id == pid) return p; }
+                    for (win.panes.items) |p| {
+                        if (p.id == pid) return p;
+                    }
                 } else {
                     const idx = std.fmt.parseInt(usize, spec, 10) catch return null;
                     if (idx < win.panes.items.len) return win.panes.items[idx];
@@ -3057,10 +3104,18 @@ fn cmdSwapPane(ctx: *Context, args: []const []const u8) CmdError!void {
         window.panes.items[si] = dp;
         window.panes.items[di] = sp;
 
-        const tmp_xoff = sp.xoff; const tmp_yoff = sp.yoff;
-        const tmp_sx = sp.sx; const tmp_sy = sp.sy;
-        sp.xoff = dp.xoff; sp.yoff = dp.yoff; sp.sx = dp.sx; sp.sy = dp.sy;
-        dp.xoff = tmp_xoff; dp.yoff = tmp_yoff; dp.sx = tmp_sx; dp.sy = tmp_sy;
+        const tmp_xoff = sp.xoff;
+        const tmp_yoff = sp.yoff;
+        const tmp_sx = sp.sx;
+        const tmp_sy = sp.sy;
+        sp.xoff = dp.xoff;
+        sp.yoff = dp.yoff;
+        sp.sx = dp.sx;
+        sp.sy = dp.sy;
+        dp.xoff = tmp_xoff;
+        dp.yoff = tmp_yoff;
+        dp.sx = tmp_sx;
+        dp.sy = tmp_sy;
         sp.flags.redraw = true;
         dp.flags.redraw = true;
         return;
@@ -3629,10 +3684,16 @@ fn cmdListKeys(ctx: *Context, args: []const []const u8) CmdError!void {
             i += 1;
         } else if (std.mem.eql(u8, arg, "-P")) {
             i += 1;
-            if (i < args.len) { prefix_str = args[i]; i += 1; }
+            if (i < args.len) {
+                prefix_str = args[i];
+                i += 1;
+            }
         } else if (std.mem.eql(u8, arg, "-T")) {
             i += 1;
-            if (i < args.len) { filter_table = args[i]; i += 1; }
+            if (i < args.len) {
+                filter_table = args[i];
+                i += 1;
+            }
         } else if (arg.len > 0 and arg[0] != '-') {
             filter_key = arg;
             i += 1;
@@ -3873,7 +3934,6 @@ fn cmdIfShell(ctx: *Context, args: []const []const u8) CmdError!void {
     const next_command = if (condition_true) true_command else (false_command orelse return);
     try executeCommandString(ctx, next_command);
 }
-
 
 // -- Hook type helpers --
 
@@ -4131,11 +4191,11 @@ fn cmdShowHooks(ctx: *Context, args: []const []const u8) CmdError!void {
 
     const all_hooks = [_]hooks_mod.HookType{
         .after_new_session,    .after_new_window,    .after_split_window,
-        .after_select_pane,    .after_select_window,  .after_resize_pane,
-        .after_rename_session, .after_rename_window,  .client_attached,
-        .client_detached,      .client_resized,       .pane_exited,
-        .pane_focus_in,        .pane_focus_out,       .window_linked,
-        .window_unlinked,      .session_closed,       .session_renamed,
+        .after_select_pane,    .after_select_window, .after_resize_pane,
+        .after_rename_session, .after_rename_window, .client_attached,
+        .client_detached,      .client_resized,      .pane_exited,
+        .pane_focus_in,        .pane_focus_out,      .window_linked,
+        .window_unlinked,      .session_closed,      .session_renamed,
         .window_renamed,
     };
 
@@ -4616,7 +4676,6 @@ fn cmdUnlinkWindow(ctx: *Context, args: []const []const u8) CmdError!void {
     }
 }
 
-
 test "registry register and find" {
     var reg = Registry.init(std.testing.allocator);
     defer reg.deinit();
@@ -4696,7 +4755,7 @@ test "addChooseTreeEntry stores pane metadata" {
 
 test "if-shell executes success branch" {
     const alloc = std.testing.allocator;
-    var server = try Server.init(alloc, "/tmp/agentmux-if-shell-success.sock");
+    var server = try Server.init(alloc, "/tmp/zmux-if-shell-success.sock");
     defer server.deinit();
 
     var reg = Registry.init(alloc);
@@ -4728,7 +4787,7 @@ test "if-shell executes success branch" {
 
 test "if-shell executes failure branch" {
     const alloc = std.testing.allocator;
-    var server = try Server.init(alloc, "/tmp/agentmux-if-shell-failure.sock");
+    var server = try Server.init(alloc, "/tmp/zmux-if-shell-failure.sock");
     defer server.deinit();
 
     var reg = Registry.init(alloc);
@@ -4760,7 +4819,7 @@ test "if-shell executes failure branch" {
 
 test "send-prefix writes configured prefix byte to active pane" {
     const alloc = std.testing.allocator;
-    var server = try Server.init(alloc, "/tmp/agentmux-send-prefix.sock");
+    var server = try Server.init(alloc, "/tmp/zmux-send-prefix.sock");
     defer server.deinit();
 
     const session = try Session.init(alloc, "demo");
@@ -4797,7 +4856,7 @@ test "send-prefix writes configured prefix byte to active pane" {
 
 test "set-option updates session base index" {
     const alloc = std.testing.allocator;
-    var server = try Server.init(alloc, "/tmp/agentmux-set-base-index.sock");
+    var server = try Server.init(alloc, "/tmp/zmux-set-base-index.sock");
     defer server.deinit();
 
     const session = try Session.init(alloc, "demo");
@@ -4817,7 +4876,7 @@ test "set-option updates session base index" {
 
 test "set-option updates session booleans" {
     const alloc = std.testing.allocator;
-    var server = try Server.init(alloc, "/tmp/agentmux-set-bool.sock");
+    var server = try Server.init(alloc, "/tmp/zmux-set-bool.sock");
     defer server.deinit();
 
     const session = try Session.init(alloc, "demo");
@@ -4839,7 +4898,7 @@ test "set-option updates session booleans" {
 
 test "set-option updates prefix for send-prefix" {
     const alloc = std.testing.allocator;
-    var server = try Server.init(alloc, "/tmp/agentmux-set-prefix.sock");
+    var server = try Server.init(alloc, "/tmp/zmux-set-prefix.sock");
     defer server.deinit();
 
     var session = try Session.init(alloc, "demo");

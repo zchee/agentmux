@@ -1,6 +1,6 @@
 <!-- Generated: 2026-04-06 | Updated: 2026-04-06 -->
 
-# agentmux
+# zmux
 
 ## Purpose
 A Zig terminal multiplexer with a tmux-compatible client/server architecture. Provides session, window, and pane management over Unix domain sockets, with GPU-accelerated rendering via Metal (macOS) and Vulkan (Linux), FreeType font rasterization, and inline image support (Sixel, Kitty).
@@ -25,12 +25,12 @@ A Zig terminal multiplexer with a tmux-compatible client/server architecture. Pr
 ## For AI Agents
 
 ### Working In This Directory
-- Build: `zig build` — output goes to `zig-out/bin/agentmux`
-- Run: `zig build run -- <args>` or `./zig-out/bin/agentmux <args>`
+- Build: `zig build` — output goes to `zig-out/bin/zmux`
+- Run: `zig build run -- <args>` or `./zig-out/bin/zmux <args>`
 - Test: `zig build test` — runs all inline `test` blocks from `src/main.zig`
 - Format: `zig fmt src/**/*.zig`
 - No external Zig dependencies — only system libraries (ncurses, freetype, Metal/Vulkan)
-- Socket env vars: `AGENTMUX_SOCKET_NAME`, `AGENTMUX_SOCKET_PATH`, `AGENTMUX_TMPDIR`
+- Socket env vars: `ZMUX_SOCKET_NAME`, `ZMUX_SOCKET_PATH`, `ZMUX_TMPDIR`
 
 ### Architecture
 - **Client/server model**: `main.zig` → either launches server or acts as one-shot client

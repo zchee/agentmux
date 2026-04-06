@@ -7,7 +7,7 @@ const Window = @import("../window.zig").Window;
 const Pane = @import("../window.zig").Pane;
 
 fn initServer() !Server {
-    return Server.init(std.testing.allocator, "/tmp/agentmux-config-shell-test.sock");
+    return Server.init(std.testing.allocator, "/tmp/zmux-config-shell-test.sock");
 }
 
 fn makeSession(name: []const u8) !*Session {
@@ -53,7 +53,7 @@ test "source-file -q silences missing file error" {
 
     var ctx = initContext(&server, null, &registry, null);
     // Should not return an error even though file doesn't exist
-    try registry.execute(&ctx, "source-file", &.{ "-q", "/tmp/agentmux-nonexistent-file-xyz.conf" });
+    try registry.execute(&ctx, "source-file", &.{ "-q", "/tmp/zmux-nonexistent-file-xyz.conf" });
 }
 
 test "source-file -n does syntax check only without executing" {
@@ -68,7 +68,7 @@ test "source-file -n does syntax check only without executing" {
     try registry.registerBuiltins();
 
     // Write a temp file with a command that would change state if executed
-    const tmp_path = "/tmp/agentmux-syntax-check-test.conf";
+    const tmp_path = "/tmp/zmux-syntax-check-test.conf";
     {
         const content = "set-option base-index 99\n";
         const cpath: [*:0]const u8 = tmp_path;

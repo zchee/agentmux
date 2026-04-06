@@ -19,7 +19,7 @@ OS abstraction layer. Provides platform detection, default socket directory reso
 ### Working In This Directory
 - Platform-specific code uses `builtin.os.tag` for conditional compilation
 - `platform.zig` is the unified entry point; avoid importing `darwin.zig` or `linux.zig` directly from other modules (except `main.zig` and `server.zig` which need the concrete types)
-- Socket directory resolution: `$AGENTMUX_TMPDIR` > `$TMPDIR` > `/tmp`
+- Socket directory resolution: `$ZMUX_TMPDIR` > `$TMPDIR` > `/tmp`
 - Process name lookup: `proc_pidpath` on macOS, `/proc/<pid>/comm` on Linux
 
 ### Testing Requirements

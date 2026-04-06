@@ -9,7 +9,7 @@ const protocol = @import("../protocol.zig");
 // ---------- helpers ----------
 
 fn initServer() !Server {
-    return Server.init(std.testing.allocator, "/tmp/agentmux-pane-cmd-test.sock");
+    return Server.init(std.testing.allocator, "/tmp/zmux-pane-cmd-test.sock");
 }
 
 fn cleanupPaneProcess(pane: *Pane) void {

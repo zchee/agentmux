@@ -7,7 +7,7 @@ const Window = @import("../window.zig").Window;
 const Pane = @import("../window.zig").Pane;
 
 fn initServer() !Server {
-    return Server.init(std.testing.allocator, "/tmp/agentmux-display-test.sock");
+    return Server.init(std.testing.allocator, "/tmp/zmux-display-test.sock");
 }
 
 fn makeSession(name: []const u8) !*Session {

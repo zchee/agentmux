@@ -9,7 +9,7 @@ const Window = @import("../window.zig").Window;
 const Pane = @import("../window.zig").Pane;
 
 fn initServer() !Server {
-    return Server.init(std.testing.allocator, "/tmp/agentmux-tmux-equivalent-tests.sock");
+    return Server.init(std.testing.allocator, "/tmp/zmux-tmux-equivalent-tests.sock");
 }
 
 fn cleanupPaneProcess(pane: *Pane) void {

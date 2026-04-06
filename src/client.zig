@@ -7,7 +7,7 @@ pub const CommandResult = struct {
     attached: bool = false,
 };
 
-/// Client that connects to an agentmux server.
+/// Client that connects to a zmux server.
 pub const Client = struct {
     fd: std.c.fd_t,
     socket_path: []const u8,

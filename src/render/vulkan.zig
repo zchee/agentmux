@@ -137,9 +137,9 @@ pub const VulkanRenderer = if (builtin.os.tag == .linux) struct {
         const app_info = extern struct {
             sType: u32 = 0, // VK_STRUCTURE_TYPE_APPLICATION_INFO
             pNext: ?*anyopaque = null,
-            pApplicationName: [*:0]const u8 = "agentmux",
+            pApplicationName: [*:0]const u8 = "zmux",
             applicationVersion: u32 = 1,
-            pEngineName: [*:0]const u8 = "agentmux",
+            pEngineName: [*:0]const u8 = "zmux",
             engineVersion: u32 = 1,
             apiVersion: u32 = (1 << 22) | (0 << 12), // VK_API_VERSION_1_0
         }{};
@@ -455,13 +455,31 @@ pub const VulkanRenderer = if (builtin.os.tag == .linux) struct {
         .getCellSize = @ptrCast(&getCellSizeVt),
     };
 
-    fn deinitVt(self: *VulkanRenderer) void { self.deinit(); }
-    fn resizeVt(self: *VulkanRenderer, w: u32, h: u32) void { self.resize(w, h); }
-    fn beginFrameVt(self: *VulkanRenderer) void { self.beginFrame(); }
-    fn endFrameVt(self: *VulkanRenderer) void { self.endFrame(); }
-    fn drawCellVt(self: *VulkanRenderer, x: u32, y: u32, cell: *const grid.Cell) void { self.drawCell(x, y, cell); }
-    fn drawRectVt(self: *VulkanRenderer, x: u32, y: u32, w: u32, h: u32, c: colour.Colour) void { self.drawRect(x, y, w, h, c); }
-    fn drawImageVt(self: *VulkanRenderer, x: u32, y: u32, w: u32, h: u32, px: []const u8) void { self.drawImage(x, y, w, h, px); }
-    fn presentVt(self: *VulkanRenderer) void { self.present(); }
-    fn getCellSizeVt(self: *VulkanRenderer) renderer.Renderer.CellSize { return self.getCellSize(); }
+    fn deinitVt(self: *VulkanRenderer) void {
+        self.deinit();
+    }
+    fn resizeVt(self: *VulkanRenderer, w: u32, h: u32) void {
+        self.resize(w, h);
+    }
+    fn beginFrameVt(self: *VulkanRenderer) void {
+        self.beginFrame();
+    }
+    fn endFrameVt(self: *VulkanRenderer) void {
+        self.endFrame();
+    }
+    fn drawCellVt(self: *VulkanRenderer, x: u32, y: u32, cell: *const grid.Cell) void {
+        self.drawCell(x, y, cell);
+    }
+    fn drawRectVt(self: *VulkanRenderer, x: u32, y: u32, w: u32, h: u32, c: colour.Colour) void {
+        self.drawRect(x, y, w, h, c);
+    }
+    fn drawImageVt(self: *VulkanRenderer, x: u32, y: u32, w: u32, h: u32, px: []const u8) void {
+        self.drawImage(x, y, w, h, px);
+    }
+    fn presentVt(self: *VulkanRenderer) void {
+        self.present();
+    }
+    fn getCellSizeVt(self: *VulkanRenderer) renderer.Renderer.CellSize {
+        return self.getCellSize();
+    }
 } else void;
