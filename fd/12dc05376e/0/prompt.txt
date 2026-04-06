@@ -1,0 +1,17 @@
+Cleanup 9048de5a3f5b...d3eae4b94c44 commits
+
+---
+
+Fix `zig build --summary all` failed.
+
+---
+
+When `./zig-out/bin/agentmux new -s test`, the cursor style is shape. Fix to use the block style
+
+---
+
+Replace to `agentmux` repository name to `zmux`
+
+---
+
+$autopilot Replace to `agentmux` repository name to `zmux`
