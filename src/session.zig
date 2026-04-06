@@ -55,7 +55,9 @@ pub const Session = struct {
 
         const owned_name = try alloc.dupe(u8, name);
         errdefer alloc.free(owned_name);
-        const default_shell = try alloc.dupeZ(u8, "/bin/sh");
+        const shell_env = std.c.getenv("SHELL");
+        const shell_str = if (shell_env) |sh| std.mem.sliceTo(sh, 0) else "/bin/sh";
+        const default_shell = try alloc.dupeZ(u8, if (shell_str.len > 0) shell_str else "/bin/sh");
         errdefer alloc.free(default_shell);
         const prefix_string = try alloc.dupe(u8, "C-b");
         errdefer alloc.free(prefix_string);

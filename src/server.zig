@@ -169,6 +169,18 @@ pub const Server = struct {
         _ = std.c.chmod(@ptrCast(path_buf[0..self.socket_path.len :0]), 0o700);
 
         self.running = true;
+
+        // Set default shell from $SHELL (like tmux).
+        if (self.global_default_shell == null) {
+            const shell_env = std.c.getenv("SHELL");
+            if (shell_env) |s| {
+                const shell_slice = std.mem.sliceTo(s, 0);
+                if (shell_slice.len > 0) {
+                    self.global_default_shell = self.allocator.dupeZ(u8, shell_slice) catch null;
+                }
+            }
+        }
+
         log.info("server listening on {s}", .{self.socket_path});
     }
 
