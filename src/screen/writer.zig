@@ -137,27 +137,47 @@ pub const Writer = struct {
         }
     }
 
-    /// Insert n blank lines at the cursor, scrolling down.
+    /// Insert n blank lines at the cursor, scrolling down within [cy..rlower].
     pub fn insertLines(self: *Writer, n: u32) void {
         if (self.s.cy < self.s.rupper or self.s.cy > self.s.rlower) return;
+        const count = @min(n, self.s.rlower - self.s.cy + 1);
         var i: u32 = 0;
-        while (i < n) : (i += 1) {
-            // Shift lines down within scroll region
-            var y = self.s.rlower;
-            while (y > self.s.cy) : (y -= 1) {
-                // Copy line y-1 to y (simplified: just clear)
-                self.s.grid.clearLine(y);
+        while (i < count) : (i += 1) {
+            // Shift lines down: copy each line from (rlower-1) down to cy
+            // into the line below it, then clear cy.
+            if (self.s.rlower > self.s.cy) {
+                var y = self.s.rlower;
+                while (y > self.s.cy) : (y -= 1) {
+                    const src_line = self.s.grid.getLine(y - 1);
+                    const dst_line = self.s.grid.getLine(y);
+                    var x: u32 = 0;
+                    while (x < self.s.grid.cols) : (x += 1) {
+                        dst_line.getCell(x).* = src_line.getCell(x).*;
+                    }
+                }
             }
             self.s.grid.clearLine(self.s.cy);
         }
     }
 
-    /// Delete n lines at the cursor, scrolling up.
+    /// Delete n lines at the cursor, scrolling up within [cy..rlower].
     pub fn deleteLines(self: *Writer, n: u32) void {
         if (self.s.cy < self.s.rupper or self.s.cy > self.s.rlower) return;
+        const count = @min(n, self.s.rlower - self.s.cy + 1);
         var i: u32 = 0;
-        while (i < n) : (i += 1) {
-            self.s.grid.clearLine(self.s.cy);
+        while (i < count) : (i += 1) {
+            // Shift lines up: copy each line from (cy+1) to rlower
+            // into the line above it, then clear rlower.
+            var y = self.s.cy;
+            while (y < self.s.rlower) : (y += 1) {
+                const src_line = self.s.grid.getLine(y + 1);
+                const dst_line = self.s.grid.getLine(y);
+                var x: u32 = 0;
+                while (x < self.s.grid.cols) : (x += 1) {
+                    dst_line.getCell(x).* = src_line.getCell(x).*;
+                }
+            }
+            self.s.grid.clearLine(self.s.rlower);
         }
     }
 
@@ -194,6 +214,16 @@ pub const Writer = struct {
         // Clear vacated cells at end
         while (x < cols) : (x += 1) {
             line.cells[x] = Cell.blank;
+        }
+    }
+
+    /// Erase n characters at the cursor (replace with blanks, don't shift).
+    pub fn eraseChars(self: *Writer, n: u32) void {
+        const line = self.s.grid.getLine(self.s.cy);
+        const cols = self.s.grid.cols;
+        var i: u32 = 0;
+        while (i < n and self.s.cx + i < cols) : (i += 1) {
+            line.cells[self.s.cx + i] = Cell.blank;
         }
     }
 
@@ -246,4 +276,77 @@ test "writer eraseToEol" {
     try std.testing.expectEqual(@as(u21, 'E'), screen.grid.getCell(4, 0).codepoint);
     // Rest should be blank
     try std.testing.expectEqual(@as(u21, ' '), screen.grid.getCell(5, 0).codepoint);
+}
+
+test "writer insertLines shifts content down" {
+    var screen = Screen.init(std.testing.allocator, 5, 5, 0);
+    defer screen.deinit();
+    var w = Writer.init(&screen);
+
+    // Write identifiable content on each row.
+    w.writeString("AAAAA"); // row 0
+    w.carriageReturn();
+    w.linefeed();
+    w.writeString("BBBBB"); // row 1
+    w.carriageReturn();
+    w.linefeed();
+    w.writeString("CCCCC"); // row 2
+    w.carriageReturn();
+    w.linefeed();
+    w.writeString("DDDDD"); // row 3
+    w.carriageReturn();
+    w.linefeed();
+    w.writeString("EEEEE"); // row 4
+
+    // Move cursor to row 1, insert 1 line.
+    screen.cy = 1;
+    screen.cx = 0;
+    w.insertLines(1);
+
+    // Row 0 unchanged.
+    try std.testing.expectEqual(@as(u21, 'A'), screen.grid.getCell(0, 0).codepoint);
+    // Row 1 should be blank (inserted).
+    try std.testing.expectEqual(@as(u21, ' '), screen.grid.getCell(0, 1).codepoint);
+    // Row 2 should have old row 1 content (B).
+    try std.testing.expectEqual(@as(u21, 'B'), screen.grid.getCell(0, 2).codepoint);
+    // Row 3 should have old row 2 content (C).
+    try std.testing.expectEqual(@as(u21, 'C'), screen.grid.getCell(0, 3).codepoint);
+    // Row 4 should have old row 3 content (D). Old row 4 (E) is pushed off.
+    try std.testing.expectEqual(@as(u21, 'D'), screen.grid.getCell(0, 4).codepoint);
+}
+
+test "writer deleteLines shifts content up" {
+    var screen = Screen.init(std.testing.allocator, 5, 5, 0);
+    defer screen.deinit();
+    var w = Writer.init(&screen);
+
+    w.writeString("AAAAA");
+    w.carriageReturn();
+    w.linefeed();
+    w.writeString("BBBBB");
+    w.carriageReturn();
+    w.linefeed();
+    w.writeString("CCCCC");
+    w.carriageReturn();
+    w.linefeed();
+    w.writeString("DDDDD");
+    w.carriageReturn();
+    w.linefeed();
+    w.writeString("EEEEE");
+
+    // Move cursor to row 1, delete 1 line.
+    screen.cy = 1;
+    screen.cx = 0;
+    w.deleteLines(1);
+
+    // Row 0 unchanged.
+    try std.testing.expectEqual(@as(u21, 'A'), screen.grid.getCell(0, 0).codepoint);
+    // Row 1 should have old row 2 content (C).
+    try std.testing.expectEqual(@as(u21, 'C'), screen.grid.getCell(0, 1).codepoint);
+    // Row 2 should have old row 3 content (D).
+    try std.testing.expectEqual(@as(u21, 'D'), screen.grid.getCell(0, 2).codepoint);
+    // Row 3 should have old row 4 content (E).
+    try std.testing.expectEqual(@as(u21, 'E'), screen.grid.getCell(0, 3).codepoint);
+    // Row 4 should be blank (cleared).
+    try std.testing.expectEqual(@as(u21, ' '), screen.grid.getCell(0, 4).codepoint);
 }
