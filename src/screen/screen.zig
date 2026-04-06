@@ -158,9 +158,25 @@ pub const Screen = struct {
     }
 
     /// Scroll the scroll region down by n lines.
+    /// Shifts lines within [rupper..rlower] downward and clears the top.
     pub fn scrollDown(self: *Screen, n: u32) void {
-        _ = .{ self, n };
-        // TODO: implement scroll down within region
+        var i: u32 = 0;
+        while (i < n) : (i += 1) {
+            // Shift lines down: copy each line from (rlower-1) down to rupper
+            // into the line below it, then clear rupper.
+            if (self.rlower > self.rupper) {
+                var y = self.rlower;
+                while (y > self.rupper) : (y -= 1) {
+                    const src_line = self.grid.getLine(y - 1);
+                    const dst_line = self.grid.getLine(y);
+                    var x: u32 = 0;
+                    while (x < self.grid.cols) : (x += 1) {
+                        dst_line.getCell(x).* = src_line.getCell(x).*;
+                    }
+                }
+            }
+            self.grid.clearLine(self.rupper);
+        }
     }
 
     /// Save cursor state (DECSC).
