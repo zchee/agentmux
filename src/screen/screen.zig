@@ -144,15 +144,25 @@ pub const Screen = struct {
     }
 
     /// Scroll the scroll region up by n lines.
+    /// Shifts lines within [rupper..rlower] upward and clears the bottom.
     pub fn scrollUp(self: *Screen, n: u32) void {
         var i: u32 = 0;
         while (i < n) : (i += 1) {
-            if (self.rupper == 0) {
-                // Scroll into history
+            if (self.rupper == 0 and self.rlower == self.grid.rows -| 1) {
+                // Full-screen scroll: push top line into history.
                 self.grid.scrollUp(1);
             } else {
-                // Move lines within scroll region
-                self.grid.clearLine(self.rupper);
+                // Scroll within region: shift lines up, clear bottom.
+                var y = self.rupper;
+                while (y < self.rlower) : (y += 1) {
+                    const src_line = self.grid.getLine(y + 1);
+                    const dst_line = self.grid.getLine(y);
+                    var x: u32 = 0;
+                    while (x < self.grid.cols) : (x += 1) {
+                        dst_line.getCell(x).* = src_line.getCell(x).*;
+                    }
+                }
+                self.grid.clearLine(self.rlower);
             }
         }
     }

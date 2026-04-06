@@ -18,6 +18,7 @@ const ChooseTreeItem = @import("../window.zig").ChooseTreeItem;
 const CellType = @import("../layout/layout.zig").CellType;
 const layout_set = @import("../layout/set.zig");
 const format_mod = @import("../status/format.zig");
+const clipboard_mod = @import("../clipboard.zig");
 const Server = @import("../server.zig").Server;
 
 /// Command execution context.
@@ -257,6 +258,18 @@ fn writeOutput(ctx: *Context, comptime fmt: []const u8, args: anytype) CmdError!
     var buf: [1024]u8 = undefined;
     const message = std.fmt.bufPrint(&buf, fmt, args) catch return CmdError.CommandFailed;
     try writeReplyMessage(ctx, .output, message);
+}
+
+/// Send clipboard data to all clients attached to the session via OSC 52.
+fn sendOsc52Clipboard(ctx: *Context, data: []const u8) void {
+    const session = ctx.session orelse return;
+    const osc52 = clipboard_mod.Clipboard.encodeOsc52Set(ctx.allocator, data) catch return;
+    defer ctx.allocator.free(osc52);
+    for (ctx.server.clients.items) |client| {
+        if (client.session == session and client.fd >= 0) {
+            protocol.sendMessage(client.fd, .output, osc52) catch {};
+        }
+    }
 }
 
 fn spawnWindowPane(alloc: std.mem.Allocator, shell: [:0]const u8, sx: u32, sy: u32) CmdError!*Pane {
@@ -685,6 +698,8 @@ fn handleCopyModeAction(ctx: *Context, pane: *Pane, pane_state: anytype, action:
             const text = extractCopySelection(ctx.allocator, pane_state, &state) catch return CmdError.CommandFailed;
             defer ctx.allocator.free(text);
             ctx.server.paste_stack.push(text, null) catch return CmdError.OutOfMemory;
+            // Send to system clipboard via OSC 52.
+            sendOsc52Clipboard(ctx, text);
             pane.copy_state = null;
         },
     }
@@ -2068,8 +2083,10 @@ fn cmdLoadBuffer(ctx: *Context, args: []const []const u8) CmdError!void {
     if (args.len == 0) return CmdError.InvalidArgs;
     const path = args[args.len - 1];
     const buffer_name = parseNamedOption(args, "-b");
-    // -w: send to clipboard via OSC 52 (not yet wired to output path, data still pushed to stack)
-    // -t target-client: uses server default (multi-client targeting not yet implemented)
+    var send_clipboard = false;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "-w")) send_clipboard = true;
+    }
 
     // Support '-' for reading from stdin (fd 0).
     const is_stdin = std.mem.eql(u8, path, "-");
@@ -2096,6 +2113,7 @@ fn cmdLoadBuffer(ctx: *Context, args: []const []const u8) CmdError!void {
     if (total == 0) return;
 
     ctx.server.paste_stack.push(content_buf[0..total], buffer_name) catch return CmdError.OutOfMemory;
+    if (send_clipboard) sendOsc52Clipboard(ctx, content_buf[0..total]);
 }
 
 fn cmdSaveBuffer(ctx: *Context, args: []const []const u8) CmdError!void {
@@ -3072,7 +3090,18 @@ fn cmdSetOption(ctx: *Context, args: []const []const u8) CmdError!void {
         return;
     }
 
-    if (is_unset) return; // unset restores default; no-op for now
+    if (is_unset) {
+        // Restore option to default value.
+        const opt_name = if (index < args.len) args[index] else return;
+        if (is_global) {
+            for (ctx.server.sessions.items) |s| {
+                restoreDefaultOption(s, opt_name);
+            }
+        } else if (ctx.session) |s| {
+            restoreDefaultOption(s, opt_name);
+        }
+        return;
+    }
 
     const name = args[index];
     const value: ?[]const u8 = if (index + 1 < args.len) args[index + 1] else null;
@@ -3097,6 +3126,32 @@ fn cmdSetOption(ctx: *Context, args: []const []const u8) CmdError!void {
     applySessionOption(session, name, val) catch {
         if (!is_quiet) return CmdError.CommandFailed;
     };
+}
+
+fn restoreDefaultOption(session: *Session, name: []const u8) void {
+    if (std.mem.eql(u8, name, "base-index")) {
+        session.options.base_index = 0;
+    } else if (std.mem.eql(u8, name, "mouse")) {
+        session.options.mouse = false;
+    } else if (std.mem.eql(u8, name, "status")) {
+        session.options.status = true;
+    } else if (std.mem.eql(u8, name, "prefix")) {
+        session.options.prefix_key = 0x02; // C-b
+    } else if (std.mem.eql(u8, name, "visual-activity")) {
+        session.options.visual_activity = false;
+    } else if (std.mem.eql(u8, name, "default-shell")) {
+        session.setDefaultShell("/bin/sh") catch {};
+    } else if (std.mem.eql(u8, name, "status-left")) {
+        const alloc = session.allocator;
+        const owned = alloc.dupe(u8, "[#S]") catch return;
+        alloc.free(session.options.status_left);
+        session.options.status_left = owned;
+    } else if (std.mem.eql(u8, name, "status-right")) {
+        const alloc = session.allocator;
+        const owned = alloc.dupe(u8, "#H") catch return;
+        alloc.free(session.options.status_right);
+        session.options.status_right = owned;
+    }
 }
 
 fn applySessionOption(session: *Session, name: []const u8, value: []const u8) !void {
@@ -3312,11 +3367,11 @@ fn cmdListPanes(ctx: *Context, args: []const []const u8) CmdError!void {
 
 fn cmdSetBuffer(ctx: *Context, args: []const []const u8) CmdError!void {
     var append = false;
+    var send_clipboard = false;
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "-a")) append = true;
+        if (std.mem.eql(u8, arg, "-w")) send_clipboard = true;
     }
-    // -w: send to clipboard via OSC 52 (not yet wired, data pushed to stack only)
-    // -t target-client: uses server default (multi-client targeting not yet implemented)
 
     const name = parseNamedOption(args, "-b");
     const new_name = parseNamedOption(args, "-n");
@@ -3363,6 +3418,7 @@ fn cmdSetBuffer(ctx: *Context, args: []const []const u8) CmdError!void {
     }
 
     ctx.server.paste_stack.push(buffer_data, name) catch return CmdError.OutOfMemory;
+    if (send_clipboard) sendOsc52Clipboard(ctx, buffer_data);
 }
 
 fn cmdPasteBuffer(ctx: *Context, args: []const []const u8) CmdError!void {
