@@ -284,7 +284,9 @@ pub const Server = struct {
         try session.addWindow(window);
         try self.sessions.append(self.allocator, session);
         if (self.default_session == null) self.default_session = session;
-        try self.session_loop.addPane(pane.id, pane.fd, cols, rows);
+        // Use trackPane to both register the pane for I/O processing
+        // and monitor its PTY fd with the platform event loop.
+        try self.trackPane(pane, cols, rows);
 
         self.fireHooks(.after_new_session);
 
