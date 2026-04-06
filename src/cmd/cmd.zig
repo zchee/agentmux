@@ -285,6 +285,164 @@ fn parseTargetWindow(args: []const []const u8) ?u32 {
     return null;
 }
 
+/// Resolved target from tmux target syntax.
+const ResolvedTarget = struct {
+    session: ?*Session = null,
+    window: ?*Window = null,
+    pane: ?*Pane = null,
+};
+
+/// Resolve a tmux-style target string: [session:][window][.pane]
+/// Supports:
+///   - Session by name or `$` (last)
+///   - Window by index, name, `!` (last), `+` (next), `-` (prev)
+///   - Pane by index, `%id`, `!` (last), `+` (next), `-` (prev)
+fn resolveTarget(server: *Server, current: *const Context, target: []const u8) ResolvedTarget {
+    var result = ResolvedTarget{
+        .session = current.session,
+        .window = current.window,
+        .pane = current.pane,
+    };
+    if (target.len == 0) return result;
+
+    var session_part: ?[]const u8 = null;
+    var window_part: ?[]const u8 = null;
+    var pane_part: ?[]const u8 = null;
+
+    // Split on ':' for session:window.pane
+    var rest = target;
+    if (std.mem.indexOfScalar(u8, rest, ':')) |colon| {
+        session_part = rest[0..colon];
+        rest = rest[colon + 1 ..];
+    }
+    // Split on '.' for window.pane
+    if (std.mem.indexOfScalar(u8, rest, '.')) |dot| {
+        window_part = rest[0..dot];
+        pane_part = rest[dot + 1 ..];
+    } else if (rest.len > 0) {
+        window_part = rest;
+    }
+
+    // Resolve session
+    if (session_part) |sp| {
+        if (sp.len > 0) {
+            result.session = resolveSessionToken(server, current.session, sp);
+        }
+    }
+
+    const session = result.session orelse return result;
+
+    // Resolve window
+    if (window_part) |wp| {
+        if (wp.len > 0) {
+            result.window = resolveWindowToken(session, wp);
+        }
+    }
+
+    const window = result.window orelse return result;
+
+    // Resolve pane
+    if (pane_part) |pp| {
+        if (pp.len > 0) {
+            result.pane = resolvePaneToken(window, pp);
+        }
+    }
+
+    return result;
+}
+
+fn resolveSessionToken(server: *Server, current: ?*Session, token: []const u8) ?*Session {
+    if (std.mem.eql(u8, token, "$")) {
+        // Last session
+        return if (server.sessions.items.len > 0) server.sessions.items[server.sessions.items.len - 1] else null;
+    }
+    // Try by name
+    if (server.findSession(token)) |s| return s;
+    // Try by id ($N)
+    if (token.len > 1 and token[0] == '$') {
+        const id = std.fmt.parseInt(u32, token[1..], 10) catch return current;
+        for (server.sessions.items) |s| {
+            if (s.id == id) return s;
+        }
+    }
+    return current;
+}
+
+fn resolveWindowToken(session: *Session, token: []const u8) ?*Window {
+    if (std.mem.eql(u8, token, "!")) {
+        return session.last_window;
+    }
+    if (std.mem.eql(u8, token, "+")) {
+        if (session.active_window) |aw| {
+            for (session.windows.items, 0..) |w, i| {
+                if (w == aw) return session.windows.items[(i + 1) % session.windows.items.len];
+            }
+        }
+        return session.active_window;
+    }
+    if (std.mem.eql(u8, token, "-")) {
+        if (session.active_window) |aw| {
+            for (session.windows.items, 0..) |w, i| {
+                if (w == aw) return session.windows.items[if (i == 0) session.windows.items.len - 1 else i - 1];
+            }
+        }
+        return session.active_window;
+    }
+    // Try by index (base-index adjusted)
+    if (std.fmt.parseInt(u32, token, 10) catch null) |num| {
+        return session.findWindowByNumber(num);
+    }
+    // Try by name
+    for (session.windows.items) |w| {
+        if (std.mem.eql(u8, w.name, token)) return w;
+    }
+    return session.active_window;
+}
+
+fn resolvePaneToken(window: *Window, token: []const u8) ?*Pane {
+    if (std.mem.eql(u8, token, "!")) {
+        return window.last_pane;
+    }
+    if (std.mem.eql(u8, token, "+") or std.mem.eql(u8, token, ".+")) {
+        if (window.active_pane) |ap| {
+            for (window.panes.items, 0..) |p, i| {
+                if (p == ap) return window.panes.items[(i + 1) % window.panes.items.len];
+            }
+        }
+        return window.active_pane;
+    }
+    if (std.mem.eql(u8, token, "-") or std.mem.eql(u8, token, ".-")) {
+        if (window.active_pane) |ap| {
+            for (window.panes.items, 0..) |p, i| {
+                if (p == ap) return window.panes.items[if (i == 0) window.panes.items.len - 1 else i - 1];
+            }
+        }
+        return window.active_pane;
+    }
+    // %N pane id
+    if (token.len >= 2 and token[0] == '%') {
+        const id = std.fmt.parseInt(u32, token[1..], 10) catch return window.active_pane;
+        for (window.panes.items) |p| {
+            if (p.id == id) return p;
+        }
+        return null;
+    }
+    // Numeric index
+    if (std.fmt.parseInt(usize, token, 10) catch null) |idx| {
+        if (idx < window.panes.items.len) return window.panes.items[idx];
+    }
+    return window.active_pane;
+}
+
+/// Parse -t from args and resolve to session/window/pane, updating ctx.
+fn resolveTargetFromArgs(ctx: *Context, args: []const []const u8) void {
+    const target_str = parseNamedOption(args, "-t") orelse return;
+    const resolved = resolveTarget(ctx.server, ctx, target_str);
+    if (resolved.session) |s| ctx.session = s;
+    if (resolved.window) |w| ctx.window = w;
+    if (resolved.pane) |p| ctx.pane = p;
+}
+
 fn defaultShell(session: ?*Session) [:0]const u8 {
     if (session) |s| return s.options.default_shell;
     return "/bin/sh";
@@ -466,9 +624,45 @@ fn extractCopySelection(alloc: std.mem.Allocator, pane_state: anytype, state: *c
     return try out.toOwnedSlice(alloc);
 }
 
+/// Search the scrollback buffer for a pattern, moving the cursor to the match.
+/// `forward` = true searches downward from current position, false searches upward.
+fn searchScrollback(alloc: std.mem.Allocator, pane_state: anytype, state: *copy_mod.CopyState, forward: bool) void {
+    if (state.search_len == 0) return;
+    const pattern = state.search_buf[0..state.search_len];
+    const grid = &pane_state.screen.grid;
+    const total_lines = grid.hsize + grid.rows;
+    if (total_lines == 0) return;
+
+    // Search line by line from the current position.
+    const start_y = state.cy;
+    var checked: u32 = 0;
+    while (checked < total_lines) : (checked += 1) {
+        const y = if (forward)
+            (start_y + 1 + checked) % total_lines
+        else
+            (start_y + total_lines - 1 - checked) % total_lines;
+
+        const line_text = extractGridLineSlice(alloc, pane_state, y, 0, grid.cols -| 1) catch continue;
+        defer alloc.free(line_text);
+
+        // Find pattern in the line.
+        if (std.mem.indexOf(u8, line_text, pattern)) |col| {
+            state.cy = y;
+            state.cx = @intCast(col);
+            return;
+        }
+    }
+}
+
 fn handleCopyModeAction(ctx: *Context, pane: *Pane, pane_state: anytype, action: copy_mod.CopyAction) CmdError!void {
     switch (action) {
-        .move_cursor, .start_selection, .search_next, .search_prev => {},
+        .move_cursor, .start_selection => {},
+        .search_next => if (pane.copy_state) |*state| {
+            searchScrollback(ctx.allocator, pane_state, state, true);
+        },
+        .search_prev => if (pane.copy_state) |*state| {
+            searchScrollback(ctx.allocator, pane_state, state, false);
+        },
         .scroll_up => if (pane.copy_state) |*state| {
             if (state.cy > 0) state.cy -= 1;
         },
@@ -2320,8 +2514,10 @@ fn cmdListSessions(ctx: *Context, _: []const []const u8) CmdError!void {
 }
 
 fn cmdSendKeys(ctx: *Context, args: []const []const u8) CmdError!void {
+    // Resolve -t target before processing.
+    resolveTargetFromArgs(ctx, args);
     // Parse flags: -l (literal), -H (hex byte per arg), -R (reset terminal),
-    // -X cmd (copy-mode command), -N count (repeat), -c/-t (target, ignored),
+    // -X cmd (copy-mode command), -N count (repeat), -c/-t (target),
     // -F/-K/-M (format/key-lookup/mouse, noted but no-op).
     var literal = false;
     var hex_mode = false;
