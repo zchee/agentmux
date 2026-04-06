@@ -1,0 +1,13 @@
+$ultrawork "Please thoroughly review this codebase again, focusing primarily on bugs (and mistakes by the Coding agent) in parallel"
+
+---
+
+$team "Please thoroughly review this codebase again, focusing primarily on bugs (and mistakes by the Coding agent) in parallel"
+
+---
+
+Team read-only-parallel-bug-review: leader stale, 4 pane(s) active, 22 msg(s) pending. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown ... [OMX_TMUX_INJECT]
+
+---
+
+Team read-only-parallel-bug-review: leader stale, 4 pane(s) active, 23 msg(s) pending. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown ... [OMX_TMUX_INJECT]
