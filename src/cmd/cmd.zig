@@ -2424,10 +2424,23 @@ fn cmdSelectPane(ctx: *Context, args: []const []const u8) CmdError!void {
             return;
         } else if (std.mem.eql(u8, args[i], "-Z")) {
             // keep zoom: selectPane preserves zoom already
-        } else if (std.mem.eql(u8, args[i], "-M") or std.mem.eql(u8, args[i], "-m")) {
-            // set/clear mark: not implemented
+        } else if (std.mem.eql(u8, args[i], "-m")) {
+            // Mark the active pane.
+            ctx.server.marked_pane = window.active_pane;
+            return;
+        } else if (std.mem.eql(u8, args[i], "-M")) {
+            // Clear the marked pane.
+            ctx.server.marked_pane = null;
+            return;
         } else if (std.mem.eql(u8, args[i], "-T") and i + 1 < args.len) {
-            i += 1; // title: not implemented
+            i += 1;
+            // Set pane title.
+            if (window.active_pane) |pane| {
+                if (ctx.server.session_loop.getPane(pane.id)) |ps| {
+                    ps.screen.setTitle(args[i]) catch {};
+                }
+            }
+            return;
         } else if (std.mem.eql(u8, args[i], "-t") and i + 1 < args.len) {
             i += 1;
             const target = args[i];

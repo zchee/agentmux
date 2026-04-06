@@ -42,8 +42,15 @@ pub fn getProcessName(alloc: std.mem.Allocator, pid: std.posix.pid_t) !?[]const 
     };
 }
 
-fn getProcessNameDarwin(_: std.mem.Allocator, _: std.posix.pid_t) !?[]const u8 {
-    return null;
+fn getProcessNameDarwin(alloc: std.mem.Allocator, pid: std.posix.pid_t) !?[]const u8 {
+    // Use proc_name() from libproc (available via libc on macOS).
+    const proc_name_fn = struct {
+        extern "c" fn proc_name(pid: i32, buffer: [*]u8, buffersize: u32) i32;
+    };
+    var name_buf: [256]u8 = undefined;
+    const len = proc_name_fn.proc_name(@intCast(pid), &name_buf, name_buf.len);
+    if (len <= 0) return null;
+    return try alloc.dupe(u8, name_buf[0..@intCast(len)]);
 }
 
 fn getProcessNameLinux(alloc: std.mem.Allocator, pid: std.posix.pid_t) !?[]const u8 {

@@ -18,6 +18,7 @@ const log = @import("core/log.zig");
 const signals = @import("signals.zig");
 const builtin = @import("builtin");
 const event_loop_mod = @import("core/event_loop.zig");
+const platform = @import("platform/platform.zig");
 const GcdEventLoop = @import("platform/darwin.zig").GcdEventLoop;
 const IoUringEventLoop = @import("platform/linux.zig").IoUringEventLoop;
 
@@ -46,6 +47,7 @@ pub const Server = struct {
     global_default_shell: ?[:0]u8,
     config_file: ?[]const u8,
     messages: std.ArrayListAligned([]u8, null),
+    marked_pane: ?*Pane,
     running: bool,
     allocator: std.mem.Allocator,
     gcd_loop: if (builtin.os.tag == .macos) ?GcdEventLoop else void,
@@ -83,6 +85,7 @@ pub const Server = struct {
             .global_default_shell = null,
             .config_file = null,
             .messages = .empty,
+            .marked_pane = null,
             .running = false,
             .allocator = alloc,
             .gcd_loop = if (builtin.os.tag == .macos) null else {},
@@ -816,7 +819,30 @@ pub const Server = struct {
         const pane = self.findPaneByFd(fd) orelse return;
         var buf: [4096]u8 = undefined;
         const n = std.c.read(fd, &buf, buf.len);
-        if (n <= 0) return;
+        if (n <= 0) {
+            // EOF on PTY — pane process exited.
+            if (!pane.flags.exited) {
+                pane.flags.exited = true;
+                self.fireHooks(.pane_exited);
+
+                // Check remain-on-exit: if set, write "Pane is dead" overlay.
+                const session = self.findSessionForPaneFd(fd) orelse return;
+                for (session.windows.items) |window| {
+                    for (window.panes.items) |wp| {
+                        if (wp == pane and window.options.remain_on_exit) {
+                            if (self.session_loop.getPane(pane.id)) |ps| {
+                                const dead_msg = "[Pane is dead]";
+                                @import("input_handler.zig").processBytes(&ps.parser, &ps.screen, "\x1b[H\x1b[2J");
+                                @import("input_handler.zig").processBytes(&ps.parser, &ps.screen, dead_msg);
+                                ps.dirty.markAllDirty();
+                            }
+                            return; // Don't remove the pane.
+                        }
+                    }
+                }
+            }
+            return;
+        }
 
         const pane_state = self.session_loop.getPane(pane.id);
         if (pane_state) |ps| {
@@ -824,6 +850,22 @@ pub const Server = struct {
         }
 
         const session = self.findSessionForPaneFd(fd) orelse return;
+
+        // Auto-rename: update window name from foreground process.
+        if (pane.pid > 0) {
+            for (session.windows.items) |window| {
+                if (window.active_pane == pane) {
+                    if (platform.getProcessName(self.allocator, pane.pid) catch null) |new_name| {
+                        defer self.allocator.free(new_name);
+                        if (!std.mem.eql(u8, window.name, new_name)) {
+                            window.rename(new_name) catch {};
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
         for (self.clients.items) |client| {
             if (client.session == session) {
                 self.renderComposedToClient(client.fd, session, pane_state) catch {
