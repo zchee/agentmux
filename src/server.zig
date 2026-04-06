@@ -329,6 +329,34 @@ pub const Server = struct {
         return try windows.toOwnedSlice(alloc);
     }
 
+    fn applyStatusStyle(out: *output_mod.Output, style: status_style.Style) void {
+        out.attrReset();
+        out.setAttrs(style.attrs);
+        out.setFg(style.fg);
+        out.setBg(style.bg);
+    }
+
+    fn writeStyledStatusLine(out: *output_mod.Output, base_style: status_style.Style, line: []const u8) void {
+        var active_style = base_style;
+        applyStatusStyle(out, active_style);
+
+        var i: usize = 0;
+        while (i < line.len) {
+            if (i + 1 < line.len and line[i] == '#' and line[i + 1] == '[') {
+                if (std.mem.indexOfScalarPos(u8, line, i + 2, ']')) |close| {
+                    active_style = status_style.apply(active_style, line[i .. close + 1]);
+                    applyStatusStyle(out, active_style);
+                    i = close + 1;
+                    continue;
+                }
+            }
+
+            const next_marker = std.mem.indexOfPos(u8, line, i, "#[") orelse line.len;
+            out.writeBytes(line[i..next_marker]);
+            i = next_marker;
+        }
+    }
+
     fn renderStatusBar(self: *Server, out: *output_mod.Output, session: *const Session, window: *const Window, cols: u32, rows: u32) !void {
         const row = statusRow(session, rows) orelse return;
         const host_name = hostname();
@@ -362,11 +390,7 @@ pub const Server = struct {
         defer self.allocator.free(line);
 
         out.cursorTo(0, row);
-        out.attrReset();
-        out.setAttrs(status_bar.style.attrs);
-        out.setFg(status_bar.style.fg);
-        out.setBg(status_bar.style.bg);
-        out.writeBytes(line);
+        writeStyledStatusLine(out, status_bar.style, line);
         out.attrReset();
     }
 
@@ -1930,4 +1954,41 @@ test "status interval refresh renders attached clients when due" {
     try std.testing.expect(std.mem.indexOf(u8, msg.payload, "LEFT") != null);
     try std.testing.expect(std.mem.indexOf(u8, msg.payload, "RIGHT") != null);
     try std.testing.expect(session.status_next_refresh_at > now);
+}
+
+test "renderComposedToClient interprets inline status styles and shell segments" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-render-status-inline-style.sock");
+    defer server.deinit();
+
+    const session = try Session.init(std.testing.allocator, "demo");
+    try server.sessions.append(server.allocator, session);
+    server.default_session = session;
+
+    const window = try Window.init(std.testing.allocator, "win", 48, 5);
+    try session.addWindow(window);
+
+    const pane = try Pane.init(std.testing.allocator, 48, 4);
+    try window.addPane(pane);
+    try server.session_loop.addPane(pane.id, -1, pane.sx, pane.sy);
+
+    try session.setStatusLeft("#[fg=green#,bold#,bg=colour235]LEFT#[default] #(printf up)");
+    try session.setStatusRight("#[fg=#666361#,bg=default]RIGHT");
+    session.options.status_style = .{
+        .fg = .white,
+        .bg = .black,
+        .attrs = .{},
+    };
+
+    const pane_state = server.session_loop.getPane(pane.id).?;
+    const payload = try renderPayloadForTest(&server, session, pane_state);
+    defer std.testing.allocator.free(payload);
+
+    try std.testing.expect(std.mem.indexOf(u8, payload, "#[") == null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "#(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "LEFT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "up") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "RIGHT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\x1b[1m\x1b[32m\x1b[48;5;235mLEFT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\x1b[0m\x1b[39m\x1b[49m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\x1b[38;2;102;99;97m\x1b[49mRIGHT") != null);
 }

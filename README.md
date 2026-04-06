@@ -235,14 +235,10 @@ set -g mode-keys vi
 ```
 
 > [!NOTE]
-> Statusline parity is still being tightened against tmux-visible behavior. The
-> current codebase stores tmux-style status options and expands the common
-> `#...` format tokens used by the status line (`#S`, `#W`, `#I`, `#P`, `#T`,
-> `#H`, and long-form `#{...}` helpers such as conditionals and equality
-> checks), but full composed-render parity for window-list output,
-> `window-status-format`, `%...` time formats, `status-position`, and
-> `status-interval` should be treated as in progress until the render path is
-> fully driven by effective session and window state.
+> The composed statusline path already renders `status-left`,
+> `window-status-format` window lists, `status-right`, `%...` time formats,
+> `status-position`, `status-interval`, inline `#[...]` style fragments, and
+> `#(...)` shell-command segments from effective session/window state.
 
 ## Differences from tmux
 

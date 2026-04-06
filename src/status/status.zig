@@ -2,6 +2,47 @@ const std = @import("std");
 const format = @import("format.zig");
 const style_mod = @import("style.zig");
 
+fn styleMarkerEnd(text: []const u8, start: usize) ?usize {
+    if (start + 1 >= text.len or text[start] != '#' or text[start + 1] != '[') return null;
+    const close = std.mem.indexOfScalarPos(u8, text, start + 2, ']') orelse return null;
+    return close + 1;
+}
+
+fn visibleLen(text: []const u8) usize {
+    var len: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (styleMarkerEnd(text, i)) |end| {
+            i = end;
+            continue;
+        }
+        len += 1;
+        i += 1;
+    }
+    return len;
+}
+
+fn appendVisiblePrefix(
+    alloc: std.mem.Allocator,
+    out: *std.ArrayListAligned(u8, null),
+    text: []const u8,
+    max_visible: usize,
+) !usize {
+    var visible: usize = 0;
+    var i: usize = 0;
+    while (i < text.len and visible < max_visible) {
+        if (styleMarkerEnd(text, i)) |end| {
+            try out.appendSlice(alloc, text[i..end]);
+            i = end;
+            continue;
+        }
+        try out.append(alloc, text[i]);
+        i += 1;
+        visible += 1;
+    }
+    return visible;
+}
+
 /// Status bar configuration and rendering.
 pub const StatusBar = struct {
     left: []const u8,
@@ -66,16 +107,17 @@ pub const StatusBar = struct {
         var line: std.ArrayListAligned(u8, null) = .empty;
         errdefer line.deinit(alloc);
 
-        const right_len = @min(right.len, cols);
+        const right_len = @min(visibleLen(right), cols);
         const leading_budget = cols - right_len;
-        const leading_len = @min(leading.items.len, leading_budget);
-        try line.appendSlice(alloc, leading.items[0..leading_len]);
+        const leading_len = @min(visibleLen(leading.items), leading_budget);
+        var rendered_leading = try appendVisiblePrefix(alloc, &line, leading.items, leading_len);
 
-        while (line.items.len < leading_budget) {
+        while (rendered_leading < leading_budget) {
             try line.append(alloc, ' ');
+            rendered_leading += 1;
         }
 
-        try line.appendSlice(alloc, right[0..right_len]);
+        _ = try appendVisiblePrefix(alloc, &line, right, right_len);
 
         return try line.toOwnedSlice(alloc);
     }
@@ -117,4 +159,16 @@ test "status bar render sections keeps window list between left and right" {
     try std.testing.expectEqual(@as(usize, 32), result.len);
     try std.testing.expect(std.mem.indexOf(u8, result, "0:editor* 1:shell-") != null);
     try std.testing.expect(std.mem.endsWith(u8, result, "12:34"));
+}
+
+test "status bar render sections ignores inline style markers for width" {
+    const alloc = std.testing.allocator;
+    const bar = StatusBar.init();
+
+    const result = try bar.renderSections(alloc, 20, "#[fg=green]LEFT", "", "#[bold]RIGHT");
+    defer alloc.free(result);
+
+    try std.testing.expectEqual(@as(usize, 20), visibleLen(result));
+    try std.testing.expect(std.mem.indexOf(u8, result, "#[fg=green]LEFT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "#[bold]RIGHT") != null);
 }

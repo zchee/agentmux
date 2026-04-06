@@ -15,6 +15,7 @@ const ClockTm = extern struct {
 extern "c" fn time(timer: ?*i64) i64;
 extern "c" fn localtime(timer: *const i64) ?*ClockTm;
 extern "c" fn strftime(buf: [*]u8, maxsize: usize, format: [*:0]const u8, tm: *const ClockTm) usize;
+extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 
 /// Context for format string expansion.
 pub const FormatContext = struct {
@@ -156,6 +157,17 @@ pub fn expand(alloc: std.mem.Allocator, fmt: []const u8, ctx: *const FormatConte
                 try result.append(alloc, '[');
                 i += 1;
             },
+            '(' => {
+                if (findCommandEnd(fmt, i + 1)) |end| {
+                    const output = try runShellCommand(alloc, fmt[i + 1 .. end]);
+                    defer alloc.free(output);
+                    try result.appendSlice(alloc, output);
+                    i = end + 1;
+                } else {
+                    try result.appendSlice(alloc, "#(");
+                    i += 1;
+                }
+            },
             else => {
                 try result.append(alloc, '#');
                 try result.append(alloc, fmt[i]);
@@ -241,6 +253,105 @@ fn appendTimeFormatSegment(alloc: std.mem.Allocator, result: *std.ArrayListAlign
         return;
     }
     try result.appendSlice(alloc, buf[0..written]);
+}
+
+fn findCommandEnd(fmt: []const u8, start: usize) ?usize {
+    var depth: usize = 1;
+    var i = start;
+    var quote: ?u8 = null;
+    var escaped = false;
+
+    while (i < fmt.len) : (i += 1) {
+        const ch = fmt[i];
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+
+        if (ch == '\\') {
+            escaped = true;
+            continue;
+        }
+
+        if (quote) |q| {
+            if (ch == q) quote = null;
+            continue;
+        }
+
+        if (ch == '\'' or ch == '"' or ch == '`') {
+            quote = ch;
+            continue;
+        }
+
+        if (ch == '(') {
+            depth += 1;
+            continue;
+        }
+
+        if (ch == ')') {
+            depth -= 1;
+            if (depth == 0) return i;
+        }
+    }
+
+    return null;
+}
+
+fn runShellCommand(alloc: std.mem.Allocator, command: []const u8) ![]u8 {
+    if (command.len == 0) return try alloc.alloc(u8, 0);
+
+    var pipe_fds: [2]std.c.fd_t = undefined;
+    if (std.c.pipe(&pipe_fds) != 0) return error.PipeFailed;
+    errdefer {
+        _ = std.c.close(pipe_fds[0]);
+        _ = std.c.close(pipe_fds[1]);
+    }
+
+    const cmd_z = try alloc.dupeZ(u8, command);
+    defer alloc.free(cmd_z);
+
+    const pid = std.c.fork();
+    if (pid < 0) return error.ForkFailed;
+
+    if (pid == 0) {
+        _ = std.c.close(pipe_fds[0]);
+        _ = std.c.dup2(pipe_fds[1], 1);
+        _ = std.c.close(pipe_fds[1]);
+
+        const sh: [*:0]const u8 = "/bin/sh";
+        const c_flag: [*:0]const u8 = "-c";
+        const argv = [_:null]?[*:0]const u8{ sh, c_flag, cmd_z.ptr };
+        _ = execvp(sh, &argv);
+        std.c.exit(127);
+    }
+
+    _ = std.c.close(pipe_fds[1]);
+
+    var output: std.ArrayListAligned(u8, null) = .empty;
+    errdefer output.deinit(alloc);
+
+    var buf: [256]u8 = undefined;
+    while (true) {
+        const n = std.c.read(pipe_fds[0], &buf, buf.len);
+        if (n <= 0) break;
+        try output.appendSlice(alloc, buf[0..@intCast(n)]);
+    }
+    _ = std.c.close(pipe_fds[0]);
+
+    var status: i32 = 0;
+    _ = std.c.waitpid(pid, &status, 0);
+
+    const sanitized = sanitizeCommandOutput(output.items);
+    const owned = try alloc.dupe(u8, sanitized);
+    output.deinit(alloc);
+    return owned;
+}
+
+fn sanitizeCommandOutput(raw: []const u8) []const u8 {
+    const newline = std.mem.indexOfAny(u8, raw, "\r\n") orelse raw.len;
+    var end = newline;
+    while (end > 0 and (raw[end - 1] == ' ' or raw[end - 1] == '\t')) : (end -= 1) {}
+    return raw[0..end];
 }
 
 test "expand simple" {
@@ -340,4 +451,18 @@ test "expand strftime segment" {
     try std.testing.expectEqual(@as(usize, 6), result.len);
     try std.testing.expectEqual(@as(u8, ' '), result[0]);
     try std.testing.expectEqual(@as(u8, ':'), result[3]);
+}
+
+test "expand shell command segment" {
+    const ctx = FormatContext{};
+    const result = try expand(std.testing.allocator, "#(printf status-ok)", &ctx);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("status-ok", result);
+}
+
+test "expand shell command preserves inline styles around output" {
+    const ctx = FormatContext{};
+    const result = try expand(std.testing.allocator, "#[fg=green]#(printf up)#[default]", &ctx);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("#[fg=green]up#[default]", result);
 }
