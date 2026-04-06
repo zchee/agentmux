@@ -29,7 +29,7 @@ pub fn handleEvent(scr: *Screen, event: InputEvent) void {
         .csi => |csi| handleCSI(scr, csi),
         .esc => |esc| handleESC(scr, esc),
         .osc => |osc| handleOSC(scr, osc),
-        .dcs => {},
+        .dcs => |dcs| handleDCS(scr, dcs),
     }
 }
 
@@ -344,6 +344,31 @@ fn handleOSC(scr: *Screen, osc: input.OSC) void {
             scr.setTitle(osc.getData()) catch {};
         },
         else => {},
+    }
+}
+
+fn handleDCS(scr: *Screen, dcs: input.DCS) void {
+    const data = dcs.getData();
+    switch (dcs.final) {
+        'q' => {
+            // DECRQSS (DCS $ q ... ST) — request status string.
+            // Check for intermediate '$'.
+            if (dcs.intermediate_count > 0 and dcs.intermediates[0] == '$') {
+                // Applications query terminal state; we acknowledge but
+                // don't respond here (server would need to send the reply).
+                _ = data;
+            }
+        },
+        'p' => {
+            // DECUDK (DCS p ... ST) — user-defined keys. Ignore.
+            _ = data;
+        },
+        else => {
+            // tmux passthrough and other DCS sequences — store as title
+            // hint if data is present, otherwise ignore.
+            _ = scr;
+            _ = data;
+        },
     }
 }
 

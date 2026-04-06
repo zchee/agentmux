@@ -744,6 +744,8 @@ pub const Server = struct {
 
         // Pass escape sequences (multi-byte starting with ESC) directly to the PTY.
         if (payload.len > 1 and payload[0] == 0x1b) {
+            // Check for SGR mouse sequence: ESC[<btn;x;yM or ESC[<btn;x;ym
+            if (self.parseSgrMouse(payload, window, pane)) return;
             _ = std.c.write(pane.fd, payload.ptr, payload.len);
             return;
         }
@@ -798,6 +800,88 @@ pub const Server = struct {
             ctx.pane = if (ctx.window) |w| w.active_pane else null;
             registry.executeParsed(&ctx, command) catch {};
         }
+    }
+
+    /// Parse an SGR mouse sequence (ESC[<btn;x;yM or ESC[<btn;x;ym),
+    /// find the target pane by coordinates, adjust coordinates to pane-local,
+    /// and forward the adjusted sequence to the pane's PTY.
+    /// Returns true if the payload was handled as a mouse event.
+    fn parseSgrMouse(
+        self: *Server,
+        payload: []const u8,
+        window: *Window,
+        default_pane: *Pane,
+    ) bool {
+        // SGR mouse format: ESC [ < Btn ; X ; Y [Mm]
+        // Minimum length: ESC [ < 0 ; 1 ; 1 M = 10 bytes
+        if (payload.len < 10) return false;
+        if (payload[1] != '[' or payload[2] != '<') return false;
+
+        const final = payload[payload.len - 1];
+        if (final != 'M' and final != 'm') return false;
+
+        // Parse btn;x;y from payload[3..len-1]
+        const params = payload[3 .. payload.len - 1];
+        var parts: [3]u32 = .{ 0, 0, 0 };
+        var part_idx: usize = 0;
+        for (params) |c| {
+            if (c == ';') {
+                part_idx += 1;
+                if (part_idx >= 3) return false;
+            } else if (c >= '0' and c <= '9') {
+                parts[part_idx] = parts[part_idx] * 10 + (c - '0');
+            } else {
+                return false; // unexpected character
+            }
+        }
+        if (part_idx != 2) return false;
+
+        const btn = parts[0];
+        const abs_x = parts[1];
+        const abs_y = parts[2];
+
+        // Convert from 1-based to 0-based.
+        const x = if (abs_x > 0) abs_x - 1 else 0;
+        const y = if (abs_y > 0) abs_y - 1 else 0;
+
+        // Find which pane contains these coordinates.
+        var target_pane = default_pane;
+        for (window.panes.items) |pane| {
+            if (x >= pane.xoff and x < pane.xoff + pane.sx and
+                y >= pane.yoff and y < pane.yoff + pane.sy)
+            {
+                target_pane = pane;
+                break;
+            }
+        }
+
+        // Check if the target pane has mouse mode enabled.
+        if (self.session_loop.getPane(target_pane.id)) |ps| {
+            if (!ps.screen.mode.mouse_standard and !ps.screen.mode.mouse_button and
+                !ps.screen.mode.mouse_any)
+            {
+                // Mouse not enabled on this pane — select pane on click.
+                if (final == 'M' and btn == 0) {
+                    window.selectPane(target_pane);
+                }
+                return true;
+            }
+        }
+
+        // Adjust coordinates to pane-local (1-based).
+        const local_x = x - target_pane.xoff + 1;
+        const local_y = y - target_pane.yoff + 1;
+
+        // Rebuild and forward the adjusted SGR mouse sequence.
+        var buf: [32]u8 = undefined;
+        const seq = std.fmt.bufPrint(&buf, "\x1b[<{d};{d};{d}{c}", .{
+            btn, local_x, local_y, final,
+        }) catch return false;
+
+        if (target_pane.fd >= 0) {
+            _ = std.c.write(target_pane.fd, seq.ptr, seq.len);
+        }
+        return true;
     }
 
     fn handleClientResize(self: *Server, client_idx: usize, payload: []const u8) void {
