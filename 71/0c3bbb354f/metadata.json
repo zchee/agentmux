@@ -1,0 +1,51 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "710c3bbb354f",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".gitattributes",
+    ".gitignore",
+    "AGENTS.md",
+    "README.md",
+    "build.zig",
+    "build.zig.zon",
+    "src/AGENTS.md",
+    "src/client.zig",
+    "src/cmd/buffer_commands_test.zig",
+    "src/cmd/cmd.zig",
+    "src/cmd/config_shell_test.zig",
+    "src/cmd/display_commands_test.zig",
+    "src/cmd/key_commands_test.zig",
+    "src/cmd/option_commands_test.zig",
+    "src/cmd/pane_commands_test.zig",
+    "src/cmd/tmux_equivalent_test.zig",
+    "src/cmd/window_commands_test.zig",
+    "src/control/control.zig",
+    "src/core/AGENTS.md",
+    "src/core/allocator.zig",
+    "src/main.zig",
+    "src/platform/AGENTS.md",
+    "src/platform/darwin.zig",
+    "src/platform/platform.zig",
+    "src/render/shaders/terminal.metal",
+    "src/render/vulkan.zig",
+    "src/session.zig"
+  ],
+  "sessions": [
+    {
+      "metadata": "/71/0c3bbb354f/0/metadata.json",
+      "transcript": "/71/0c3bbb354f/0/full.jsonl",
+      "content_hash": "/71/0c3bbb354f/0/content_hash.txt",
+      "prompt": "/71/0c3bbb354f/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 37855428,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 33304576,
+    "output_tokens": 104625,
+    "api_call_count": 198
+  }
+}

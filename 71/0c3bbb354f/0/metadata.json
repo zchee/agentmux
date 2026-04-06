@@ -1,0 +1,63 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "710c3bbb354f",
+  "session_id": "019d62f5-3225-7142-9e75-ecc3dc600da0",
+  "strategy": "manual-commit",
+  "created_at": "2026-04-06T14:07:01.240538Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".gitattributes",
+    ".gitignore",
+    "AGENTS.md",
+    "README.md",
+    "build.zig",
+    "build.zig.zon",
+    "src/AGENTS.md",
+    "src/client.zig",
+    "src/cmd/buffer_commands_test.zig",
+    "src/cmd/cmd.zig",
+    "src/cmd/config_shell_test.zig",
+    "src/cmd/display_commands_test.zig",
+    "src/cmd/key_commands_test.zig",
+    "src/cmd/option_commands_test.zig",
+    "src/cmd/pane_commands_test.zig",
+    "src/cmd/tmux_equivalent_test.zig",
+    "src/cmd/window_commands_test.zig",
+    "src/control/control.zig",
+    "src/core/AGENTS.md",
+    "src/core/allocator.zig",
+    "src/main.zig",
+    "src/platform/AGENTS.md",
+    "src/platform/darwin.zig",
+    "src/platform/platform.zig",
+    "src/render/shaders/terminal.metal",
+    "src/render/vulkan.zig",
+    "src/session.zig"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.4",
+  "turn_id": "2d40dacaf591",
+  "token_usage": {
+    "input_tokens": 37855428,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 33304576,
+    "output_tokens": 104625,
+    "api_call_count": 198
+  },
+  "session_metrics": {
+    "turn_count": 9
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-04-06T14:06:58.536554Z",
+    "agent_lines": 179,
+    "agent_removed": 102,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 179,
+    "total_lines_changed": 281,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
+}
