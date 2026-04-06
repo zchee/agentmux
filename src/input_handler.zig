@@ -435,6 +435,22 @@ test "process DEC private modes" {
     try std.testing.expect(scr.mode.cursor_visible);
 }
 
+test "process cursor style round trip across alt screen" {
+    var scr = Screen.init(std.testing.allocator, 80, 24, 0);
+    defer scr.deinit();
+    var parser = input.Parser.init();
+
+    processBytes(&parser, &scr, "\x1b[6 q");
+    try std.testing.expectEqual(screen_mod.CursorStyle.steady_bar, scr.cstyle);
+
+    processBytes(&parser, &scr, "\x1b[?1049h");
+    processBytes(&parser, &scr, "\x1b[4 q");
+    try std.testing.expectEqual(screen_mod.CursorStyle.steady_underline, scr.cstyle);
+
+    processBytes(&parser, &scr, "\x1b[?1049l");
+    try std.testing.expectEqual(screen_mod.CursorStyle.steady_bar, scr.cstyle);
+}
+
 test "process erase" {
     var scr = Screen.init(std.testing.allocator, 10, 3, 0);
     defer scr.deinit();

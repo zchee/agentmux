@@ -41,7 +41,9 @@ pub const Mode = packed struct(u32) {
 const SavedState = struct {
     cx: u32 = 0,
     cy: u32 = 0,
+    cstyle: CursorStyle = .steady_bar,
     cell: Cell = Cell.blank,
+    cstyle: CursorStyle = .steady_bar,
     origin_mode: bool = false,
 };
 
@@ -203,7 +205,9 @@ pub const Screen = struct {
         self.saved = .{
             .cx = self.cx,
             .cy = self.cy,
+            .cstyle = self.cstyle,
             .cell = self.cell,
+            .cstyle = self.cstyle,
             .origin_mode = self.mode.origin,
         };
     }
@@ -212,7 +216,9 @@ pub const Screen = struct {
     pub fn restoreCursor(self: *Screen) void {
         self.cx = @min(self.saved.cx, self.grid.cols -| 1);
         self.cy = @min(self.saved.cy, self.grid.rows -| 1);
+        self.cstyle = self.saved.cstyle;
         self.cell = self.saved.cell;
+        self.cstyle = self.saved.cstyle;
         self.mode.origin = self.saved.origin_mode;
     }
 
@@ -224,7 +230,9 @@ pub const Screen = struct {
         self.alt_saved = .{
             .cx = self.cx,
             .cy = self.cy,
+            .cstyle = self.cstyle,
             .cell = self.cell,
+            .cstyle = self.cstyle,
             .origin_mode = self.mode.origin,
         };
 
@@ -262,7 +270,9 @@ pub const Screen = struct {
         // Restore main cursor state.
         self.cx = @min(self.alt_saved.cx, self.grid.cols -| 1);
         self.cy = @min(self.alt_saved.cy, self.grid.rows -| 1);
+        self.cstyle = self.alt_saved.cstyle;
         self.cell = self.alt_saved.cell;
+        self.cstyle = self.alt_saved.cstyle;
         self.mode.origin = self.alt_saved.origin_mode;
         self.mode.alt_screen = false;
         self.rupper = 0;
@@ -316,11 +326,15 @@ test "save restore cursor" {
     var screen = Screen.init(std.testing.allocator, 80, 24, 0);
     defer screen.deinit();
     screen.cursorTo(10, 5);
+    screen.cstyle = .steady_underline;
     screen.saveCursor();
+    screen.cstyle = .steady_block;
     screen.cursorTo(0, 0);
+    screen.cstyle = .blinking_block;
     screen.restoreCursor();
     try std.testing.expectEqual(@as(u32, 10), screen.cx);
     try std.testing.expectEqual(@as(u32, 5), screen.cy);
+    try std.testing.expectEqual(CursorStyle.steady_underline, screen.cstyle);
 }
 
 test "alt screen enter and leave" {
@@ -330,6 +344,7 @@ test "alt screen enter and leave" {
     // Write to main screen.
     screen.grid.getCell(0, 0).codepoint = 'M';
     screen.cursorTo(3, 2);
+    screen.cstyle = .steady_bar;
 
     // Enter alt screen.
     screen.enterAltScreen();
@@ -342,6 +357,7 @@ test "alt screen enter and leave" {
 
     // Write to alt screen.
     screen.grid.getCell(0, 0).codepoint = 'A';
+    screen.cstyle = .steady_underline;
 
     // Leave alt screen.
     screen.leaveAltScreen();
@@ -351,6 +367,7 @@ test "alt screen enter and leave" {
     // Cursor should be restored.
     try std.testing.expectEqual(@as(u32, 3), screen.cx);
     try std.testing.expectEqual(@as(u32, 2), screen.cy);
+    try std.testing.expectEqual(CursorStyle.steady_bar, screen.cstyle);
 }
 
 test "alt screen double enter is no-op" {

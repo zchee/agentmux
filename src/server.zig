@@ -144,6 +144,35 @@ pub const Server = struct {
         };
     }
 
+    const ActiveCursorState = struct {
+        col: u32,
+        row: u32,
+        visible: bool,
+        style: u3,
+    };
+
+    fn getActiveCursorState(self: *Server, window: *Window) ?ActiveCursorState {
+        const active = window.active_pane orelse return null;
+        const ps = self.session_loop.getPane(active.id) orelse return null;
+        return .{
+            .col = active.xoff + ps.screen.cx,
+            .row = active.yoff + ps.screen.cy,
+            .visible = ps.screen.mode.cursor_visible,
+            .style = @intFromEnum(ps.screen.cstyle),
+        };
+    }
+
+    fn restoreActiveCursor(out: *output_mod.Output, cursor: ?ActiveCursorState) void {
+        const active = cursor orelse return;
+        out.cursorTo(active.col, active.row);
+        if (active.visible) {
+            out.showCursor();
+            out.setCursorStyle(active.style);
+        } else {
+            out.hideCursor();
+        }
+    }
+
     pub fn listen(self: *Server) !void {
         try self.ensureSocketDir();
         self.removeStaleSocket();
@@ -898,7 +927,7 @@ pub const Server = struct {
 
     fn handleClientResize(self: *Server, client_idx: usize, payload: []const u8) void {
         if (payload.len < @sizeOf(protocol.ResizeMsg)) return;
-        const msg: *const protocol.ResizeMsg = @alignCast(@ptrCast(payload.ptr));
+        const msg: *const protocol.ResizeMsg = @ptrCast(@alignCast(payload.ptr));
         const client = &self.clients.items[client_idx];
         client.cols = if (msg.cols > 0) msg.cols else client.cols;
         client.rows = if (msg.rows > 0) msg.rows else client.rows;
@@ -1006,6 +1035,7 @@ pub const Server = struct {
             return error.NoPaneState;
         };
         const pane_count = window.panes.items.len;
+        const active_cursor = self.getActiveCursorState(window);
 
         if (pane_count <= 1) {
             // Single pane: render directly (fast path).
@@ -1026,16 +1056,6 @@ pub const Server = struct {
             // Draw borders between panes using layout info.
             if (window.layout_root) |root| {
                 self.drawLayoutBorders(&out, root, window.sx, window.sy);
-            }
-
-            // Position cursor at the active pane's cursor location.
-            if (window.active_pane) |active| {
-                if (self.session_loop.getPane(active.id)) |ps| {
-                    out.cursorTo(active.xoff + ps.screen.cx, active.yoff + ps.screen.cy);
-                    if (ps.screen.mode.cursor_visible) {
-                        out.showCursor();
-                    }
-                }
             }
         }
 
@@ -1060,6 +1080,8 @@ pub const Server = struct {
             out.writeBytes("\x1b[0m");
         }
 
+        self.restoreActivePaneCursor(&out, window);
+
         out.flush();
 
         // Close write end so read gets EOF.
@@ -1079,6 +1101,19 @@ pub const Server = struct {
         }
     }
 
+    fn restoreActivePaneCursor(self: *Server, out: *output_mod.Output, window: *Window) void {
+        const active = window.active_pane orelse return;
+        const ps = self.session_loop.getPane(active.id) orelse return;
+
+        out.cursorTo(active.xoff + ps.screen.cx, active.yoff + ps.screen.cy);
+        if (ps.screen.mode.cursor_visible) {
+            out.showCursor();
+            out.setCursorStyle(@intFromEnum(ps.screen.cstyle));
+        } else {
+            out.hideCursor();
+        }
+    }
+
     /// Recursively draw border lines between panes based on the layout tree.
     fn drawLayoutBorders(self: *Server, out: *output_mod.Output, cell: *const @import("layout/layout.zig").LayoutCell, total_cols: u32, total_rows: u32) void {
         if (cell.cell_type == .pane) return;
@@ -1093,7 +1128,6 @@ pub const Server = struct {
 
         // Draw borders between adjacent children.
         for (children[0 .. children.len - 1]) |child| {
-
             if (cell.cell_type == .horizontal) {
                 // Vertical border: draw at (child.xoff + child.sx, child.yoff) to (child.xoff + child.sx, child.yoff + child.sy - 1)
                 const bx = child.xoff + child.sx;
@@ -1302,4 +1336,77 @@ const POLLIN: i16 = 0x0001;
 test "commandAllowsMissingSession includes if-shell" {
     try std.testing.expect(commandAllowsMissingSession("if-shell"));
     try std.testing.expect(!commandAllowsMissingSession("send-prefix"));
+}
+
+test "renderComposedToClient restores single-pane cursor after status bar" {
+    var server = try Server.init(std.testing.allocator, "/tmp/agentmux-render-single-pane.sock");
+    defer server.deinit();
+
+    const session = try Session.init(std.testing.allocator, "demo");
+    try server.sessions.append(server.allocator, session);
+    server.default_session = session;
+
+    const window = try Window.init(std.testing.allocator, "win", 20, 4);
+    try session.addWindow(window);
+
+    const pane = try Pane.init(std.testing.allocator, 20, 3);
+    try window.addPane(pane);
+    try server.session_loop.addPane(pane.id, -1, pane.sx, pane.sy);
+
+    const pane_state = server.session_loop.getPane(pane.id).?;
+    pane_state.processPtyOutput("prompt");
+    pane_state.processPtyOutput("\x1b[2;5H");
+
+    var client_pipe: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&client_pipe));
+    defer _ = std.c.close(client_pipe[0]);
+    defer _ = std.c.close(client_pipe[1]);
+
+    try server.renderComposedToClient(client_pipe[1], session, pane_state);
+
+    var msg = try protocol.recvMessageAlloc(std.testing.allocator, client_pipe[0]);
+    defer msg.deinit();
+
+    try std.testing.expectEqual(protocol.MessageType.output, msg.msg_type);
+    try std.testing.expect(std.mem.endsWith(u8, msg.payload, "\x1b[2;5H\x1b[?25h\x1b[6 q"));
+}
+
+test "renderComposedToClient preserves active-pane cursor style in multi-pane mode" {
+    var server = try Server.init(std.testing.allocator, "/tmp/agentmux-render-multi-pane.sock");
+    defer server.deinit();
+
+    const session = try Session.init(std.testing.allocator, "demo");
+    try server.sessions.append(server.allocator, session);
+    server.default_session = session;
+
+    const window = try Window.init(std.testing.allocator, "win", 30, 6);
+    try session.addWindow(window);
+
+    const left = try Pane.init(std.testing.allocator, 14, 5);
+    try window.addPane(left);
+    try server.session_loop.addPane(left.id, -1, left.sx, left.sy);
+
+    const right = try Pane.init(std.testing.allocator, 14, 5);
+    right.xoff = 15;
+    try window.addPane(right);
+    try server.session_loop.addPane(right.id, -1, right.sx, right.sy);
+    window.selectPane(right);
+
+    const right_state = server.session_loop.getPane(right.id).?;
+    right_state.processPtyOutput("vim");
+    right_state.processPtyOutput("\x1b[2;4H");
+    right_state.processPtyOutput("\x1b[4 q");
+
+    var client_pipe: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&client_pipe));
+    defer _ = std.c.close(client_pipe[0]);
+    defer _ = std.c.close(client_pipe[1]);
+
+    try server.renderComposedToClient(client_pipe[1], session, right_state);
+
+    var msg = try protocol.recvMessageAlloc(std.testing.allocator, client_pipe[0]);
+    defer msg.deinit();
+
+    try std.testing.expectEqual(protocol.MessageType.output, msg.msg_type);
+    try std.testing.expect(std.mem.endsWith(u8, msg.payload, "\x1b[2;19H\x1b[?25h\x1b[4 q"));
 }
