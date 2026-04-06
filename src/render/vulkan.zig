@@ -4,6 +4,7 @@ const renderer = @import("renderer.zig");
 const grid = @import("../screen/grid.zig");
 const colour = @import("../core/colour.zig");
 const shaders = @import("shaders.zig");
+const atlas_mod = @import("atlas.zig");
 
 /// Vulkan GPU renderer for Linux.
 /// Uses the Vulkan C API for GPU-accelerated terminal cell rendering.
@@ -24,6 +25,7 @@ pub const VulkanRenderer = if (builtin.os.tag == .linux) struct {
     height: u32,
     config: renderer.RenderConfig,
     vertices: std.ArrayListAligned(CellVertex, null),
+    glyph_atlas: ?*atlas_mod.GlyphAtlas,
     initialized: bool,
     allocator: std.mem.Allocator,
 
@@ -116,6 +118,7 @@ pub const VulkanRenderer = if (builtin.os.tag == .linux) struct {
             .height = 0,
             .config = config,
             .vertices = .empty,
+            .glyph_atlas = null,
             .initialized = false,
             .allocator = alloc,
         };
@@ -336,7 +339,28 @@ pub const VulkanRenderer = if (builtin.os.tag == .linux) struct {
 
         // Glyph quad
         if (cell.codepoint >= 0x20 and cell.codepoint != 0) {
-            appendQuad(self, px, py, cw, ch, .{ 0, 0 }, .{ 0.05, 0.05 }, fg, bg, 1);
+            var tx: f32 = 0;
+            var ty: f32 = 0;
+            var tw: f32 = 0.05;
+            var th: f32 = 0.05;
+            var gw = cw;
+            var gh = ch;
+            var gx = px;
+            var gy = py;
+            if (self.glyph_atlas) |atlas| {
+                if (atlas.getGlyph(cell.codepoint)) |entry| {
+                    const as: f32 = @floatFromInt(atlas.atlas_size);
+                    tx = @as(f32, @floatFromInt(entry.atlas_x)) / as;
+                    ty = @as(f32, @floatFromInt(entry.atlas_y)) / as;
+                    tw = @as(f32, @floatFromInt(entry.width)) / as;
+                    th = @as(f32, @floatFromInt(entry.height)) / as;
+                    gw = @floatFromInt(entry.width);
+                    gh = @floatFromInt(entry.height);
+                    gx = px + @as(f32, @floatFromInt(entry.bearing_x));
+                    gy = py + cw - @as(f32, @floatFromInt(entry.bearing_y));
+                }
+            }
+            appendQuad(self, gx, gy, gw, gh, .{ tx, ty }, .{ tw, th }, fg, bg, 1);
         }
     }
 

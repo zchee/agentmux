@@ -4,6 +4,7 @@ const renderer = @import("renderer.zig");
 const grid = @import("../screen/grid.zig");
 const colour = @import("../core/colour.zig");
 const shaders = @import("shaders.zig");
+const atlas_mod = @import("atlas.zig");
 
 /// Metal GPU renderer for macOS.
 /// Uses Objective-C runtime via typed objc_msgSend trampolines.
@@ -23,6 +24,7 @@ pub const MetalRenderer = if (builtin.os.tag == .macos) struct {
     height: u32,
     config: renderer.RenderConfig,
     vertices: std.ArrayListAligned(shaders.MetalShaders.CellVertex, null),
+    glyph_atlas: ?*atlas_mod.GlyphAtlas,
     allocator: std.mem.Allocator,
 
     // ---- Objective-C runtime bindings ----
@@ -153,6 +155,7 @@ pub const MetalRenderer = if (builtin.os.tag == .macos) struct {
             .height = 0,
             .config = config,
             .vertices = .empty,
+            .glyph_atlas = null,
             .allocator = alloc,
         };
     }
@@ -368,8 +371,28 @@ pub const MetalRenderer = if (builtin.os.tag == .macos) struct {
 
         // Glyph quad (if visible codepoint)
         if (cell.codepoint >= 0x20 and cell.codepoint != 0) {
-            // TODO: look up glyph in atlas for tex coords
-            const glyph_verts = shaders.MetalShaders.cellQuad(px, py, cw, ch, 0, 0, 0.05, 0.05, fg, bg, true);
+            var tx: f32 = 0;
+            var ty: f32 = 0;
+            var tw: f32 = 0.05;
+            var th: f32 = 0.05;
+            var gw = cw;
+            var gh = ch;
+            var gx = px;
+            var gy = py;
+            if (self.glyph_atlas) |atlas| {
+                if (atlas.getGlyph(cell.codepoint)) |entry| {
+                    const as: f32 = @floatFromInt(atlas.atlas_size);
+                    tx = @as(f32, @floatFromInt(entry.atlas_x)) / as;
+                    ty = @as(f32, @floatFromInt(entry.atlas_y)) / as;
+                    tw = @as(f32, @floatFromInt(entry.width)) / as;
+                    th = @as(f32, @floatFromInt(entry.height)) / as;
+                    gw = @floatFromInt(entry.width);
+                    gh = @floatFromInt(entry.height);
+                    gx = px + @as(f32, @floatFromInt(entry.bearing_x));
+                    gy = py + cw - @as(f32, @floatFromInt(entry.bearing_y));
+                }
+            }
+            const glyph_verts = shaders.MetalShaders.cellQuad(gx, gy, gw, gh, tx, ty, tw, th, fg, bg, true);
             self.vertices.appendSlice(self.allocator, &glyph_verts) catch return;
         }
     }
