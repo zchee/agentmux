@@ -26,7 +26,7 @@ pub const CSI = struct {
 
 pub const OSC = struct {
     ps: u16,
-    data: [256]u8 = .{0} ** 256,
+    data: [8192]u8 = .{0} ** 8192,
     data_len: u16 = 0,
 
     pub fn getData(self: *const OSC) []const u8 {
@@ -76,10 +76,14 @@ pub const Parser = struct {
     param_count: u5 = 0,
     intermediates: [4]u8 = .{ 0, 0, 0, 0 },
     intermediate_count: u3 = 0,
-    osc_buf: [256]u8 = .{0} ** 256,
+    osc_buf: [8192]u8 = .{0} ** 8192,
     osc_len: u16 = 0,
     osc_ps: u16 = 0,
     osc_ps_done: bool = false,
+    // UTF-8 multi-byte accumulation
+    utf8_buf: [4]u8 = .{ 0, 0, 0, 0 },
+    utf8_len: u3 = 0,
+    utf8_expected: u3 = 0,
     dcs_buf: [4096]u8 = .{0} ** 4096,
     dcs_len: u16 = 0,
     dcs_final: u8 = 0,
@@ -90,6 +94,33 @@ pub const Parser = struct {
 
     /// Feed one byte. Returns an event if a sequence is complete.
     pub fn feed(self: *Parser, byte: u8) ?InputEvent {
+        // If we're accumulating a UTF-8 multi-byte sequence, continue it.
+        if (self.utf8_expected > 0) {
+            if (byte >= 0x80 and byte <= 0xBF) {
+                // Valid continuation byte.
+                self.utf8_buf[self.utf8_len] = byte;
+                self.utf8_len += 1;
+                if (self.utf8_len == self.utf8_expected) {
+                    // Complete sequence u2014 decode and emit.
+                    const cp = std.unicode.utf8Decode(self.utf8_buf[0..self.utf8_len]) catch {
+                        self.utf8_expected = 0;
+                        self.utf8_len = 0;
+                        return null;
+                    };
+                    self.utf8_expected = 0;
+                    self.utf8_len = 0;
+                    return .{ .print = cp };
+                }
+                return null;
+            } else {
+                // Invalid continuation u2014 abort the sequence and
+                // re-process this byte from ground state.
+                self.utf8_expected = 0;
+                self.utf8_len = 0;
+                // Fall through to normal processing below.
+            }
+        }
+
         if (byte == 0x1b) {
             self.resetSequence();
             self.state = .escape;
@@ -101,7 +132,7 @@ pub const Parser = struct {
         }
 
         return switch (self.state) {
-            .ground => handleGround(byte),
+            .ground => self.handleGround(byte),
             .escape => self.handleEscape(byte),
             .escape_intermediate => self.handleEscapeIntermediate(byte),
             .csi_entry => self.handleCsiEntry(byte),
@@ -117,8 +148,21 @@ pub const Parser = struct {
         };
     }
 
-    fn handleGround(byte: u8) ?InputEvent {
+    fn handleGround(self: *Parser, byte: u8) ?InputEvent {
         if (byte < 0x20 or byte == 0x7f) return .{ .c0 = byte };
+
+        // UTF-8 lead byte detection.
+        if (byte >= 0xC0) {
+            const expected = std.unicode.utf8ByteSequenceLength(byte) catch return null;
+            if (expected > 1) {
+                self.utf8_buf[0] = byte;
+                self.utf8_len = 1;
+                self.utf8_expected = expected;
+                return null;
+            }
+        }
+
+        // ASCII or single-byte (0x20-0x7E, 0x80-0xBF stray continuation).
         return .{ .print = @as(u21, byte) };
     }
 
@@ -454,4 +498,41 @@ test "parse ESC M" {
         },
         else => return error.UnexpectedEvent,
     }
+}
+
+test "parse UTF-8 2-byte" {
+    var p = Parser.init();
+    // U+00E9 (é) = 0xC3 0xA9
+    const e1 = p.feed(0xC3);
+    try std.testing.expect(e1 == null); // lead byte, accumulating
+    const e2 = p.feed(0xA9).?;
+    try std.testing.expectEqual(InputEvent{ .print = 0xE9 }, e2);
+}
+
+test "parse UTF-8 3-byte CJK" {
+    var p = Parser.init();
+    // U+4E2D (中) = 0xE4 0xB8 0xAD
+    try std.testing.expect(p.feed(0xE4) == null);
+    try std.testing.expect(p.feed(0xB8) == null);
+    const event = p.feed(0xAD).?;
+    try std.testing.expectEqual(InputEvent{ .print = 0x4E2D }, event);
+}
+
+test "parse UTF-8 4-byte emoji" {
+    var p = Parser.init();
+    // U+1F600 (😀) = 0xF0 0x9F 0x98 0x80
+    try std.testing.expect(p.feed(0xF0) == null);
+    try std.testing.expect(p.feed(0x9F) == null);
+    try std.testing.expect(p.feed(0x98) == null);
+    const event = p.feed(0x80).?;
+    try std.testing.expectEqual(InputEvent{ .print = 0x1F600 }, event);
+}
+
+test "parse UTF-8 invalid continuation aborts" {
+    var p = Parser.init();
+    // Start 2-byte sequence then feed non-continuation
+    try std.testing.expect(p.feed(0xC3) == null);
+    // Feed ASCII instead of continuation u2014 should abort UTF-8 and process 'A'
+    const event = p.feed('A').?;
+    try std.testing.expectEqual(InputEvent{ .print = 'A' }, event);
 }
