@@ -72,6 +72,10 @@ pub const Screen = struct {
     /// Saved state for DECSC/DECRC.
     saved: SavedState,
 
+    /// Alt-screen backing grid (created on first use).
+    alt_grid: ?Grid,
+    alt_saved: SavedState,
+
     /// Title.
     title: ?[]const u8,
 
@@ -90,6 +94,8 @@ pub const Screen = struct {
             .mode = Mode.default,
             .default_mode = Mode.default,
             .saved = .{},
+            .alt_grid = null,
+            .alt_saved = .{},
             .title = null,
             .allocator = alloc,
         };
@@ -97,6 +103,9 @@ pub const Screen = struct {
 
     pub fn deinit(self: *Screen) void {
         self.grid.deinit();
+        if (self.alt_grid) |*ag| {
+            ag.deinit();
+        }
         if (self.title) |t| {
             self.allocator.free(t);
         }
@@ -207,6 +216,59 @@ pub const Screen = struct {
         self.mode.origin = self.saved.origin_mode;
     }
 
+    /// Enter alt-screen: save cursor, swap to a fresh grid, clear it.
+    pub fn enterAltScreen(self: *Screen) void {
+        if (self.mode.alt_screen) return; // already in alt screen
+
+        // Save main cursor state.
+        self.alt_saved = .{
+            .cx = self.cx,
+            .cy = self.cy,
+            .cell = self.cell,
+            .origin_mode = self.mode.origin,
+        };
+
+        // Create alt grid (no scrollback) and swap.
+        if (self.alt_grid == null) {
+            self.alt_grid = Grid.init(self.allocator, self.grid.cols, self.grid.rows, 0);
+        }
+        const tmp = self.grid;
+        self.grid = self.alt_grid.?;
+        self.alt_grid = tmp;
+
+        // Reset state for alt screen.
+        self.cx = 0;
+        self.cy = 0;
+        self.rupper = 0;
+        self.rlower = self.grid.rows -| 1;
+        self.mode.alt_screen = true;
+
+        // Clear the alt grid.
+        var y: u32 = 0;
+        while (y < self.grid.rows) : (y += 1) {
+            self.grid.clearLine(y);
+        }
+    }
+
+    /// Leave alt-screen: swap back to main grid, restore cursor.
+    pub fn leaveAltScreen(self: *Screen) void {
+        if (!self.mode.alt_screen) return; // not in alt screen
+
+        // Swap grids back.
+        const tmp = self.grid;
+        self.grid = self.alt_grid.?;
+        self.alt_grid = tmp;
+
+        // Restore main cursor state.
+        self.cx = @min(self.alt_saved.cx, self.grid.cols -| 1);
+        self.cy = @min(self.alt_saved.cy, self.grid.rows -| 1);
+        self.cell = self.alt_saved.cell;
+        self.mode.origin = self.alt_saved.origin_mode;
+        self.mode.alt_screen = false;
+        self.rupper = 0;
+        self.rlower = self.grid.rows -| 1;
+    }
+
     /// Set the terminal title.
     pub fn setTitle(self: *Screen, title: []const u8) !void {
         if (self.title) |old| {
@@ -259,4 +321,50 @@ test "save restore cursor" {
     screen.restoreCursor();
     try std.testing.expectEqual(@as(u32, 10), screen.cx);
     try std.testing.expectEqual(@as(u32, 5), screen.cy);
+}
+
+test "alt screen enter and leave" {
+    var screen = Screen.init(std.testing.allocator, 10, 5, 100);
+    defer screen.deinit();
+
+    // Write to main screen.
+    screen.grid.getCell(0, 0).codepoint = 'M';
+    screen.cursorTo(3, 2);
+
+    // Enter alt screen.
+    screen.enterAltScreen();
+    try std.testing.expect(screen.mode.alt_screen);
+    // Alt screen should start with cleared grid.
+    try std.testing.expectEqual(@as(u21, ' '), screen.grid.getCell(0, 0).codepoint);
+    // Cursor should be reset.
+    try std.testing.expectEqual(@as(u32, 0), screen.cx);
+    try std.testing.expectEqual(@as(u32, 0), screen.cy);
+
+    // Write to alt screen.
+    screen.grid.getCell(0, 0).codepoint = 'A';
+
+    // Leave alt screen.
+    screen.leaveAltScreen();
+    try std.testing.expect(!screen.mode.alt_screen);
+    // Main screen content should be restored.
+    try std.testing.expectEqual(@as(u21, 'M'), screen.grid.getCell(0, 0).codepoint);
+    // Cursor should be restored.
+    try std.testing.expectEqual(@as(u32, 3), screen.cx);
+    try std.testing.expectEqual(@as(u32, 2), screen.cy);
+}
+
+test "alt screen double enter is no-op" {
+    var screen = Screen.init(std.testing.allocator, 10, 5, 0);
+    defer screen.deinit();
+
+    screen.grid.getCell(0, 0).codepoint = 'X';
+    screen.enterAltScreen();
+    screen.grid.getCell(0, 0).codepoint = 'Y';
+
+    // Second enter should be a no-op.
+    screen.enterAltScreen();
+    try std.testing.expectEqual(@as(u21, 'Y'), screen.grid.getCell(0, 0).codepoint);
+
+    screen.leaveAltScreen();
+    try std.testing.expectEqual(@as(u21, 'X'), screen.grid.getCell(0, 0).codepoint);
 }

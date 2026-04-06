@@ -142,6 +142,33 @@ fn handleCSI(scr: *Screen, csi: CSI) void {
         'l' => { // RM - reset mode
             handleSetMode(scr, &csi, false);
         },
+        'X' => { // ECH - erase characters
+            w.eraseChars(csi.getParam(0, 1));
+        },
+        'b' => { // REP - repeat last character
+            const n = csi.getParam(0, 1);
+            // Repeat the character at the current cursor position
+            if (scr.cx > 0) {
+                const prev = scr.grid.getCell(scr.cx - 1, scr.cy);
+                const cp = prev.codepoint;
+                if (cp != 0) {
+                    var j: u32 = 0;
+                    while (j < n) : (j += 1) {
+                        w.putChar(cp);
+                    }
+                }
+            }
+        },
+        's' => { // ANSI cursor save (not DECSC — no intermediates)
+            scr.saveCursor();
+        },
+        'u' => { // ANSI cursor restore (not DECRC — no intermediates)
+            scr.restoreCursor();
+        },
+        'g' => { // TBC - tab clear
+            // 0 = clear tab at current column, 3 = clear all tabs
+            // (tab stops not yet tracked, so this is a no-op for now)
+        },
         'n' => {}, // DSR - device status report (handled by server)
         'c' => {}, // DA - device attributes (handled by server)
         else => {},
@@ -167,7 +194,13 @@ fn handleDecSet(scr: *Screen, csi: *const CSI, enable: bool) void {
             },
             7 => scr.mode.wrap = enable, // DECAWM
             25 => scr.mode.cursor_visible = enable, // DECTCEM
-            47, 1047 => scr.mode.alt_screen = enable, // Alt screen
+            47, 1047 => { // Alt screen (without cursor save/restore)
+                if (enable) {
+                    scr.enterAltScreen();
+                } else {
+                    scr.leaveAltScreen();
+                }
+            },
             1000 => scr.mode.mouse_standard = enable, // Mouse tracking
             1002 => scr.mode.mouse_button = enable, // Button event mouse
             1003 => scr.mode.mouse_any = enable, // Any event mouse
@@ -175,9 +208,9 @@ fn handleDecSet(scr: *Screen, csi: *const CSI, enable: bool) void {
             1049 => { // Alt screen + save/restore cursor
                 if (enable) {
                     scr.saveCursor();
-                    scr.mode.alt_screen = true;
+                    scr.enterAltScreen();
                 } else {
-                    scr.mode.alt_screen = false;
+                    scr.leaveAltScreen();
                     scr.restoreCursor();
                 }
             },
@@ -380,4 +413,19 @@ test "process erase" {
     processBytes(&parser, &scr, "\x1b[K");
     try std.testing.expectEqual(@as(u21, 'E'), scr.grid.getCell(4, 0).codepoint);
     try std.testing.expectEqual(@as(u21, ' '), scr.grid.getCell(5, 0).codepoint);
+}
+
+test "process ECH erase characters" {
+    var scr = Screen.init(std.testing.allocator, 10, 3, 0);
+    defer scr.deinit();
+    var parser = input.Parser.init();
+
+    processBytes(&parser, &scr, "ABCDEFGHIJ");
+    // Move to col 3, erase 4 characters
+    processBytes(&parser, &scr, "\x1b[1;4H"); // row 1, col 4
+    processBytes(&parser, &scr, "\x1b[4X"); // erase 4 chars
+    try std.testing.expectEqual(@as(u21, 'C'), scr.grid.getCell(2, 0).codepoint);
+    try std.testing.expectEqual(@as(u21, ' '), scr.grid.getCell(3, 0).codepoint);
+    try std.testing.expectEqual(@as(u21, ' '), scr.grid.getCell(6, 0).codepoint);
+    try std.testing.expectEqual(@as(u21, 'H'), scr.grid.getCell(7, 0).codepoint);
 }
