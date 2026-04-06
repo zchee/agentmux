@@ -4,26 +4,10 @@ const atlas_mod = @import("atlas.zig");
 
 /// FreeType C API declarations.
 const ft = struct {
-    // Opaque types
     const FT_Library = ?*anyopaque;
-    const FT_Face = ?*anyopaque;
-
-    // Error type
     const FT_Error = i32;
 
-    // Glyph metrics (in 26.6 fixed point)
-    const FT_Glyph_Metrics = extern struct {
-        width: i64,
-        height: i64,
-        horiBearingX: i64,
-        horiBearingY: i64,
-        horiAdvance: i64,
-        vertBearingX: i64,
-        vertBearingY: i64,
-        vertAdvance: i64,
-    };
-
-    // Bitmap
+    // Bitmap pixel data after FT_LOAD_RENDER.
     const FT_Bitmap = extern struct {
         rows: u32,
         width: u32,
@@ -35,8 +19,56 @@ const ft = struct {
         palette: ?*anyopaque,
     };
 
-    // Glyph slot (simplified - we access fields via offset)
-    const FT_GlyphSlot = ?*anyopaque;
+    // Glyph metrics in 26.6 fixed point.
+    const FT_Glyph_Metrics = extern struct {
+        width: i64,
+        height: i64,
+        horiBearingX: i64,
+        horiBearingY: i64,
+        horiAdvance: i64,
+        vertBearingX: i64,
+        vertBearingY: i64,
+        vertAdvance: i64,
+    };
+
+    // GlyphSlotRec: we only need to reach `metrics`, `bitmap`,
+    // `bitmap_left`, and `bitmap_top`. Pad up to their offsets.
+    const FT_GlyphSlotRec = extern struct {
+        library: ?*anyopaque,
+        face: ?*anyopaque,
+        next: ?*anyopaque,
+        glyph_index: u32,
+        generic_data: ?*anyopaque,
+        generic_finalizer: ?*anyopaque,
+        metrics: FT_Glyph_Metrics,
+        linearHoriAdvance: i64,
+        linearVertAdvance: i64,
+        advance_x: i64, // FT_Vector.x (26.6)
+        advance_y: i64, // FT_Vector.y (26.6)
+        format: u32, // FT_Glyph_Format
+        bitmap: FT_Bitmap,
+        bitmap_left: i32,
+        bitmap_top: i32,
+    };
+
+    // FT_Face points to FT_FaceRec. We only need the `glyph` field
+    // which is the 24th pointer-sized field in FT_FaceRec.
+    // Rather than reproduce the full struct, we use an accessor.
+    const FT_Face = ?*anyopaque;
+
+    /// Get the glyph slot pointer from an FT_Face.
+    /// FT_FaceRec.glyph is at a fixed offset. On both 64-bit platforms
+    /// it's at byte offset 152 (19 pointer-sized fields + some i64/u32).
+    /// We use FT_Face_GetGlyphSlot via a more portable approach:
+    /// after FT_Load_Char succeeds, the glyph slot is accessible
+    /// via the face's glyph field.
+    fn getGlyphSlot(face: *anyopaque) ?*FT_GlyphSlotRec {
+        // FT_FaceRec layout (64-bit): glyph is at offset 152.
+        // This offset is stable across FreeType 2.x versions.
+        const face_bytes: [*]const u8 = @ptrCast(face);
+        const slot_ptr: *const ?*FT_GlyphSlotRec = @ptrCast(@alignCast(face_bytes + 152));
+        return slot_ptr.*;
+    }
 
     // Load flags
     const FT_LOAD_RENDER: i32 = 4;
@@ -155,26 +187,39 @@ pub const FontRasterizer = struct {
 
         // Load and render the glyph
         if (ft.FT_Load_Char(self.face, codepoint, ft.FT_LOAD_RENDER) != 0) {
-            // Glyph not found - add empty entry
             return glyph_atlas.addGlyph(codepoint, 0, 0, &.{}, 0, 0, self.cell_width);
         }
 
-        // Access the rendered bitmap from the glyph slot
-        // FT_GlyphSlotRec layout: the bitmap is at a known offset
-        // Since we can't safely dereference the opaque pointer in portable Zig,
-        // we use FT_Load_Char with FT_LOAD_RENDER which renders to the slot's bitmap
+        // Access the rendered bitmap from face->glyph
+        const slot = ft.getGlyphSlot(self.face.?) orelse {
+            return glyph_atlas.addGlyph(codepoint, 0, 0, &.{}, 0, 0, self.cell_width);
+        };
 
-        // For now, create a simple bitmap based on the codepoint
-        // Real implementation would read face->glyph->bitmap
-        const w = self.cell_width;
-        const h: u16 = @intCast(self.pixel_size);
+        const bmp = &slot.bitmap;
+        const w: u16 = @intCast(bmp.width);
+        const h: u16 = @intCast(bmp.rows);
+        const bearing_x: i16 = @intCast(slot.bitmap_left);
+        const bearing_y: i16 = @intCast(slot.bitmap_top);
+        const advance: u16 = @intCast(@as(u32, @intCast(slot.metrics.horiAdvance)) >> 6);
 
-        // Generate a placeholder bitmap (filled rectangle for visible chars)
-        var bitmap_buf: [4096]u8 = .{0} ** 4096;
+        if (w == 0 or h == 0 or bmp.buffer == null) {
+            return glyph_atlas.addGlyph(codepoint, 0, 0, &.{}, bearing_x, bearing_y, advance);
+        }
+
+        // Copy bitmap data row by row (pitch may differ from width).
+        const pitch: usize = if (bmp.pitch >= 0) @intCast(bmp.pitch) else @intCast(-bmp.pitch);
+        const buf_ptr = bmp.buffer.?;
+        var bitmap_buf: [16384]u8 = undefined;
         const bitmap_size = @as(usize, w) * @as(usize, h);
-        if (bitmap_size <= bitmap_buf.len and codepoint >= 0x20 and codepoint < 0x7f) {
-            // Simple: fill the glyph area for printable ASCII
-            @memset(bitmap_buf[0..bitmap_size], 0x80);
+        if (bitmap_size > bitmap_buf.len) {
+            return glyph_atlas.addGlyph(codepoint, 0, 0, &.{}, bearing_x, bearing_y, advance);
+        }
+
+        var row: usize = 0;
+        while (row < h) : (row += 1) {
+            const src = buf_ptr + row * pitch;
+            const dst_start = row * @as(usize, w);
+            @memcpy(bitmap_buf[dst_start..][0..w], src[0..w]);
         }
 
         return glyph_atlas.addGlyph(
@@ -182,9 +227,9 @@ pub const FontRasterizer = struct {
             w,
             h,
             bitmap_buf[0..bitmap_size],
-            0,
-            self.ascender,
-            w,
+            bearing_x,
+            bearing_y,
+            advance,
         );
     }
 
