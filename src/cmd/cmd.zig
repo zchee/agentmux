@@ -289,13 +289,16 @@ fn parseTargetWindow(args: []const []const u8) ?u32 {
     while (i < args.len) : (i += 1) {
         if (!std.mem.eql(u8, args[i], "-t") or i + 1 >= args.len) continue;
         i += 1;
-        const target = args[i];
-        if (target.len >= 2 and target[0] == ':') {
-            return std.fmt.parseInt(u32, target[1..], 10) catch null;
-        }
-        return std.fmt.parseInt(u32, target, 10) catch null;
+        return parseWindowTargetNumber(args[i]);
     }
     return null;
+}
+
+fn parseWindowTargetNumber(target: []const u8) ?u32 {
+    if (target.len >= 2 and target[0] == ':') {
+        return std.fmt.parseInt(u32, target[1..], 10) catch null;
+    }
+    return std.fmt.parseInt(u32, target, 10) catch null;
 }
 
 /// Resolved target from tmux target syntax.
@@ -487,18 +490,20 @@ fn makeFormatContext(ctx: *const Context) format_mod.FormatContext {
     if (ctx.session) |s| {
         fc.session_name = s.name;
         fc.session_id = s.id;
-        if (s.active_window) |w| {
+        const window = ctx.window orelse s.active_window;
+        if (window) |w| {
             fc.window_name = w.name;
             for (s.windows.items, 0..) |win, idx| {
                 if (win == w) {
                     fc.window_index = s.options.base_index + @as(u32, @intCast(idx));
-                    fc.window_active = true;
+                    fc.window_active = s.active_window == w;
                     break;
                 }
             }
-            if (w.active_pane) |p| {
-                for (w.panes.items, 0..) |pane, idx| {
-                    if (pane == p) {
+            const pane = ctx.pane orelse w.active_pane;
+            if (pane) |p| {
+                for (w.panes.items, 0..) |window_pane, idx| {
+                    if (window_pane == p) {
                         fc.pane_index = @intCast(idx);
                         break;
                     }
@@ -508,6 +513,12 @@ fn makeFormatContext(ctx: *const Context) format_mod.FormatContext {
         }
     }
     return fc;
+}
+
+fn resolvedTargetContext(ctx: *const Context, args: []const []const u8) Context {
+    var target_ctx = ctx.*;
+    resolveTargetFromArgs(&target_ctx, args);
+    return target_ctx;
 }
 
 const ClockTm = extern struct {
@@ -2525,7 +2536,7 @@ fn cmdSelectWindow(ctx: *Context, args: []const []const u8) CmdError!void {
             return;
         } else if (std.mem.eql(u8, args[i], "-t") and i + 1 < args.len) {
             i += 1;
-            const num = std.fmt.parseInt(u32, args[i], 10) catch return CmdError.InvalidArgs;
+            const num = parseWindowTargetNumber(args[i]) orelse return CmdError.InvalidArgs;
             const window = session.findWindowByNumber(num) orelse return CmdError.WindowNotFound;
             session.selectWindow(window);
             return;
@@ -3127,6 +3138,7 @@ fn cmdSwapPane(ctx: *Context, args: []const []const u8) CmdError!void {
 fn cmdDisplayMessage(ctx: *Context, args: []const []const u8) CmdError!void {
     var verbose = false;
     var message: ?[]const u8 = null;
+    var format_arg: ?[]const u8 = null;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -3137,9 +3149,12 @@ fn cmdDisplayMessage(ctx: *Context, args: []const []const u8) CmdError!void {
             try writeOutput(ctx, "clients: {d}\n", .{ctx.server.clients.items.len});
             return;
         } else if ((std.mem.eql(u8, args[i], "-c") or std.mem.eql(u8, args[i], "-d") or
-            std.mem.eql(u8, args[i], "-F") or std.mem.eql(u8, args[i], "-t")) and i + 1 < args.len)
+            std.mem.eql(u8, args[i], "-t")) and i + 1 < args.len)
         {
             i += 1;
+        } else if (std.mem.eql(u8, args[i], "-F") and i + 1 < args.len) {
+            i += 1;
+            format_arg = args[i];
         } else if (std.mem.eql(u8, args[i], "-a") or std.mem.eql(u8, args[i], "-C") or
             std.mem.eql(u8, args[i], "-l") or std.mem.eql(u8, args[i], "-N") or
             std.mem.eql(u8, args[i], "-p"))
@@ -3150,9 +3165,11 @@ fn cmdDisplayMessage(ctx: *Context, args: []const []const u8) CmdError!void {
         }
     }
 
-    if (message) |msg| {
+    const display_text = message orelse format_arg;
+    if (display_text) |msg| {
         // Expand format strings (#S, #W, #{session_name}, etc.)
-        const fc = makeFormatContext(ctx);
+        const target_ctx = resolvedTargetContext(ctx, args);
+        const fc = makeFormatContext(&target_ctx);
         const expanded = format_mod.expand(ctx.allocator, msg, &fc) catch msg;
         defer if (expanded.ptr != msg.ptr) ctx.allocator.free(expanded);
         if (verbose) {
@@ -3414,9 +3431,67 @@ fn cmdListWindows(ctx: *Context, args: []const []const u8) CmdError!void {
     }
 }
 
+fn writeListPaneLine(
+    ctx: *Context,
+    session: *Session,
+    window: *Window,
+    pane: *Pane,
+    window_index: u32,
+    pane_index: usize,
+    format: ?[]const u8,
+    include_session_prefix: bool,
+    include_window_prefix: bool,
+) CmdError!void {
+    if (format) |fmt| {
+        const fc = format_mod.FormatContext{
+            .session_name = session.name,
+            .session_id = session.id,
+            .window_name = window.name,
+            .window_index = window_index,
+            .window_active = session.active_window == window,
+            .pane_index = @intCast(pane_index),
+            .pane_pid = pane.pid,
+        };
+        const expanded = format_mod.expand(ctx.allocator, fmt, &fc) catch return CmdError.CommandFailed;
+        defer ctx.allocator.free(expanded);
+        try writeOutput(ctx, "{s}\n", .{expanded});
+        return;
+    }
+
+    const active_mark: []const u8 = if (window.active_pane == pane) " (active)" else "";
+    if (include_session_prefix) {
+        try writeOutput(ctx, "{s}:{d}.{d}: [%{d}] [{d}x{d}]{s}\n", .{
+            session.name, window_index, pane_index, pane.id, pane.sx, pane.sy, active_mark,
+        });
+        return;
+    }
+
+    if (include_window_prefix) {
+        try writeOutput(ctx, "{d}.{d}: [%{d}] [{d}x{d}]{s}\n", .{
+            window_index, pane_index, pane.id, pane.sx, pane.sy, active_mark,
+        });
+        return;
+    }
+
+    try writeOutput(ctx, "{d}: [%{d}] [{d}x{d}]{s}\n", .{
+        pane_index, pane.id, pane.sx, pane.sy, active_mark,
+    });
+}
+
+fn displayedWindowIndex(session: *Session, window: *Window) u32 {
+    for (session.windows.items, 0..) |candidate_window, wi| {
+        if (candidate_window == window) {
+            return session.options.base_index + @as(u32, @intCast(wi));
+        }
+    }
+    return session.options.base_index;
+}
+
 fn cmdListPanes(ctx: *Context, args: []const []const u8) CmdError!void {
     var all_sessions = false;
     var session_level = false;
+    var format: ?[]const u8 = null;
+    var target_spec: ?[]const u8 = null;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -3424,8 +3499,14 @@ fn cmdListPanes(ctx: *Context, args: []const []const u8) CmdError!void {
             all_sessions = true;
         } else if (std.mem.eql(u8, args[i], "-s")) {
             session_level = true;
-        } else if ((std.mem.eql(u8, args[i], "-F") or std.mem.eql(u8, args[i], "-f") or std.mem.eql(u8, args[i], "-t")) and i + 1 < args.len) {
-            i += 1; // format/filter/target: not implemented
+        } else if ((std.mem.eql(u8, args[i], "-f") or std.mem.eql(u8, args[i], "-O")) and i + 1 < args.len) {
+            i += 1; // filter/order parsed but not implemented
+        } else if (std.mem.eql(u8, args[i], "-F") and i + 1 < args.len) {
+            i += 1;
+            format = args[i];
+        } else if (std.mem.eql(u8, args[i], "-t") and i + 1 < args.len) {
+            i += 1;
+            target_spec = args[i];
         }
     }
 
@@ -3433,32 +3514,46 @@ fn cmdListPanes(ctx: *Context, args: []const []const u8) CmdError!void {
         for (ctx.server.sessions.items) |session| {
             for (session.windows.items, 0..) |window, wi| {
                 for (window.panes.items, 0..) |pane, pi| {
-                    const active_mark: []const u8 = if (window.active_pane == pane) " (active)" else "";
-                    try writeOutput(ctx, "{s}:{d}.{d}: [%{d}] [{d}x{d}]{s}\n", .{
-                        session.name, wi, pi, pane.id, pane.sx, pane.sy, active_mark,
-                    });
+                    const window_index = session.options.base_index + @as(u32, @intCast(wi));
+                    try writeListPaneLine(ctx, session, window, pane, window_index, pi, format, true, false);
                 }
             }
         }
         return;
     }
 
-    const session = ctx.session orelse return CmdError.SessionNotFound;
+    const target_ctx = resolvedTargetContext(ctx, args);
+
+    const session = target_ctx.session orelse return CmdError.SessionNotFound;
 
     if (session_level) {
         for (session.windows.items, 0..) |window, wi| {
             for (window.panes.items, 0..) |pane, pi| {
-                const active_mark: []const u8 = if (window.active_pane == pane) " (active)" else "";
-                try writeOutput(ctx, "{d}.{d}: [%{d}] [{d}x{d}]{s}\n", .{ wi, pi, pane.id, pane.sx, pane.sy, active_mark });
+                const window_index = session.options.base_index + @as(u32, @intCast(wi));
+                try writeListPaneLine(ctx, session, window, pane, window_index, pi, format, false, true);
             }
         }
         return;
     }
 
-    const window = session.active_window orelse return CmdError.WindowNotFound;
+    const window = target_ctx.window orelse session.active_window orelse return CmdError.WindowNotFound;
+    if (target_spec) |spec| {
+        if (std.mem.indexOfScalar(u8, spec, '.')) |_| {
+            const pane = target_ctx.pane orelse return CmdError.PaneNotFound;
+            for (window.panes.items, 0..) |candidate, pi| {
+                if (candidate == pane) {
+                    const window_index = displayedWindowIndex(session, window);
+                    try writeListPaneLine(ctx, session, window, pane, window_index, pi, format, false, false);
+                    return;
+                }
+            }
+            return CmdError.PaneNotFound;
+        }
+    }
+
+    const window_index = displayedWindowIndex(session, window);
     for (window.panes.items, 0..) |pane, pi| {
-        const active_mark: []const u8 = if (window.active_pane == pane) " (active)" else "";
-        try writeOutput(ctx, "{d}: [%{d}] [{d}x{d}]{s}\n", .{ pi, pane.id, pane.sx, pane.sy, active_mark });
+        try writeListPaneLine(ctx, session, window, pane, window_index, pi, format, false, false);
     }
 }
 
@@ -4225,6 +4320,59 @@ fn cmdShowPromptHistory(ctx: *Context, args: []const []const u8) CmdError!void {
     }
 }
 
+fn getOrCreateWaitChannel(server: *Server, name: []const u8) CmdError!*Server.WaitChannel {
+    if (server.wait_channels.getPtr(name)) |channel| return channel;
+
+    const owned_name = server.allocator.dupe(u8, name) catch return CmdError.OutOfMemory;
+    errdefer server.allocator.free(owned_name);
+
+    server.wait_channels.put(owned_name, .{}) catch return CmdError.OutOfMemory;
+    return server.wait_channels.getPtr(name).?;
+}
+
+fn lockWaitChannels(server: *Server) void {
+    while (!server.wait_channels_mutex.tryLock()) {
+        std.Thread.yield() catch {};
+    }
+}
+
+fn unlockWaitChannels(server: *Server) void {
+    server.wait_channels_mutex.unlock();
+}
+
+fn createWaitPipe() CmdError![2]std.c.fd_t {
+    var pipe_fds: [2]std.c.fd_t = undefined;
+    if (std.c.pipe(&pipe_fds) != 0) return CmdError.CommandFailed;
+    return pipe_fds;
+}
+
+fn wakeWaiter(fd: std.c.fd_t) void {
+    const byte = [_]u8{1};
+    _ = std.c.write(fd, &byte, byte.len);
+    _ = std.c.close(fd);
+}
+
+fn removeWaitChannel(server: *Server, name: []const u8) void {
+    if (server.wait_channels.fetchRemove(name)) |removed| {
+        server.allocator.free(removed.key);
+        var channel = removed.value;
+        channel.deinit(server.allocator);
+    }
+}
+
+fn blockOnWaitPipe(read_fd: std.c.fd_t) CmdError!void {
+    defer _ = std.c.close(read_fd);
+
+    var byte: [1]u8 = undefined;
+    while (true) {
+        const rc = std.c.read(read_fd, &byte, byte.len);
+        if (rc > 0) return;
+        if (rc == 0) return;
+        if (@as(std.c.E, @enumFromInt(std.c._errno().*)) == .INTR) continue;
+        return CmdError.CommandFailed;
+    }
+}
+
 fn cmdWaitFor(ctx: *Context, args: []const []const u8) CmdError!void {
     var is_lock = false;
     var is_signal = false;
@@ -4245,27 +4393,98 @@ fn cmdWaitFor(ctx: *Context, args: []const []const u8) CmdError!void {
 
     const ch = channel orelse return CmdError.InvalidArgs;
 
-    if (is_signal or is_unlock) {
-        if (ctx.server.wait_channels.fetchRemove(ch)) |removed| {
-            ctx.server.allocator.free(removed.key);
-            var wc = removed.value;
-            wc.deinit(ctx.server.allocator);
+    const mode_count: u8 =
+        @as(u8, @intFromBool(is_lock)) +
+        @as(u8, @intFromBool(is_signal)) +
+        @as(u8, @intFromBool(is_unlock));
+    if (mode_count > 1) return CmdError.InvalidArgs;
+
+    if (is_signal) {
+        lockWaitChannels(ctx.server);
+        defer unlockWaitChannels(ctx.server);
+
+        if (ctx.server.wait_channels.getPtr(ch)) |wait_channel| {
+            for (wait_channel.waiters.items) |fd| wakeWaiter(fd);
+            wait_channel.waiters.clearRetainingCapacity();
+            if (!wait_channel.locked and wait_channel.lock_waiters.items.len == 0) {
+                removeWaitChannel(ctx.server, ch);
+            }
+        }
+        return;
+    }
+
+    if (is_unlock) {
+        lockWaitChannels(ctx.server);
+        defer unlockWaitChannels(ctx.server);
+
+        if (ctx.server.wait_channels.getPtr(ch)) |wait_channel| {
+            if (wait_channel.lock_waiters.items.len > 0) {
+                const waiter_fd = wait_channel.lock_waiters.orderedRemove(0);
+                wait_channel.locked = true;
+                wakeWaiter(waiter_fd);
+            } else {
+                wait_channel.locked = false;
+                if (wait_channel.waiters.items.len == 0) {
+                    removeWaitChannel(ctx.server, ch);
+                }
+            }
         }
         return;
     }
 
     if (is_lock) {
-        if (!ctx.server.wait_channels.contains(ch)) {
-            const owned_ch = ctx.server.allocator.dupe(u8, ch) catch return CmdError.OutOfMemory;
-            ctx.server.wait_channels.put(owned_ch, .empty) catch {
-                ctx.server.allocator.free(owned_ch);
+        lockWaitChannels(ctx.server);
+        if (ctx.server.wait_channels.getPtr(ch)) |wait_channel| {
+            if (!wait_channel.locked) {
+                wait_channel.locked = true;
+                unlockWaitChannels(ctx.server);
+                return;
+            }
+
+            const pipe_fds = createWaitPipe() catch |err| {
+                unlockWaitChannels(ctx.server);
+                return err;
+            };
+            errdefer {
+                _ = std.c.close(pipe_fds[0]);
+                _ = std.c.close(pipe_fds[1]);
+            }
+
+            wait_channel.lock_waiters.append(ctx.server.allocator, pipe_fds[1]) catch {
+                unlockWaitChannels(ctx.server);
                 return CmdError.OutOfMemory;
             };
+            unlockWaitChannels(ctx.server);
+            return blockOnWaitPipe(pipe_fds[0]);
         }
+
+        const wait_channel = getOrCreateWaitChannel(ctx.server, ch) catch |err| {
+            unlockWaitChannels(ctx.server);
+            return err;
+        };
+        wait_channel.locked = true;
+        unlockWaitChannels(ctx.server);
         return;
     }
 
-    // No flag: block until signaled — not supported without async I/O; return immediately.
+    const pipe_fds = try createWaitPipe();
+    errdefer {
+        _ = std.c.close(pipe_fds[0]);
+        _ = std.c.close(pipe_fds[1]);
+    }
+
+    lockWaitChannels(ctx.server);
+    const wait_channel = getOrCreateWaitChannel(ctx.server, ch) catch |err| {
+        unlockWaitChannels(ctx.server);
+        return err;
+    };
+    wait_channel.waiters.append(ctx.server.allocator, pipe_fds[1]) catch {
+        unlockWaitChannels(ctx.server);
+        return CmdError.OutOfMemory;
+    };
+    unlockWaitChannels(ctx.server);
+
+    return blockOnWaitPipe(pipe_fds[0]);
 }
 
 fn cmdServerAccess(ctx: *Context, args: []const []const u8) CmdError!void {

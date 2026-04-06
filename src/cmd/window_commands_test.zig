@@ -601,6 +601,28 @@ test "select-window -p goes to previous" {
     try std.testing.expectEqualStrings("win", session.active_window.?.name);
 }
 
+test "select-window -t accepts tmux colon target syntax" {
+    var server = try initServer();
+    defer server.deinit();
+
+    const session = try makeSession(std.testing.allocator, "s1");
+    try server.sessions.append(std.testing.allocator, session);
+    server.default_session = session;
+
+    const w2 = try Window.init(std.testing.allocator, "second", 80, 24);
+    const p2 = try Pane.init(std.testing.allocator, 80, 24);
+    try w2.addPane(p2);
+    try session.addWindow(w2);
+
+    var registry = cmd.Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.registerBuiltins();
+
+    var ctx = makeContext(&server, session, &registry, null);
+    try registry.execute(&ctx, "select-window", &.{ "-t", ":1" });
+    try std.testing.expect(session.active_window == w2);
+}
+
 // ---------- split-window flags ----------
 
 test "split-window -d does not select new pane" {

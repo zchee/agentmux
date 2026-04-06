@@ -31,6 +31,19 @@ pub const AclEntry = struct {
 
 /// Server state.
 pub const Server = struct {
+    pub const WaitChannel = struct {
+        locked: bool = false,
+        waiters: std.ArrayListAligned(std.c.fd_t, null) = .empty,
+        lock_waiters: std.ArrayListAligned(std.c.fd_t, null) = .empty,
+
+        pub fn deinit(self: *WaitChannel, alloc: std.mem.Allocator) void {
+            for (self.waiters.items) |fd| _ = std.c.close(fd);
+            self.waiters.deinit(alloc);
+            for (self.lock_waiters.items) |fd| _ = std.c.close(fd);
+            self.lock_waiters.deinit(alloc);
+        }
+    };
+
     listen_fd: std.c.fd_t,
     socket_path: []const u8,
     sessions: std.ArrayListAligned(*Session, null),
@@ -41,7 +54,8 @@ pub const Server = struct {
     session_loop: SessionLoop,
     binding_manager: binding_mod.BindingManager,
     hook_registry: hooks_mod.HookRegistry,
-    wait_channels: std.StringHashMap(std.ArrayListAligned(std.c.fd_t, null)),
+    wait_channels: std.StringHashMap(WaitChannel),
+    wait_channels_mutex: std.atomic.Mutex,
     prompt_history: std.ArrayListAligned([]const u8, null),
     acl_entries: std.ArrayListAligned(AclEntry, null),
     global_default_shell: ?[:0]u8,
@@ -79,7 +93,8 @@ pub const Server = struct {
             .session_loop = SessionLoop.init(alloc),
             .binding_manager = bm,
             .hook_registry = hooks_mod.HookRegistry.init(alloc),
-            .wait_channels = std.StringHashMap(std.ArrayListAligned(std.c.fd_t, null)).init(alloc),
+            .wait_channels = std.StringHashMap(WaitChannel).init(alloc),
+            .wait_channels_mutex = .unlocked,
             .prompt_history = .empty,
             .acl_entries = .empty,
             .global_default_shell = null,

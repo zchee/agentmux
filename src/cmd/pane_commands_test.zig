@@ -313,6 +313,84 @@ test "list-panes -s covers all windows in session" {
     try std.testing.expect(std.mem.indexOf(u8, line1, "1.0:") != null);
 }
 
+test "list-panes -t targets a specific window" {
+    var server = try initServer();
+    defer {
+        cleanupServer(&server);
+        server.deinit();
+    }
+
+    const pipes = try makePipe();
+    defer {
+        _ = std.c.close(pipes[0]);
+        _ = std.c.close(pipes[1]);
+    }
+
+    const session = try makeSession(std.testing.allocator, "s1");
+    try server.sessions.append(std.testing.allocator, session);
+    server.default_session = session;
+
+    const target_window = try Window.init(std.testing.allocator, "target", 80, 24);
+    const target_pane_0 = try Pane.init(std.testing.allocator, 40, 12);
+    const target_pane_1 = try Pane.init(std.testing.allocator, 20, 10);
+    try target_window.addPane(target_pane_0);
+    try target_window.addPane(target_pane_1);
+    try session.addWindow(target_window);
+
+    var registry = cmd.Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.registerBuiltins();
+
+    var ctx = makeContext(&server, session, &registry, pipes[1]);
+    try registry.execute(&ctx, "list-panes", &.{ "-t", ":1", "-F", "#{window_name}:#{pane_index}" });
+
+    const line0 = try readReply(std.testing.allocator, pipes[0]);
+    defer std.testing.allocator.free(line0);
+    try std.testing.expectEqualStrings("target:0", std.mem.trim(u8, line0, "\n"));
+
+    const line1 = try readReply(std.testing.allocator, pipes[0]);
+    defer std.testing.allocator.free(line1);
+    try std.testing.expectEqualStrings("target:1", std.mem.trim(u8, line1, "\n"));
+}
+
+test "list-panes -F expands per-pane format context" {
+    var server = try initServer();
+    defer {
+        cleanupServer(&server);
+        server.deinit();
+    }
+
+    const pipes = try makePipe();
+    defer {
+        _ = std.c.close(pipes[0]);
+        _ = std.c.close(pipes[1]);
+    }
+
+    const session = try makeSession(std.testing.allocator, "alpha");
+    try server.sessions.append(std.testing.allocator, session);
+    server.default_session = session;
+
+    const window = session.active_window orelse return error.ExpectedWindow;
+    const second = try Pane.init(std.testing.allocator, 80, 24);
+    try window.addPane(second);
+    window.rename("compat") catch unreachable;
+
+    var registry = cmd.Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.registerBuiltins();
+
+    var ctx = makeContext(&server, session, &registry, pipes[1]);
+    try registry.execute(&ctx, "list-panes", &.{ "-F", "#S:#W:#I.#P" });
+
+    const line0 = try readReply(std.testing.allocator, pipes[0]);
+    defer std.testing.allocator.free(line0);
+    try std.testing.expectEqualStrings("alpha:compat:0.0", std.mem.trim(u8, line0, "\n"));
+
+    const line1 = try readReply(std.testing.allocator, pipes[0]);
+    defer std.testing.allocator.free(line1);
+    try std.testing.expectEqualStrings("alpha:compat:0.1", std.mem.trim(u8, line1, "\n"));
+}
+
 // ---------- kill-pane ----------
 
 test "kill-pane removes active pane" {

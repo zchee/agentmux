@@ -95,7 +95,7 @@ pub const ConfigParser = struct {
             return null;
         }
 
-        const name = try self.allocator.dupe(u8, name_tok.value);
+        const name = try self.dupTokenValue(name_tok);
         errdefer self.allocator.free(name);
 
         var args: std.ArrayListAligned([]const u8, null) = .empty;
@@ -108,12 +108,16 @@ pub const ConfigParser = struct {
         while (true) {
             self.skipInlineWhitespace();
             if (self.pos >= self.source.len) break;
+            if (self.peek() == '\\' and self.peekNext() == '\n') {
+                self.skipLineContinuation();
+                continue;
+            }
             if (self.peek() == '\n' or self.peek() == ';' or self.peek() == '#') break;
 
             const tok = try self.nextToken() orelse break;
             if (tok.kind == .newline or tok.kind == .semicolon or tok.kind == .comment or tok.kind == .eof) break;
 
-            const arg = try self.allocator.dupe(u8, tok.value);
+            const arg = try self.dupTokenValue(tok);
             try args.append(self.allocator, arg);
         }
 
@@ -148,6 +152,10 @@ pub const ConfigParser = struct {
         const start = self.pos;
         while (self.pos < self.source.len) {
             const ch = self.source[self.pos];
+            if (ch == '\\' and self.pos + 1 < self.source.len) {
+                self.pos += 2;
+                continue;
+            }
             if (ch == ' ' or ch == '\t' or ch == '\n' or ch == ';' or ch == '#' or ch == '"' or ch == '\'') break;
             self.pos += 1;
         }
@@ -185,6 +193,11 @@ pub const ConfigParser = struct {
         return self.source[self.pos];
     }
 
+    fn peekNext(self: *const ConfigParser) u8 {
+        if (self.pos + 1 >= self.source.len) return 0;
+        return self.source[self.pos + 1];
+    }
+
     fn skipWhitespace(self: *ConfigParser) void {
         while (self.pos < self.source.len and (self.source[self.pos] == ' ' or self.source[self.pos] == '\t')) {
             self.pos += 1;
@@ -197,11 +210,54 @@ pub const ConfigParser = struct {
         }
     }
 
+    fn skipLineContinuation(self: *ConfigParser) void {
+        if (self.peek() != '\\' or self.peekNext() != '\n') return;
+        self.pos += 2;
+        self.skipInlineWhitespace();
+    }
+
     fn skipLine(self: *ConfigParser) void {
         while (self.pos < self.source.len and self.source[self.pos] != '\n') {
             self.pos += 1;
         }
         if (self.pos < self.source.len) self.pos += 1; // skip newline
+    }
+
+    fn dupTokenValue(self: *ConfigParser, tok: Token) ![]u8 {
+        if (tok.kind == .string_single or std.mem.indexOfScalar(u8, tok.value, '\\') == null) {
+            return self.allocator.dupe(u8, tok.value);
+        }
+
+        var out: std.ArrayListAligned(u8, null) = .empty;
+        errdefer out.deinit(self.allocator);
+
+        var i: usize = 0;
+        while (i < tok.value.len) {
+            if (tok.value[i] == '\\' and i + 1 < tok.value.len) {
+                const next = tok.value[i + 1];
+                if (next == '\n') {
+                    i += 2;
+                    while (i < tok.value.len and (tok.value[i] == ' ' or tok.value[i] == '\t')) {
+                        i += 1;
+                    }
+                    continue;
+                }
+
+                switch (next) {
+                    ';', '#', '\\', '"', '\'', ' ' => {
+                        try out.append(self.allocator, next);
+                        i += 2;
+                        continue;
+                    },
+                    else => {},
+                }
+            }
+
+            try out.append(self.allocator, tok.value[i]);
+            i += 1;
+        }
+
+        return out.toOwnedSlice(self.allocator);
     }
 };
 
@@ -272,4 +328,37 @@ test "parse semicolon separator" {
     }
 
     try std.testing.expectEqual(@as(usize, 2), cmds.items.len);
+}
+
+test "parse escaped semicolon as argument" {
+    const alloc = std.testing.allocator;
+    var parser = ConfigParser.init(alloc, "bind-key r source-file ~/.tmux.conf \\; display-message 'reloaded'\n");
+    var cmds = try parser.parseAll();
+    defer {
+        for (cmds.items) |*c| c.deinit(alloc);
+        cmds.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), cmds.items.len);
+    try std.testing.expectEqualStrings("bind-key", cmds.items[0].name);
+    try std.testing.expectEqual(@as(usize, 6), cmds.items[0].args.items.len);
+    try std.testing.expectEqualStrings(";", cmds.items[0].args.items[3]);
+    try std.testing.expectEqualStrings("display-message", cmds.items[0].args.items[4]);
+    try std.testing.expectEqualStrings("reloaded", cmds.items[0].args.items[5]);
+}
+
+test "parse backslash newline continuation in same command" {
+    const alloc = std.testing.allocator;
+    var parser = ConfigParser.init(alloc, "bind-key r \\\n  send-prefix\n");
+    var cmds = try parser.parseAll();
+    defer {
+        for (cmds.items) |*c| c.deinit(alloc);
+        cmds.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), cmds.items.len);
+    try std.testing.expectEqualStrings("bind-key", cmds.items[0].name);
+    try std.testing.expectEqual(@as(usize, 2), cmds.items[0].args.items.len);
+    try std.testing.expectEqualStrings("r", cmds.items[0].args.items[0]);
+    try std.testing.expectEqualStrings("send-prefix", cmds.items[0].args.items[1]);
 }

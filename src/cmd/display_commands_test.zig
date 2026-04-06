@@ -111,6 +111,36 @@ test "display-message -v prefixes output" {
     try std.testing.expect(std.mem.indexOf(u8, msg.payload, "[display-message]") != null);
 }
 
+test "display-message -t uses target window and pane for format expansion" {
+    var server = try initServer();
+    defer server.deinit();
+
+    const session = try makeSession("demo");
+    try server.sessions.append(std.testing.allocator, session);
+
+    const target_window = try Window.init(std.testing.allocator, "target", 80, 24);
+    const target_pane_0 = try Pane.init(std.testing.allocator, 80, 24);
+    const target_pane_1 = try Pane.init(std.testing.allocator, 80, 24);
+    try target_window.addPane(target_pane_0);
+    try target_window.addPane(target_pane_1);
+    try session.addWindow(target_window);
+
+    var registry = cmd.Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.registerBuiltins();
+
+    const fds = try makePipe();
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    var ctx = initContext(&server, session, &registry, fds[1]);
+    try registry.execute(&ctx, "display-message", &.{ "-t", ":1.1", "#W:#P" });
+
+    var msg = try protocol.recvMessageAlloc(std.testing.allocator, fds[0]);
+    defer msg.deinit();
+    try std.testing.expectEqualStrings("target:1\n", msg.payload);
+}
+
 test "display-menu renders title and entries" {
     var server = try initServer();
     defer server.deinit();
