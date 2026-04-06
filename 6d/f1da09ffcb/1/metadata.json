@@ -1,0 +1,28 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "6df1da09ffcb",
+  "session_id": "019d6485-bcbc-7a32-b5ea-36d4dd13d2f4",
+  "strategy": "manual-commit",
+  "created_at": "2026-04-06T20:49:05.141753Z",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "src/status/style.zig",
+    "src/server.zig",
+    "src/status/status.zig"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.4",
+  "turn_id": "3f6d1be92c1a",
+  "initial_attribution": {
+    "calculated_at": "2026-04-06T20:49:05.046122Z",
+    "agent_lines": 223,
+    "agent_removed": 8,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 223,
+    "total_lines_changed": 231,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
+}
