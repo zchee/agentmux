@@ -1,0 +1,33 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "56effc4574f0",
+  "session_id": "019d6384-e708-7b80-a575-1cfa31b9e4db",
+  "strategy": "manual-commit",
+  "created_at": "2026-04-06T21:38:59.497844Z",
+  "branch": "main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "README.md",
+    "src/server.zig",
+    "src/status/format.zig",
+    "src/status/status.zig",
+    "src/status/style.zig"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.3-codex-spark",
+  "turn_id": "65e592fe36e3",
+  "checkpoint_transcript_start": 8,
+  "transcript_lines_at_start": 8,
+  "initial_attribution": {
+    "calculated_at": "2026-04-06T21:38:59.415298Z",
+    "agent_lines": 324,
+    "agent_removed": 48,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 324,
+    "total_lines_changed": 372,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
+}
