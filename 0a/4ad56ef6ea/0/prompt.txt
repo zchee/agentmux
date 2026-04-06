@@ -1,0 +1,30 @@
+$deep-interview --deep "Reimplementing tmux in zig language"
+
+---
+
+Why do you want this project to exist?: 2
+What would you explicitly sacrifice first if tradeoffs force it: exact tmux compatibility, GPU/native UI features, or delivery speed?: tmux compatibility
+
+---
+
+$team 6:executor .omx/specs/deep-interview-reimplementing-tmux-in-zig-language.md
+
+---
+
+Continue from current mode state. [OMX_TMUX_INJECT]
+
+---
+
+Team omx-specs-deep-interview-reimp: 36 msg(s) for leader. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown omx-specs-deep-interview-reimp. [OMX_TMUX_INJECT]
+
+---
+
+Cleanup `ba6a21c8871c...b2d65f10ca93` commits
+
+---
+
+Cleanup `c509f558217f...b2d65f10ca93` commits
+
+---
+
+$commit
