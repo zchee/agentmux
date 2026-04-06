@@ -88,6 +88,13 @@ pub const HookRegistry = struct {
         const list = self.hooks.get(hook_type) orelse return 0;
         return list.items.len;
     }
+
+    /// Fire all hooks for a given event type.
+    /// Returns the list of hook commands to execute.
+    /// Caller is responsible for executing them in the appropriate context.
+    pub fn fire(self: *const HookRegistry, hook_type: HookType) []const Hook {
+        return self.getHooks(hook_type);
+    }
 };
 
 test "add and get hooks" {

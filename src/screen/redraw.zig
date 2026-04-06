@@ -146,6 +146,75 @@ fn colourEql(a: colour.Colour, b: colour.Colour) bool {
     };
 }
 
+/// Redraw dirty lines from screen to output at a given offset within a larger composed view.
+pub fn redrawAt(tracker: *DirtyTracker, scr: *Screen, out: *Output, xoff: u32, yoff: u32) void {
+    var cur_fg: colour.Colour = .default;
+    var cur_bg: colour.Colour = .default;
+    var cur_attrs: colour.Attributes = .{};
+
+    var y: u32 = 0;
+    while (y < scr.grid.rows) : (y += 1) {
+        if (!tracker.isDirty(y)) continue;
+
+        out.cursorTo(xoff, yoff + y);
+        const line = scr.grid.getLine(y);
+
+        var x: u32 = 0;
+        while (x < scr.grid.cols) : (x += 1) {
+            const cell = &line.cells[x];
+
+            if (cell.width == 0 and cell.codepoint == 0) continue;
+
+            if (@as(u16, @bitCast(cell.attrs)) != @as(u16, @bitCast(cur_attrs))) {
+                out.attrReset();
+                out.setAttrs(cell.attrs);
+                cur_fg = .default;
+                cur_bg = .default;
+                cur_attrs = cell.attrs;
+            }
+
+            if (!colourEql(cell.fg, cur_fg)) {
+                out.setFg(cell.fg);
+                cur_fg = cell.fg;
+            }
+            if (!colourEql(cell.bg, cur_bg)) {
+                out.setBg(cell.bg);
+                cur_bg = cell.bg;
+            }
+
+            if (cell.codepoint >= 0x20) {
+                var utf8_buf: [4]u8 = undefined;
+                const len = std.unicode.utf8Encode(cell.codepoint, &utf8_buf) catch 1;
+                out.writeBytes(utf8_buf[0..len]);
+            } else {
+                out.writeBytes(" ");
+            }
+        }
+    }
+
+    tracker.clearDirty();
+}
+
+/// Draw a vertical border line at column x from top_y to bottom_y inclusive.
+pub fn drawVerticalBorder(out: *Output, x: u32, top_y: u32, bottom_y: u32) void {
+    out.attrReset();
+    var y = top_y;
+    while (y <= bottom_y) : (y += 1) {
+        out.cursorTo(x, y);
+        out.writeBytes("\xe2\x94\x82"); // U+2502 vertical line
+    }
+}
+
+/// Draw a horizontal border line at row y from left_x to right_x inclusive.
+pub fn drawHorizontalBorder(out: *Output, y: u32, left_x: u32, right_x: u32) void {
+    out.attrReset();
+    out.cursorTo(left_x, y);
+    var x = left_x;
+    while (x <= right_x) : (x += 1) {
+        out.writeBytes("\xe2\x94\x80"); // U+2500 horizontal line
+    }
+}
+
 test "dirty tracker" {
     var tracker = try DirtyTracker.init(std.testing.allocator, 24);
     defer tracker.deinit();

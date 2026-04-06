@@ -228,6 +228,39 @@ pub const Server = struct {
         self.loadConfigFile(path);
     }
 
+    /// Fire all registered hooks for a given event type.
+    /// Executes each hook command through the command registry.
+    pub fn fireHooks(self: *Server, hook_type: hooks_mod.HookType) void {
+        const hook_list = self.hook_registry.fire(hook_type);
+        if (hook_list.len == 0) return;
+
+        var registry = cmd.Registry.init(self.allocator);
+        defer registry.deinit();
+        registry.registerBuiltins() catch return;
+
+        var ctx = cmd.Context{
+            .server = self,
+            .session = self.default_session,
+            .window = if (self.default_session) |s| s.active_window else null,
+            .pane = if (self.default_session) |s| if (s.active_window) |w| w.active_pane else null else null,
+            .allocator = self.allocator,
+            .registry = &registry,
+            .binding_manager = &self.binding_manager,
+        };
+
+        for (hook_list) |hook| {
+            var parser = config_parser.ConfigParser.init(self.allocator, hook.command);
+            var commands = parser.parseAll() catch continue;
+            defer {
+                for (commands.items) |*command| command.deinit(self.allocator);
+                commands.deinit(self.allocator);
+            }
+            for (commands.items) |*command| {
+                registry.executeParsed(&ctx, command) catch {};
+            }
+        }
+    }
+
     pub fn createSession(self: *Server, name: []const u8, shell: [:0]const u8, cols: u32, rows: u32) !*Session {
         const session = try Session.init(self.allocator, name);
         errdefer session.deinit();
@@ -249,6 +282,9 @@ pub const Server = struct {
         try self.sessions.append(self.allocator, session);
         if (self.default_session == null) self.default_session = session;
         try self.session_loop.addPane(pane.id, pane.fd, cols, rows);
+
+        self.fireHooks(.after_new_session);
+
         return session;
     }
 
@@ -554,6 +590,7 @@ pub const Server = struct {
             state.deinit();
             self.choose_tree_state = null;
         }
+        self.fireHooks(.session_closed);
         session.deinit();
     }
 
@@ -565,6 +602,7 @@ pub const Server = struct {
         }
         protocol.sendMessage(client.fd, .detach, &.{}) catch {};
         client.session = null;
+        self.fireHooks(.client_detached);
     }
 
     pub fn findClientIndex(self: *const Server, fd: std.c.fd_t) ?usize {
@@ -805,7 +843,7 @@ pub const Server = struct {
         session: *Session,
         pane_state_opt: ?*server_loop.PaneState,
     ) !void {
-        const ps = pane_state_opt orelse return error.NoPaneState;
+        _ = pane_state_opt;
 
         // Use a pipe so Output can flush to the write end while we
         // collect the bytes from the read end. Set write end non-blocking
@@ -819,18 +857,55 @@ pub const Server = struct {
             _ = std.c.fcntl(pipe_fds[1], std.c.F.SETFL, fl | @as(i32, @bitCast(std.c.O{ .NONBLOCK = true })));
         }
 
-        // Render dirty screen lines through the redraw pipeline.
+        const redraw_mod = @import("screen/redraw.zig");
         var out = output_mod.Output.init(pipe_fds[1]);
-        ps.renderTo(&out);
+
+        // Render all panes in the active window at their layout offsets.
+        const window = session.active_window orelse {
+            _ = std.c.close(pipe_fds[1]);
+            return error.NoPaneState;
+        };
+        const pane_count = window.panes.items.len;
+
+        if (pane_count <= 1) {
+            // Single pane: render directly (fast path).
+            if (window.active_pane) |pane| {
+                if (self.session_loop.getPane(pane.id)) |ps| {
+                    ps.renderTo(&out);
+                }
+            }
+        } else {
+            // Multi-pane: render each pane at its offset, then draw borders.
+            out.hideCursor();
+            for (window.panes.items) |pane| {
+                if (self.session_loop.getPane(pane.id)) |ps| {
+                    redraw_mod.redrawAt(&ps.dirty, &ps.screen, &out, pane.xoff, pane.yoff);
+                }
+            }
+
+            // Draw borders between panes using layout info.
+            if (window.layout_root) |root| {
+                self.drawLayoutBorders(&out, root, window.sx, window.sy);
+            }
+
+            // Position cursor at the active pane's cursor location.
+            if (window.active_pane) |active| {
+                if (self.session_loop.getPane(active.id)) |ps| {
+                    out.cursorTo(active.xoff + ps.screen.cx, active.yoff + ps.screen.cy);
+                    if (ps.screen.mode.cursor_visible) {
+                        out.showCursor();
+                    }
+                }
+            }
+        }
 
         // Render status bar on the last row.
-        const window = session.active_window;
-        const cols: u32 = if (window) |w| w.sx else 80;
-        const rows: u32 = if (window) |w| w.sy else 24;
+        const cols: u32 = window.sx;
+        const rows: u32 = window.sy;
 
         const fmt_ctx = status_fmt.FormatContext{
             .session_name = session.name,
-            .window_name = if (window) |w| w.name else "",
+            .window_name = window.name,
         };
         const status_bar = @import("status/status.zig").StatusBar.init();
         const status_line = status_bar.render(self.allocator, cols, &fmt_ctx) catch null;
@@ -861,6 +936,52 @@ pub const Server = struct {
 
         if (total > 0) {
             try protocol.sendMessage(client_fd, .output, rendered[0..total]);
+        }
+    }
+
+    /// Recursively draw border lines between panes based on the layout tree.
+    fn drawLayoutBorders(self: *Server, out: *output_mod.Output, cell: *const @import("layout/layout.zig").LayoutCell, total_cols: u32, total_rows: u32) void {
+        if (cell.cell_type == .pane) return;
+
+        const children = cell.children.items;
+        if (children.len < 2) {
+            for (children) |child| {
+                self.drawLayoutBorders(out, child, total_cols, total_rows);
+            }
+            return;
+        }
+
+        // Draw borders between adjacent children.
+        for (children[0 .. children.len - 1]) |child| {
+
+            if (cell.cell_type == .horizontal) {
+                // Vertical border: draw at (child.xoff + child.sx, child.yoff) to (child.xoff + child.sx, child.yoff + child.sy - 1)
+                const bx = child.xoff + child.sx;
+                const top = child.yoff;
+                const bottom = child.yoff + child.sy -| 1;
+                out.attrReset();
+                var y = top;
+                while (y <= bottom) : (y += 1) {
+                    out.cursorTo(bx, y);
+                    out.writeBytes("\xe2\x94\x82"); // U+2502 │
+                }
+            } else if (cell.cell_type == .vertical) {
+                // Horizontal border: draw at (child.xoff, child.yoff + child.sy) to (child.xoff + child.sx - 1, child.yoff + child.sy)
+                const by = child.yoff + child.sy;
+                const left = child.xoff;
+                const right = child.xoff + child.sx -| 1;
+                out.attrReset();
+                out.cursorTo(left, by);
+                var x = left;
+                while (x <= right) : (x += 1) {
+                    out.writeBytes("\xe2\x94\x80"); // U+2500 ─
+                }
+            }
+        }
+
+        // Recurse into children.
+        for (children) |child| {
+            self.drawLayoutBorders(out, child, total_cols, total_rows);
         }
     }
 
@@ -933,6 +1054,7 @@ pub const Server = struct {
         client.session = session;
         if (session) |current| {
             current.attached += 1;
+            self.fireHooks(.client_attached);
         }
     }
 

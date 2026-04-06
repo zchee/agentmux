@@ -16,6 +16,8 @@ pub const PaneState = struct {
     parser: input.Parser,
     screen: screen_mod.Screen,
     dirty: redraw_mod.DirtyTracker,
+    bell_pending: bool,
+    activity_pending: bool,
     allocator: std.mem.Allocator,
 
     pub fn init(alloc: std.mem.Allocator, pane_id: u32, pty_fd: std.c.fd_t, cols: u32, rows: u32, hlimit: u32) !PaneState {
@@ -25,6 +27,8 @@ pub const PaneState = struct {
             .parser = input.Parser.init(),
             .screen = screen_mod.Screen.init(alloc, cols, rows, hlimit),
             .dirty = try redraw_mod.DirtyTracker.init(alloc, rows),
+            .bell_pending = false,
+            .activity_pending = false,
             .allocator = alloc,
         };
     }
@@ -38,6 +42,18 @@ pub const PaneState = struct {
     /// Feeds through parser -> input_handler -> screen state.
     /// Marks changed lines as dirty.
     pub fn processPtyOutput(self: *PaneState, data: []const u8) void {
+        // Scan for BEL (0x07) to detect bell events.
+        for (data) |byte| {
+            if (byte == 0x07) {
+                self.bell_pending = true;
+                break;
+            }
+        }
+        // Any output is activity.
+        if (data.len > 0) {
+            self.activity_pending = true;
+        }
+
         const old_cy = self.screen.cy;
         input_handler.processBytes(&self.parser, &self.screen, data);
         // Mark affected lines dirty
