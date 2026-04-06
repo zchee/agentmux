@@ -54,6 +54,15 @@ fn handleCSI(scr: *Screen, csi: CSI) void {
         return;
     }
 
+    // DECSCUSR: CSI Ps SP q — set cursor style
+    if (csi.intermediate_count > 0 and csi.intermediates[0] == ' ' and csi.final == 'q') {
+        const style = csi.getParam(0, 0);
+        if (style <= 6) {
+            scr.cstyle = @enumFromInt(@as(u3, @intCast(style)));
+        }
+        return;
+    }
+
     var w = Writer.init(scr);
     switch (csi.final) {
         'A' => { // CUU - cursor up

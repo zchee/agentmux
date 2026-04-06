@@ -118,9 +118,10 @@ pub fn redraw(tracker: *DirtyTracker, scr: *Screen, out: *Output) void {
     // Position cursor
     out.cursorTo(scr.cx, scr.cy);
 
-    // Show/hide cursor
+    // Show/hide cursor and set cursor style
     if (scr.mode.cursor_visible) {
         out.showCursor();
+        out.setCursorStyle(@intFromEnum(scr.cstyle));
     } else {
         out.hideCursor();
     }

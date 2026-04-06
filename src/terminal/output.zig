@@ -167,6 +167,11 @@ pub const Output = struct {
         self.writeBytes("\x1b[?25h");
     }
 
+    /// Set cursor style via DECSCUSR (ESC [ Ps SP q).
+    pub fn setCursorStyle(self: *Output, style: u3) void {
+        self.print("\x1b[{d} q", .{@as(u32, style)});
+    }
+
     // -- Alternate screen buffer --
 
     pub fn enterAltScreen(self: *Output) void {
