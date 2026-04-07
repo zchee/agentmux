@@ -1,4 +1,4 @@
-$autopilot "When launching `zmux new -s test`, CPU usage was 100%. Fix it."
+$autopilot "The zsh instance started with `zmux new -s test` now accepts input, but the delay before keys are registered is too long. I need to investigate the cause and fix it."
 
 ---
 
