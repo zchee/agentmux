@@ -1,0 +1,28 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "9fbc3baeec57",
+  "strategy": "manual-commit",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "README.md",
+    "docs/libxev-migration-review.md",
+    "src/AGENTS.md",
+    "src/core/AGENTS.md",
+    "src/platform/AGENTS.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/9f/bc3baeec57/0/metadata.json",
+      "transcript": "/9f/bc3baeec57/0/full.jsonl",
+      "content_hash": "/9f/bc3baeec57/0/content_hash.txt",
+      "prompt": "/9f/bc3baeec57/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 94457,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 61824,
+    "output_tokens": 2638,
+    "api_call_count": 2
+  }
+}
