@@ -26,6 +26,7 @@ const event_loop_mod = @import("core/event_loop.zig");
 const platform = @import("platform/platform.zig");
 const GcdEventLoop = @import("platform/darwin.zig").GcdEventLoop;
 const IoUringEventLoop = @import("platform/linux.zig").IoUringEventLoop;
+const startup_probe = @import("startup_probe.zig");
 
 /// Server ACL entry.
 pub const AclEntry = struct {
@@ -70,22 +71,63 @@ pub const Server = struct {
     config_file: ?[]const u8,
     messages: std.ArrayListAligned([]u8, null),
     marked_pane: ?*Pane,
+    next_client_id: u64,
     running: bool,
     allocator: std.mem.Allocator,
     gcd_loop: if (builtin.os.tag == .macos) ?GcdEventLoop else void,
     uring_loop: if (builtin.os.tag == .linux) ?IoUringEventLoop else void,
 
     pub const ClientConnection = struct {
+        const RelayState = enum {
+            inactive,
+            startup_pending,
+            startup_active,
+            relay_done,
+        };
+
+        const ProbeRequest = struct {
+            request_id: u32,
+            kind: startup_probe.ProbeKind,
+        };
+
+        const InFlightProbe = struct {
+            request_id: u32,
+            kind: startup_probe.ProbeKind,
+        };
+
         fd: std.c.fd_t,
         session: ?*Session,
         identified: bool,
         choose_tree_state: ?ChooseTreeState,
         recv_state: protocol.RecvState = .{},
         locked: bool = false,
+        client_id: u64 = 0,
         pid: i32 = 0,
+        identify_flags: protocol.IdentifyFlags = .{},
+        term_name: [64]u8 = .{0} ** 64,
+        tty_name: [64]u8 = .{0} ** 64,
         cols: u16 = 80,
         rows: u16 = 24,
+        xpixel: u16 = 0,
+        ypixel: u16 = 0,
         prefix_active: bool = false,
+        relay_state: RelayState = .inactive,
+        relay_started_at_ns: u64 = 0,
+        relay_last_probe_ns: u64 = 0,
+        next_probe_request_id: u32 = 1,
+        pending_probe_requests: std.ArrayListAligned(ProbeRequest, null) = .empty,
+        inflight_probe: ?InFlightProbe = null,
+        probe_parse_buffer: std.ArrayListAligned(u8, null) = .empty,
+
+        fn deinit(self: *ClientConnection, alloc: std.mem.Allocator) void {
+            if (self.choose_tree_state) |*state| {
+                state.deinit();
+            }
+            self.recv_state.deinit(alloc);
+            self.pending_probe_requests.deinit(alloc);
+            self.probe_parse_buffer.deinit(alloc);
+            if (self.fd >= 0) _ = std.c.close(self.fd);
+        }
     };
 
     pub const WindowOptionDefaults = struct {
@@ -154,6 +196,7 @@ pub const Server = struct {
             .config_file = null,
             .messages = .empty,
             .marked_pane = null,
+            .next_client_id = 1,
             .running = false,
             .allocator = alloc,
             .gcd_loop = if (builtin.os.tag == .macos) null else {},
@@ -168,11 +211,7 @@ pub const Server = struct {
         }
         self.sessions.deinit(self.allocator);
         for (self.clients.items) |*client| {
-            if (client.choose_tree_state) |*state| {
-                state.deinit();
-            }
-            client.recv_state.deinit(self.allocator);
-            if (client.fd >= 0) _ = std.c.close(client.fd);
+            client.deinit(self.allocator);
         }
         self.clients.deinit(self.allocator);
         {
@@ -608,11 +647,14 @@ pub const Server = struct {
         const client_fd = std.c.accept(self.listen_fd, null, null);
         if (client_fd < 0) return;
         setFdNonblocking(client_fd);
+        const client_id = self.next_client_id;
+        self.next_client_id += 1;
         try self.clients.append(self.allocator, .{
             .fd = client_fd,
             .session = null,
             .identified = false,
             .choose_tree_state = null,
+            .client_id = client_id,
         });
     }
 
@@ -944,6 +986,10 @@ pub const Server = struct {
         }
         protocol.sendMessage(client.fd, .detach, &.{}) catch {};
         client.session = null;
+        client.relay_state = .inactive;
+        client.inflight_probe = null;
+        client.pending_probe_requests.clearRetainingCapacity();
+        client.probe_parse_buffer.clearRetainingCapacity();
         self.fireHooks(.client_detached);
     }
 
@@ -971,6 +1017,8 @@ pub const Server = struct {
             .command => try self.handleCommand(client_idx, message.payload),
             .key => self.handleClientKey(client_idx, message.payload),
             .resize => self.handleClientResize(client_idx, message.payload),
+            .terminal_probe_ready => self.handleTerminalProbeReady(client_idx),
+            .terminal_probe_rsp => try self.handleTerminalProbeRsp(client_idx, message.payload),
             .exit, .exiting => self.removeClient(client_idx),
             .shell => {},
             else => {},
@@ -982,8 +1030,13 @@ pub const Server = struct {
         const ident: *const protocol.IdentifyMsg = @ptrCast(@alignCast(payload.ptr));
         self.clients.items[client_idx].identified = true;
         self.clients.items[client_idx].pid = ident.pid;
+        self.clients.items[client_idx].identify_flags = ident.flags;
+        self.clients.items[client_idx].term_name = ident.term_name;
+        self.clients.items[client_idx].tty_name = ident.tty_name;
         self.clients.items[client_idx].cols = if (ident.cols > 0) ident.cols else 80;
         self.clients.items[client_idx].rows = if (ident.rows > 0) ident.rows else 24;
+        self.clients.items[client_idx].xpixel = ident.xpixel;
+        self.clients.items[client_idx].ypixel = ident.ypixel;
         if (self.clients.items[client_idx].session == null and self.sessions.items.len == 1) {
             self.setClientSession(client_idx, self.sessions.items[0]);
         } else if (self.clients.items[client_idx].session == null and self.default_session != null) {
@@ -996,6 +1049,7 @@ pub const Server = struct {
         var registry = cmd.Registry.init(self.allocator);
         defer registry.deinit();
         try registry.registerBuiltins();
+        var startup_attach_candidate = false;
 
         var ctx = cmd.Context{
             .server = self,
@@ -1017,6 +1071,7 @@ pub const Server = struct {
                 try self.sendError(client.fd, "empty command\n", 1);
                 return;
             }
+            startup_attach_candidate = commandStartsStartupRelay(args.items[0]);
 
             if (!std.mem.eql(u8, args.items[0], "choose-tree") and !(std.mem.eql(u8, args.items[0], "send-keys") and self.choose_tree_state != null)) {
                 try self.ensureCommandSession(&ctx, client.fd, args.items[0], &registry);
@@ -1042,6 +1097,7 @@ pub const Server = struct {
                 try self.sendError(client.fd, "empty command\n", 1);
                 return;
             }
+            startup_attach_candidate = commandStartsStartupRelay(commands.items[0].name);
 
             for (commands.items) |*command| {
                 if (!std.mem.eql(u8, command.name, "choose-tree") and !(std.mem.eql(u8, command.name, "send-keys") and self.choose_tree_state != null)) {
@@ -1066,6 +1122,9 @@ pub const Server = struct {
         //   - attach-session: prev was null or different session
         // Send exit_ack for non-attaching commands (list-sessions, etc.).
         if (ctx.session != null and (prev_session == null or prev_session != ctx.session)) {
+            if (startup_attach_candidate) {
+                self.beginClientStartupRelay(client_idx);
+            }
             try protocol.sendMessage(client.fd, .ready, &.{});
             if (ctx.session) |session| {
                 self.renderActivePaneToClient(session, client.fd);
@@ -1073,6 +1132,93 @@ pub const Server = struct {
         } else {
             try protocol.sendMessageWithFlags(client.fd, .exit_ack, 0, &.{});
         }
+    }
+
+    fn commandStartsStartupRelay(name: []const u8) bool {
+        return std.mem.eql(u8, name, "new-session") or
+            std.mem.eql(u8, name, "new") or
+            std.mem.eql(u8, name, "attach-session") or
+            std.mem.eql(u8, name, "attach");
+    }
+
+    fn monotonicNs() u64 {
+        var ts: std.c.timespec = undefined;
+        if (std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts) != 0) return 0;
+        return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+    }
+
+    fn beginClientStartupRelay(self: *Server, client_idx: usize) void {
+        const session = self.clients.items[client_idx].session orelse return;
+        for (self.clients.items) |*other| {
+            if (other.session != session) continue;
+            if (other.client_id == self.clients.items[client_idx].client_id) continue;
+            other.relay_state = .inactive;
+            other.inflight_probe = null;
+            other.pending_probe_requests.clearRetainingCapacity();
+            other.probe_parse_buffer.clearRetainingCapacity();
+        }
+
+        const now = monotonicNs();
+        const client = &self.clients.items[client_idx];
+        client.relay_state = .startup_pending;
+        client.relay_started_at_ns = now;
+        client.relay_last_probe_ns = now;
+        client.next_probe_request_id = 1;
+        client.inflight_probe = null;
+        client.pending_probe_requests.clearRetainingCapacity();
+        client.probe_parse_buffer.clearRetainingCapacity();
+    }
+
+    fn handleTerminalProbeReady(self: *Server, client_idx: usize) void {
+        if (client_idx >= self.clients.items.len) return;
+        const client = &self.clients.items[client_idx];
+        if (client.relay_state != .startup_pending) return;
+        client.relay_state = .startup_active;
+        client.relay_last_probe_ns = monotonicNs();
+        self.dispatchNextStartupProbe(client_idx);
+    }
+
+    fn handleTerminalProbeRsp(self: *Server, client_idx: usize, payload: []const u8) !void {
+        if (client_idx >= self.clients.items.len) return;
+        const view = try protocol.decodeTerminalProbeRsp(payload);
+        const client = &self.clients.items[client_idx];
+        const session = client.session orelse return;
+        const window = session.active_window orelse return;
+        const pane = window.active_pane orelse return;
+        const inflight = client.inflight_probe orelse return;
+        if (inflight.request_id != view.request_id) return;
+
+        client.inflight_probe = null;
+        client.relay_last_probe_ns = monotonicNs();
+        if (view.status == .complete and view.reply_bytes.len > 0) {
+            self.writePaneInput(pane, view.reply_bytes);
+        }
+        self.dispatchNextStartupProbe(client_idx);
+    }
+
+    fn dispatchNextStartupProbe(self: *Server, client_idx: usize) void {
+        if (client_idx >= self.clients.items.len) return;
+        const client = &self.clients.items[client_idx];
+        if (client.relay_state != .startup_active) return;
+        if (client.inflight_probe != null or client.pending_probe_requests.items.len == 0) return;
+
+        const request = client.pending_probe_requests.orderedRemove(0);
+        client.inflight_probe = .{
+            .request_id = request.request_id,
+            .kind = request.kind,
+        };
+        client.relay_last_probe_ns = monotonicNs();
+
+        const payload = protocol.encodeTerminalProbeReq(
+            self.allocator,
+            request.request_id,
+            client.client_id,
+            request.kind,
+            startup_probe.requestBytes(request.kind),
+        ) catch return;
+        defer self.allocator.free(payload);
+
+        protocol.sendMessage(client.fd, .terminal_probe_req, payload) catch {};
     }
 
     const ClientKey = struct {
@@ -1240,6 +1386,7 @@ pub const Server = struct {
         const window = session.active_window orelse return;
         const pane = window.active_pane orelse return;
         if (pane.fd < 0 or payload.len == 0) return;
+        const startup_relay_flush = client.relay_state == .startup_active and std.mem.indexOfAny(u8, payload, "\r\n") != null;
 
         self.flushPendingPaneWrites(pane);
         self.drainPaneReadable(pane.fd);
@@ -1250,6 +1397,12 @@ pub const Server = struct {
             // Check for SGR mouse sequence: ESC[<btn;x;yM or ESC[<btn;x;ym
             if (self.parseSgrMouse(payload, window, pane)) return;
             self.writePaneInput(pane, payload);
+            if (startup_relay_flush) {
+                client.relay_state = .relay_done;
+                client.inflight_probe = null;
+                client.pending_probe_requests.clearRetainingCapacity();
+                client.probe_parse_buffer.clearRetainingCapacity();
+            }
             return;
         }
 
@@ -1263,6 +1416,13 @@ pub const Server = struct {
                 },
                 .prefix_armed, .prefix_miss => {},
             }
+        }
+
+        if (startup_relay_flush) {
+            client.relay_state = .relay_done;
+            client.inflight_probe = null;
+            client.pending_probe_requests.clearRetainingCapacity();
+            client.probe_parse_buffer.clearRetainingCapacity();
         }
     }
 
@@ -1395,6 +1555,92 @@ pub const Server = struct {
         try protocol.sendMessageWithFlags(fd, .exit_ack, exit_code, &.{});
     }
 
+    fn ownerRelayClientIndexForSession(self: *Server, session: *Session) ?usize {
+        for (self.clients.items, 0..) |client, idx| {
+            if (client.session != session) continue;
+            if (client.relay_state != .inactive) {
+                return idx;
+            }
+        }
+        return null;
+    }
+
+    fn maybeExpireStartupRelay(self: *Server, client_idx: usize) void {
+        if (client_idx >= self.clients.items.len) return;
+        const client = &self.clients.items[client_idx];
+        if (client.relay_state != .startup_pending and client.relay_state != .startup_active) return;
+
+        const now = monotonicNs();
+        if (client.relay_started_at_ns != 0 and now - client.relay_started_at_ns >= std.time.ns_per_s) {
+            client.relay_state = .relay_done;
+            client.inflight_probe = null;
+            client.pending_probe_requests.clearRetainingCapacity();
+            return;
+        }
+        if (client.relay_state == .startup_active and client.inflight_probe == null and
+            client.pending_probe_requests.items.len == 0 and
+            now - client.relay_last_probe_ns >= 200 * std.time.ns_per_ms)
+        {
+            client.relay_state = .relay_done;
+        }
+    }
+
+    fn queueStartupProbeRequest(self: *Server, client_idx: usize, kind: startup_probe.ProbeKind) void {
+        if (client_idx >= self.clients.items.len) return;
+        const client = &self.clients.items[client_idx];
+        const request_id = client.next_probe_request_id;
+        client.next_probe_request_id += 1;
+        client.pending_probe_requests.append(self.allocator, .{
+            .request_id = request_id,
+            .kind = kind,
+        }) catch return;
+        client.relay_last_probe_ns = monotonicNs();
+    }
+
+    fn flushStartupProbeBufferAsOutput(self: *Server, client_idx: usize, output: *std.ArrayListAligned(u8, null)) void {
+        if (client_idx >= self.clients.items.len) return;
+        const client = &self.clients.items[client_idx];
+        if (client.probe_parse_buffer.items.len == 0) return;
+        output.appendSlice(self.allocator, client.probe_parse_buffer.items) catch {};
+        client.probe_parse_buffer.clearRetainingCapacity();
+    }
+
+    fn filterStartupProbeOutput(self: *Server, client_idx: usize, input: []const u8, output: *std.ArrayListAligned(u8, null)) void {
+        const client = &self.clients.items[client_idx];
+        client.probe_parse_buffer.appendSlice(self.allocator, input) catch {
+            output.appendSlice(self.allocator, input) catch {};
+            return;
+        };
+
+        while (client.probe_parse_buffer.items.len > 0) {
+            const bytes = client.probe_parse_buffer.items;
+            if (bytes[0] != 0x1b) {
+                output.append(self.allocator, bytes[0]) catch {};
+                _ = client.probe_parse_buffer.orderedRemove(0);
+                continue;
+            }
+
+            var saw_prefix = false;
+            inline for ([_]startup_probe.ProbeKind{ .osc_10, .osc_11, .osc_12, .csi_primary_da, .xtversion }) |kind| {
+                const request = startup_probe.requestBytes(kind);
+                if (bytes.len >= request.len and std.mem.eql(u8, bytes[0..request.len], request)) {
+                    self.queueStartupProbeRequest(client_idx, kind);
+                    client.probe_parse_buffer.replaceRange(self.allocator, 0, request.len, &.{}) catch {};
+                    saw_prefix = true;
+                    break;
+                }
+                if (startup_probe.requestPrefixMatch(kind, bytes) == .prefix) {
+                    saw_prefix = true;
+                    return;
+                }
+            }
+            if (saw_prefix) continue;
+
+            output.append(self.allocator, bytes[0]) catch {};
+            _ = client.probe_parse_buffer.orderedRemove(0);
+        }
+    }
+
     fn renderActivePaneToClient(self: *Server, session: *Session, client_fd: std.c.fd_t) void {
         const window = session.active_window orelse return;
         const pane = window.active_pane orelse return;
@@ -1461,12 +1707,32 @@ pub const Server = struct {
             return 0;
         }
 
-        const pane_state = self.session_loop.getPane(pane.id);
-        if (pane_state) |ps| {
-            ps.processPtyOutput(buf[0..@intCast(n)]);
+        const session = self.findSessionForPaneFd(fd) orelse return 0;
+        if (self.ownerRelayClientIndexForSession(session)) |relay_client_idx| {
+            self.maybeExpireStartupRelay(relay_client_idx);
         }
 
-        const session = self.findSessionForPaneFd(fd) orelse return 0;
+        var filtered_output: std.ArrayListAligned(u8, null) = .empty;
+        defer filtered_output.deinit(self.allocator);
+
+        const owner_client_idx = self.ownerRelayClientIndexForSession(session);
+        if (owner_client_idx) |relay_client_idx| {
+            const relay_client = self.clients.items[relay_client_idx];
+            if (relay_client.relay_state == .startup_pending or relay_client.relay_state == .startup_active) {
+                self.filterStartupProbeOutput(relay_client_idx, buf[0..@intCast(n)], &filtered_output);
+                self.dispatchNextStartupProbe(relay_client_idx);
+            } else {
+                self.flushStartupProbeBufferAsOutput(relay_client_idx, &filtered_output);
+                filtered_output.appendSlice(self.allocator, buf[0..@intCast(n)]) catch {};
+            }
+        } else {
+            filtered_output.appendSlice(self.allocator, buf[0..@intCast(n)]) catch {};
+        }
+
+        const pane_state = self.session_loop.getPane(pane.id);
+        if (pane_state) |ps| {
+            ps.processPtyOutput(filtered_output.items);
+        }
 
         // Auto-rename: update window name from foreground process.
         if (pane.pid > 0) {
@@ -1487,7 +1753,7 @@ pub const Server = struct {
             if (client.session == session) {
                 self.renderComposedToClient(client.fd, session, pane_state) catch {
                     // Fall back to raw relay on render failure.
-                    protocol.sendMessage(client.fd, .output, buf[0..@intCast(n)]) catch {};
+                    protocol.sendMessage(client.fd, .output, filtered_output.items) catch {};
                 };
             }
         }
@@ -1683,14 +1949,10 @@ pub const Server = struct {
     fn removeClient(self: *Server, client_idx: usize) void {
         if (client_idx >= self.clients.items.len) return;
         var client = self.clients.orderedRemove(client_idx);
-        if (client.choose_tree_state) |*state| {
-            state.deinit();
-        }
-        client.recv_state.deinit(self.allocator);
         if (client.session) |session| {
             if (session.attached > 0) session.attached -= 1;
         }
-        if (client.fd >= 0) _ = std.c.close(client.fd);
+        client.deinit(self.allocator);
     }
 
     fn ensureCommandSession(self: *Server, ctx: *cmd.Context, reply_fd: std.c.fd_t, command_name: []const u8, registry: *const cmd.Registry) !void {
@@ -1721,6 +1983,10 @@ pub const Server = struct {
             if (existing.attached > 0) existing.attached -= 1;
         }
         client.session = session;
+        client.relay_state = .inactive;
+        client.inflight_probe = null;
+        client.pending_probe_requests.clearRetainingCapacity();
+        client.probe_parse_buffer.clearRetainingCapacity();
         if (session) |current| {
             current.attached += 1;
             self.fireHooks(.client_attached);
@@ -2972,4 +3238,223 @@ test "handleClientReadable preserves fragmented nonblocking client frames" {
     defer exit_ack.deinit();
     try std.testing.expectEqual(protocol.MessageType.exit_ack, exit_ack.msg_type);
     try std.testing.expectEqual(@as(u16, 0), exit_ack.flags);
+}
+
+test "startup relay strips probe requests from pane output and queues a correlated request" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-startup-probe-filter.sock");
+    defer server.deinit();
+
+    try server.clients.append(server.allocator, .{
+        .fd = -1,
+        .session = null,
+        .identified = true,
+        .choose_tree_state = null,
+        .client_id = 44,
+        .relay_state = .startup_active,
+    });
+
+    var output: std.ArrayListAligned(u8, null) = .empty;
+    defer output.deinit(std.testing.allocator);
+
+    server.filterStartupProbeOutput(0, "hello\x1b]10;?\x1b\\world", &output);
+
+    try std.testing.expectEqualStrings("helloworld", output.items);
+    try std.testing.expectEqual(@as(usize, 1), server.clients.items[0].pending_probe_requests.items.len);
+    try std.testing.expectEqual(startup_probe.ProbeKind.osc_10, server.clients.items[0].pending_probe_requests.items[0].kind);
+    try std.testing.expectEqual(@as(u32, 1), server.clients.items[0].pending_probe_requests.items[0].request_id);
+}
+
+test "handleClientReadable preserves fragmented terminal_probe_ready frames and dispatches queued probes" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-fragmented-probe-ready.sock");
+    defer server.deinit();
+
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+    setFdNonblocking(fds[0]);
+
+    try server.clients.append(server.allocator, .{
+        .fd = fds[0],
+        .session = null,
+        .identified = true,
+        .choose_tree_state = null,
+        .client_id = 99,
+        .relay_state = .startup_pending,
+        .pending_probe_requests = .empty,
+    });
+    try server.clients.items[0].pending_probe_requests.append(server.allocator, .{
+        .request_id = 3,
+        .kind = .osc_11,
+    });
+
+    const header = protocol.serializeHeader(.{
+        .msg_type = @intFromEnum(protocol.MessageType.terminal_probe_ready),
+        .payload_len = 0,
+        .flags = 0,
+    });
+
+    try std.testing.expectEqual(@as(isize, 3), std.c.write(fds[1], header[0..3].ptr, 3));
+    try std.testing.expectError(error.WouldBlock, server.handleClientReadable(0));
+    try std.testing.expectEqual(Server.ClientConnection.RelayState.startup_pending, server.clients.items[0].relay_state);
+
+    try std.testing.expectEqual(@as(isize, @intCast(header.len - 3)), std.c.write(fds[1], header[3..].ptr, header.len - 3));
+    try server.handleClientReadable(0);
+    try std.testing.expectEqual(Server.ClientConnection.RelayState.startup_active, server.clients.items[0].relay_state);
+
+    var msg = try protocol.recvMessageAlloc(std.testing.allocator, fds[1]);
+    defer msg.deinit();
+    try std.testing.expectEqual(protocol.MessageType.terminal_probe_req, msg.msg_type);
+    const view = try protocol.decodeTerminalProbeReq(msg.payload);
+    try std.testing.expectEqual(@as(u32, 3), view.request_id);
+    try std.testing.expectEqual(@as(u64, 99), view.owner_client_id);
+    try std.testing.expectEqual(startup_probe.ProbeKind.osc_11, view.probe_kind);
+}
+
+test "startup relay dispatch stays owned by the attaching client when viewers share the session" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-probe-owner.sock");
+    defer server.deinit();
+
+    const session = try server.createSession("demo", "/opt/homebrew/bin/zsh", 80, 24);
+
+    var owner_fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &owner_fds));
+    defer _ = std.c.close(owner_fds[0]);
+    defer _ = std.c.close(owner_fds[1]);
+
+    var viewer_fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &viewer_fds));
+    defer _ = std.c.close(viewer_fds[0]);
+    defer _ = std.c.close(viewer_fds[1]);
+
+    setFdNonblocking(viewer_fds[1]);
+
+    try server.clients.append(server.allocator, .{
+        .fd = viewer_fds[0],
+        .session = session,
+        .identified = true,
+        .choose_tree_state = null,
+        .client_id = 301,
+        .relay_state = .inactive,
+    });
+    try server.clients.append(server.allocator, .{
+        .fd = owner_fds[0],
+        .session = session,
+        .identified = true,
+        .choose_tree_state = null,
+        .client_id = 302,
+        .relay_state = .startup_pending,
+        .pending_probe_requests = .empty,
+    });
+    try server.clients.items[1].pending_probe_requests.append(server.allocator, .{
+        .request_id = 8,
+        .kind = .osc_12,
+    });
+
+    server.handleTerminalProbeReady(1);
+    try std.testing.expectEqual(Server.ClientConnection.RelayState.startup_active, server.clients.items[1].relay_state);
+    try std.testing.expectEqual(Server.ClientConnection.RelayState.inactive, server.clients.items[0].relay_state);
+
+    var owner_msg = try protocol.recvMessageAlloc(std.testing.allocator, owner_fds[1]);
+    defer owner_msg.deinit();
+    try std.testing.expectEqual(protocol.MessageType.terminal_probe_req, owner_msg.msg_type);
+    const owner_view = try protocol.decodeTerminalProbeReq(owner_msg.payload);
+    try std.testing.expectEqual(@as(u64, 302), owner_view.owner_client_id);
+    try std.testing.expectEqual(startup_probe.ProbeKind.osc_12, owner_view.probe_kind);
+
+    var scratch: [32]u8 = undefined;
+    const rc = std.c.read(viewer_fds[1], &scratch, scratch.len);
+    try std.testing.expect(rc < 0);
+    try std.testing.expectEqual(std.posix.E.AGAIN, std.posix.errno(rc));
+}
+
+test "startup relay ignores mismatched terminal probe responses" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-probe-mismatch.sock");
+    defer server.deinit();
+
+    const session = try server.createSession("demo", "/opt/homebrew/bin/zsh", 80, 24);
+
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    try server.clients.append(server.allocator, .{
+        .fd = fds[0],
+        .session = session,
+        .identified = true,
+        .choose_tree_state = null,
+        .client_id = 401,
+        .relay_state = .startup_active,
+        .inflight_probe = .{
+            .request_id = 9,
+            .kind = .osc_10,
+        },
+    });
+
+    const payload = try protocol.encodeTerminalProbeRsp(std.testing.allocator, 99, .complete, "\x1b]10;rgb:0000/0000/0000\x1b\\");
+    defer std.testing.allocator.free(payload);
+
+    try server.handleTerminalProbeRsp(0, payload);
+
+    try std.testing.expect(server.clients.items[0].inflight_probe != null);
+    try std.testing.expectEqual(@as(u32, 9), server.clients.items[0].inflight_probe.?.request_id);
+}
+
+test "startup relay does not dispatch probes before terminal_probe_ready" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-probe-pre-ready.sock");
+    defer server.deinit();
+
+    const session = try server.createSession("demo", "/opt/homebrew/bin/zsh", 80, 24);
+
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+    setFdNonblocking(fds[1]);
+
+    try server.clients.append(server.allocator, .{
+        .fd = fds[0],
+        .session = session,
+        .identified = true,
+        .choose_tree_state = null,
+        .client_id = 403,
+        .relay_state = .startup_pending,
+        .pending_probe_requests = .empty,
+    });
+    try server.clients.items[0].pending_probe_requests.append(server.allocator, .{
+        .request_id = 12,
+        .kind = .csi_primary_da,
+    });
+
+    server.dispatchNextStartupProbe(0);
+
+    try std.testing.expect(server.clients.items[0].inflight_probe == null);
+    var scratch: [32]u8 = undefined;
+    const rc = std.c.read(fds[1], &scratch, scratch.len);
+    try std.testing.expect(rc < 0);
+    try std.testing.expectEqual(std.posix.E.AGAIN, std.posix.errno(rc));
+}
+
+test "startup relay expires to relay_done after quiescence with no inflight probes" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-probe-quiescence.sock");
+    defer server.deinit();
+
+    const session = try server.createSession("demo", "/opt/homebrew/bin/zsh", 80, 24);
+    const now = try monotonicNsForTest();
+
+    try server.clients.append(server.allocator, .{
+        .fd = -1,
+        .session = session,
+        .identified = true,
+        .choose_tree_state = null,
+        .client_id = 402,
+        .relay_state = .startup_active,
+        .relay_started_at_ns = now - 500 * std.time.ns_per_ms,
+        .relay_last_probe_ns = now - 250 * std.time.ns_per_ms,
+    });
+
+    server.maybeExpireStartupRelay(0);
+
+    try std.testing.expectEqual(Server.ClientConnection.RelayState.relay_done, server.clients.items[0].relay_state);
 }

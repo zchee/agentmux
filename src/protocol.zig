@@ -1,4 +1,5 @@
 const std = @import("std");
+const startup_probe = @import("startup_probe.zig");
 
 /// Protocol version. Incremented on breaking changes.
 pub const version: u32 = 1;
@@ -16,6 +17,8 @@ pub const MessageType = enum(u16) {
     shell = 104,
     exit = 105,
     exiting = 106,
+    terminal_probe_ready = 107,
+    terminal_probe_rsp = 108,
 
     // Server -> Client
     version = 200,
@@ -26,6 +29,7 @@ pub const MessageType = enum(u16) {
     shutdown = 205,
     error_msg = 206,
     exit_ack = 207,
+    terminal_probe_req = 208,
 };
 
 /// Wire format header for all messages.
@@ -108,6 +112,32 @@ pub const KeyMsg = extern struct {
     mouse_flags: u8 align(1),
 };
 
+pub const TerminalProbeReqHeader = extern struct {
+    request_id: u32 align(1),
+    owner_client_id: u64 align(1),
+    probe_kind: u16 align(1),
+    reserved: u16 align(1),
+};
+
+pub const TerminalProbeRspHeader = extern struct {
+    request_id: u32 align(1),
+    status: u8 align(1),
+    reserved: [3]u8 align(1),
+};
+
+pub const TerminalProbeReqView = struct {
+    request_id: u32,
+    owner_client_id: u64,
+    probe_kind: startup_probe.ProbeKind,
+    probe_bytes: []const u8,
+};
+
+pub const TerminalProbeRspView = struct {
+    request_id: u32,
+    status: startup_probe.ResponseStatus,
+    reply_bytes: []const u8,
+};
+
 pub fn serializeHeader(header: Header) [8]u8 {
     var buf: [8]u8 = undefined;
     std.mem.writeInt(u16, buf[0..2], header.msg_type, .little);
@@ -133,6 +163,8 @@ pub fn messageTypeFromInt(raw: u16) !MessageType {
         @intFromEnum(MessageType.shell) => .shell,
         @intFromEnum(MessageType.exit) => .exit,
         @intFromEnum(MessageType.exiting) => .exiting,
+        @intFromEnum(MessageType.terminal_probe_ready) => .terminal_probe_ready,
+        @intFromEnum(MessageType.terminal_probe_rsp) => .terminal_probe_rsp,
         @intFromEnum(MessageType.version) => .version,
         @intFromEnum(MessageType.ready) => .ready,
         @intFromEnum(MessageType.output) => .output,
@@ -141,6 +173,7 @@ pub fn messageTypeFromInt(raw: u16) !MessageType {
         @intFromEnum(MessageType.shutdown) => .shutdown,
         @intFromEnum(MessageType.error_msg) => .error_msg,
         @intFromEnum(MessageType.exit_ack) => .exit_ack,
+        @intFromEnum(MessageType.terminal_probe_req) => .terminal_probe_req,
         else => error.InvalidMessageType,
     };
 }
@@ -310,6 +343,69 @@ pub fn decodeCommandArgs(alloc: std.mem.Allocator, payload: []const u8) !std.Arr
     return args;
 }
 
+pub fn encodeTerminalProbeReq(
+    alloc: std.mem.Allocator,
+    request_id: u32,
+    owner_client_id: u64,
+    probe_kind: startup_probe.ProbeKind,
+    probe_bytes: []const u8,
+) ![]u8 {
+    const total = @sizeOf(TerminalProbeReqHeader) + probe_bytes.len;
+    if (total > max_payload) return error.PayloadTooLarge;
+
+    const payload = try alloc.alloc(u8, total);
+    const header: *TerminalProbeReqHeader = @ptrCast(@alignCast(payload.ptr));
+    header.* = .{
+        .request_id = request_id,
+        .owner_client_id = owner_client_id,
+        .probe_kind = @intFromEnum(probe_kind),
+        .reserved = 0,
+    };
+    @memcpy(payload[@sizeOf(TerminalProbeReqHeader)..], probe_bytes);
+    return payload;
+}
+
+pub fn decodeTerminalProbeReq(payload: []const u8) !TerminalProbeReqView {
+    if (payload.len < @sizeOf(TerminalProbeReqHeader)) return error.InvalidPayload;
+    const header: *const TerminalProbeReqHeader = @ptrCast(@alignCast(payload.ptr));
+    return .{
+        .request_id = header.request_id,
+        .owner_client_id = header.owner_client_id,
+        .probe_kind = try startup_probe.probeKindFromInt(header.probe_kind),
+        .probe_bytes = payload[@sizeOf(TerminalProbeReqHeader)..],
+    };
+}
+
+pub fn encodeTerminalProbeRsp(
+    alloc: std.mem.Allocator,
+    request_id: u32,
+    status: startup_probe.ResponseStatus,
+    reply_bytes: []const u8,
+) ![]u8 {
+    const total = @sizeOf(TerminalProbeRspHeader) + reply_bytes.len;
+    if (total > max_payload) return error.PayloadTooLarge;
+
+    const payload = try alloc.alloc(u8, total);
+    const header: *TerminalProbeRspHeader = @ptrCast(@alignCast(payload.ptr));
+    header.* = .{
+        .request_id = request_id,
+        .status = @intFromEnum(status),
+        .reserved = .{ 0, 0, 0 },
+    };
+    @memcpy(payload[@sizeOf(TerminalProbeRspHeader)..], reply_bytes);
+    return payload;
+}
+
+pub fn decodeTerminalProbeRsp(payload: []const u8) !TerminalProbeRspView {
+    if (payload.len < @sizeOf(TerminalProbeRspHeader)) return error.InvalidPayload;
+    const header: *const TerminalProbeRspHeader = @ptrCast(@alignCast(payload.ptr));
+    return .{
+        .request_id = header.request_id,
+        .status = try startup_probe.responseStatusFromInt(header.status),
+        .reply_bytes = payload[@sizeOf(TerminalProbeRspHeader)..],
+    };
+}
+
 test "header roundtrip" {
     const h = Header{
         .msg_type = @intFromEnum(MessageType.identify),
@@ -350,6 +446,117 @@ test "command arg payload roundtrip" {
     for (input, decoded.items) |expected, actual| {
         try std.testing.expectEqualStrings(expected, actual);
     }
+}
+
+test "terminal probe request payload roundtrip" {
+    const payload = try encodeTerminalProbeReq(
+        std.testing.allocator,
+        11,
+        42,
+        .osc_11,
+        startup_probe.requestBytes(.osc_11),
+    );
+    defer std.testing.allocator.free(payload);
+
+    const decoded = try decodeTerminalProbeReq(payload);
+    try std.testing.expectEqual(@as(u32, 11), decoded.request_id);
+    try std.testing.expectEqual(@as(u64, 42), decoded.owner_client_id);
+    try std.testing.expectEqual(startup_probe.ProbeKind.osc_11, decoded.probe_kind);
+    try std.testing.expectEqualStrings(startup_probe.requestBytes(.osc_11), decoded.probe_bytes);
+}
+
+test "terminal probe response payload roundtrip" {
+    const payload = try encodeTerminalProbeRsp(
+        std.testing.allocator,
+        7,
+        .complete,
+        "\x1b]10;rgb:0000/0000/0000\x1b\\",
+    );
+    defer std.testing.allocator.free(payload);
+
+    const decoded = try decodeTerminalProbeRsp(payload);
+    try std.testing.expectEqual(@as(u32, 7), decoded.request_id);
+    try std.testing.expectEqual(startup_probe.ResponseStatus.complete, decoded.status);
+    try std.testing.expectEqualStrings("\x1b]10;rgb:0000/0000/0000\x1b\\", decoded.reply_bytes);
+}
+
+test "nonblocking recv preserves fragmented terminal probe request frames" {
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    const fl = std.c.fcntl(fds[0], std.c.F.GETFL);
+    try std.testing.expect(fl >= 0);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fcntl(fds[0], std.c.F.SETFL, fl | @as(i32, @bitCast(std.c.O{ .NONBLOCK = true }))));
+
+    const payload = try encodeTerminalProbeReq(std.testing.allocator, 9, 77, .xtversion, startup_probe.requestBytes(.xtversion));
+    defer std.testing.allocator.free(payload);
+    const header = serializeHeader(.{
+        .msg_type = @intFromEnum(MessageType.terminal_probe_req),
+        .payload_len = @intCast(payload.len),
+        .flags = 0,
+    });
+
+    var state = RecvState{};
+    defer state.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(isize, 4), std.c.write(fds[1], header[0..4].ptr, 4));
+    try std.testing.expectError(error.WouldBlock, recvMessageAllocNonblocking(std.testing.allocator, fds[0], &state));
+
+    try std.testing.expectEqual(@as(isize, @intCast(header.len - 4)), std.c.write(fds[1], header[4..].ptr, header.len - 4));
+    try std.testing.expectEqual(@as(isize, 5), std.c.write(fds[1], payload[0..5].ptr, 5));
+    try std.testing.expectError(error.WouldBlock, recvMessageAllocNonblocking(std.testing.allocator, fds[0], &state));
+
+    try std.testing.expectEqual(@as(isize, @intCast(payload.len - 5)), std.c.write(fds[1], payload[5..].ptr, payload.len - 5));
+    var msg = try recvMessageAllocNonblocking(std.testing.allocator, fds[0], &state);
+    defer msg.deinit();
+
+    try std.testing.expectEqual(MessageType.terminal_probe_req, msg.msg_type);
+    const decoded = try decodeTerminalProbeReq(msg.payload);
+    try std.testing.expectEqual(@as(u32, 9), decoded.request_id);
+    try std.testing.expectEqual(@as(u64, 77), decoded.owner_client_id);
+    try std.testing.expectEqual(startup_probe.ProbeKind.xtversion, decoded.probe_kind);
+    try std.testing.expectEqualStrings(startup_probe.requestBytes(.xtversion), decoded.probe_bytes);
+}
+
+test "nonblocking recv preserves fragmented terminal probe response frames" {
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    const fl = std.c.fcntl(fds[0], std.c.F.GETFL);
+    try std.testing.expect(fl >= 0);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fcntl(fds[0], std.c.F.SETFL, fl | @as(i32, @bitCast(std.c.O{ .NONBLOCK = true }))));
+
+    const payload = try encodeTerminalProbeRsp(std.testing.allocator, 5, .complete, "\x1b[?1;2c");
+    defer std.testing.allocator.free(payload);
+    const header = serializeHeader(.{
+        .msg_type = @intFromEnum(MessageType.terminal_probe_rsp),
+        .payload_len = @intCast(payload.len),
+        .flags = 0,
+    });
+
+    var state = RecvState{};
+    defer state.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(isize, 2), std.c.write(fds[1], header[0..2].ptr, 2));
+    try std.testing.expectError(error.WouldBlock, recvMessageAllocNonblocking(std.testing.allocator, fds[0], &state));
+
+    try std.testing.expectEqual(@as(isize, @intCast(header.len - 2)), std.c.write(fds[1], header[2..].ptr, header.len - 2));
+    try std.testing.expectEqual(@as(isize, 3), std.c.write(fds[1], payload[0..3].ptr, 3));
+    try std.testing.expectError(error.WouldBlock, recvMessageAllocNonblocking(std.testing.allocator, fds[0], &state));
+
+    try std.testing.expectEqual(@as(isize, @intCast(payload.len - 3)), std.c.write(fds[1], payload[3..].ptr, payload.len - 3));
+    var msg = try recvMessageAllocNonblocking(std.testing.allocator, fds[0], &state);
+    defer msg.deinit();
+
+    try std.testing.expectEqual(MessageType.terminal_probe_rsp, msg.msg_type);
+    const decoded = try decodeTerminalProbeRsp(msg.payload);
+    try std.testing.expectEqual(@as(u32, 5), decoded.request_id);
+    try std.testing.expectEqual(startup_probe.ResponseStatus.complete, decoded.status);
+    try std.testing.expectEqualStrings("\x1b[?1;2c", decoded.reply_bytes);
 }
 
 test "nonblocking recv preserves fragmented frame state" {

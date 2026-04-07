@@ -15,6 +15,7 @@ pub const platform = struct {
     pub const linux = @import("platform/linux.zig");
 };
 pub const protocol = @import("protocol.zig");
+pub const startup_probe = @import("startup_probe.zig");
 pub const layout = struct {
     pub const core = @import("layout/layout.zig");
     pub const set = @import("layout/set.zig");
@@ -282,11 +283,24 @@ fn runCommandMode(alloc: std.mem.Allocator, flags: *const Flags, socket_path: []
         rows = ts.rows;
     }
     try client.identify(determineTerminalName(), cols, rows);
+
+    var startup_raw: ?client_terminal.RawTerminal = null;
+    const prearm_startup_relay = client_mod.commandStartsStartupRelay(flags.remaining.items, flags.control_mode);
+    if (prearm_startup_relay) {
+        startup_raw = client_terminal.RawTerminal.init(0) catch null;
+        if (startup_raw) |*raw| {
+            raw.enableRaw() catch {
+                startup_raw = null;
+            };
+        }
+    }
+
     const result = try client.requestCommand(flags.remaining.items);
     if (result.attached) {
-        try client.interactiveLoop();
+        try client.interactiveLoop(if (startup_raw) |*raw| raw else null);
         return;
     }
+    if (startup_raw) |*raw| raw.restore();
     if (result.exit_code != 0) {
         std.c.exit(result.exit_code);
     }
@@ -354,6 +368,7 @@ test {
     _ = core.colour;
     _ = core.environ;
     _ = protocol;
+    _ = startup_probe;
     _ = layout.core;
     _ = layout.set;
     _ = layout.custom;
