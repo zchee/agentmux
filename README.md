@@ -1,11 +1,11 @@
 # zmux
 
-A terminal multiplexer written in [Zig](https://ziglang.org/), feature-compatible with [tmux](https://github.com/tmux/tmux) and extended with GPU-accelerated rendering, image protocol support, and a native tab UI.
+A terminal multiplexer written in [Zig](https://ziglang.org/), feature-compatible with [tmux](https://github.com/tmux/tmux) and extended with GPU-accelerated rendering plus in-progress image and tab-bar runtime integration.
 
 ## Status
 
 > [!IMPORTANT]
-> **Work in progress.** The core architecture is implemented (58 source files, ~10,800 LOC). The binary builds, unit tests pass, and the module pipeline is wired end-to-end. GPU shader implementations and integration testing are in progress.
+> **Work in progress.** The core architecture is implemented (58 source files, ~10,800 LOC). The binary builds, unit tests pass, and the module pipeline is wired end-to-end. GPU shader implementations plus runtime integration for image/tab-bar features are still in progress.
 
 ## Features
 
@@ -31,8 +31,8 @@ A terminal multiplexer written in [Zig](https://ziglang.org/), feature-compatibl
 ### Beyond tmux
 
 - **GPU-accelerated rendering** via Metal (macOS) and Vulkan (Linux)
-- **Image protocol support**: sixel and kitty graphics protocol decoders
-- **Native tab bar UI**
+- **Image protocol decoding modules**: sixel and kitty parsers are implemented; interactive runtime/display integration is still in progress
+- **Native tab bar module**: tab data structures/rendering exist; runtime wiring is still in progress
 - **Modern event loops**: Grand Central Dispatch on macOS, io_uring on Linux
 - **Clipboard integration** via OSC 52
 - **Written in Zig**: memory safety, no hidden allocations, comptime, cross-compilation
@@ -120,7 +120,7 @@ Client                            Server
 ```
 src/
   main.zig                 Entry point, argument parsing
-  server.zig               Unix socket server, poll loop
+  server.zig               Unix socket server, platform event loops
   client.zig               Unix socket client
   server_loop.zig          PTY -> parser -> screen -> redraw pipeline
   input_handler.zig        Map escape sequences to screen operations
@@ -196,9 +196,9 @@ src/
     atlas.zig              Glyph atlas
     metal.zig              Metal backend (macOS)
     vulkan.zig             Vulkan backend (Linux)
-    image.zig              Image lifecycle manager
-    sixel.zig              Sixel decoder
-    kitty.zig              Kitty graphics protocol
+    image.zig              Image lifecycle manager (integration in progress)
+    sixel.zig              Sixel decoder primitives
+    kitty.zig              Kitty graphics decoder primitives
 
   platform/
     platform.zig           Platform detection
@@ -206,7 +206,7 @@ src/
     linux.zig              io_uring event loop (Linux)
 
   tabs/
-    tabs.zig               Native tab bar UI
+    tabs.zig               Native tab bar module
 ```
 
 ## Configuration
@@ -247,8 +247,8 @@ set -g mode-keys vi
 | Language | C | Zig |
 | Event loop | libevent | GCD (macOS) / io_uring (Linux) |
 | Rendering | TTY escape sequences | GPU (Metal/Vulkan) + TTY fallback |
-| Image support | Sixel (partial) | Sixel + Kitty graphics protocol |
-| Tabs | N/A | Native tab bar |
+| Image support | Sixel (partial) | Sixel + Kitty decoders (runtime integration in progress) |
+| Tabs | N/A | Tab bar module (runtime integration in progress) |
 | Config syntax | tmux command language | Same (compatible) |
 | Memory safety | Manual | Zig allocator tracking |
 
