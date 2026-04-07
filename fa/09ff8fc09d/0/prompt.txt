@@ -1,0 +1,1 @@
+Read $OMX_TEAM_STATE_ROOT/team/task-1-fix-nonblocking-client/workers/worker-1/inbox.md, work now, report progress, continue assigned work or next feasible task.
