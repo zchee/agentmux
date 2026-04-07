@@ -95,6 +95,12 @@
       "transcript": "/a3/b20ca21212/13/full.jsonl",
       "content_hash": "/a3/b20ca21212/13/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/a3/b20ca21212/14/metadata.json",
+      "transcript": "/a3/b20ca21212/14/full.jsonl",
+      "content_hash": "/a3/b20ca21212/14/content_hash.txt",
+      "prompt": ""
     }
   ],
   "token_usage": {
