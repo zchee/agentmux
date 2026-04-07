@@ -61,7 +61,9 @@ pub const RawTerminal = struct {
         raw.cc[@intFromEnum(std.c.V.MIN)] = 1;
         raw.cc[@intFromEnum(std.c.V.TIME)] = 0;
 
-        if (tcsetattr_fn.tcsetattr(self.fd, TCSAFLUSH, &raw) != 0) {
+        // Use TCSANOW so keystrokes typed during the startup/attach window
+        // remain queued instead of being discarded when we enter raw mode.
+        if (tcsetattr_fn.tcsetattr(self.fd, TCSANOW, &raw) != 0) {
             return error.TcSetAttrFailed;
         }
         self.active = true;

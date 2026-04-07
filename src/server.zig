@@ -1066,22 +1066,10 @@ pub const Server = struct {
         //   - attach-session: prev was null or different session
         // Send exit_ack for non-attaching commands (list-sessions, etc.).
         if (ctx.session != null and (prev_session == null or prev_session != ctx.session)) {
-            if (ctx.session) |session| {
-                if (session.active_window) |window| {
-                    if (window.active_pane) |pane| {
-                        var attempts: usize = 0;
-                        while (attempts < 20) : (attempts += 1) {
-                            sleepMs(50);
-                            self.drainPaneReadable(pane.fd);
-                        }
-                        if (self.session_loop.getPane(pane.id)) |pane_state| {
-                            pane_state.dirty.markAllDirty();
-                            self.renderComposedToClient(client.fd, session, pane_state) catch {};
-                        }
-                    }
-                }
-            }
             try protocol.sendMessage(client.fd, .ready, &.{});
+            if (ctx.session) |session| {
+                self.renderActivePaneToClient(session, client.fd);
+            }
         } else {
             try protocol.sendMessageWithFlags(client.fd, .exit_ack, 0, &.{});
         }
@@ -1405,6 +1393,16 @@ pub const Server = struct {
         _ = self;
         try protocol.sendMessage(fd, .error_msg, message);
         try protocol.sendMessageWithFlags(fd, .exit_ack, exit_code, &.{});
+    }
+
+    fn renderActivePaneToClient(self: *Server, session: *Session, client_fd: std.c.fd_t) void {
+        const window = session.active_window orelse return;
+        const pane = window.active_pane orelse return;
+        self.drainPaneReadable(pane.fd);
+        if (self.session_loop.getPane(pane.id)) |pane_state| {
+            pane_state.dirty.markAllDirty();
+            self.renderComposedToClient(client_fd, session, pane_state) catch {};
+        }
     }
 
     fn deactivatePaneFd(self: *Server, pane: *Pane) void {
@@ -2846,6 +2844,51 @@ test "protocol identify then new-session then key input reaches shell" {
     }
 
     try std.testing.expectEqual(@as(c_int, 0), std.c.access(proof_z, 0));
+}
+
+fn monotonicNsForTest() !u64 {
+    var ts: std.c.timespec = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts));
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
+test "handleClientReadable attaches a new session without fixed startup delay" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-ready-latency.sock");
+    defer server.deinit();
+
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    try server.clients.append(server.allocator, .{
+        .fd = fds[0],
+        .session = null,
+        .identified = false,
+        .choose_tree_state = null,
+    });
+
+    const identify = protocol.IdentifyMsg{
+        .protocol_version = protocol.version,
+        .pid = std.c.getpid(),
+        .flags = .{},
+        .term_name = .{0} ** 64,
+        .tty_name = .{0} ** 64,
+        .cols = 120,
+        .rows = 24,
+        .xpixel = 0,
+        .ypixel = 0,
+    };
+    try protocol.sendMessage(fds[1], .identify, std.mem.asBytes(&identify));
+    try server.handleClientReadable(0);
+
+    try protocol.sendMessage(fds[1], .command, "new-session\x00-s\x00latency\x00");
+    const start_ns = try monotonicNsForTest();
+    try server.handleClientReadable(0);
+    const elapsed_ns = (try monotonicNsForTest()) - start_ns;
+
+    try std.testing.expect(elapsed_ns < 300 * std.time.ns_per_ms);
+    try std.testing.expect(server.clients.items[0].session != null);
 }
 
 test "handleClientReadable preserves fragmented nonblocking client frames" {
