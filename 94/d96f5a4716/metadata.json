@@ -1,0 +1,20 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "94d96f5a4716",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "docs/zsh-startup-probe-audit-2026-04-08.md",
+    "docs/zsh-startup-probe-relay-v1.md",
+    "docs/zsh-startup-probe-test-matrix.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/94/d96f5a4716/0/metadata.json",
+      "transcript": "/94/d96f5a4716/0/full.jsonl",
+      "content_hash": "/94/d96f5a4716/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}
