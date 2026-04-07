@@ -131,6 +131,12 @@
       "transcript": "/a3/b20ca21212/19/full.jsonl",
       "content_hash": "/a3/b20ca21212/19/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/a3/b20ca21212/20/metadata.json",
+      "transcript": "/a3/b20ca21212/20/full.jsonl",
+      "content_hash": "/a3/b20ca21212/20/content_hash.txt",
+      "prompt": ""
     }
   ],
   "token_usage": {
