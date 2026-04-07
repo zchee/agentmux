@@ -76,6 +76,12 @@
       "transcript": "/a5/8c67a18d95/10/full.jsonl",
       "content_hash": "/a5/8c67a18d95/10/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/a5/8c67a18d95/11/metadata.json",
+      "transcript": "/a5/8c67a18d95/11/full.jsonl",
+      "content_hash": "/a5/8c67a18d95/11/content_hash.txt",
+      "prompt": ""
     }
   ]
 }
