@@ -8,3 +8,4 @@
 .zig-cache/
 zig-out/
 zig_test
+zig-pkg
