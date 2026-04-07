@@ -3,7 +3,8 @@ const Session = @import("session.zig").Session;
 const Window = @import("window.zig").Window;
 const Pane = @import("window.zig").Pane;
 const ChooseTreeState = @import("window.zig").ChooseTreeState;
-const Pty = @import("pane.zig").Pty;
+const pane_mod = @import("pane.zig");
+const Pty = pane_mod.Pty;
 const PasteStack = @import("copy/paste.zig").PasteStack;
 const server_loop = @import("server_loop.zig");
 const SessionLoop = server_loop.SessionLoop;
@@ -52,6 +53,7 @@ pub const Server = struct {
     socket_path: []const u8,
     sessions: std.ArrayListAligned(*Session, null),
     clients: std.ArrayListAligned(ClientConnection, null),
+    pending_pane_writes: std.AutoHashMap(u32, std.ArrayListAligned(u8, null)),
     default_session: ?*Session,
     choose_tree_state: ?ChooseTreeState,
     paste_stack: PasteStack,
@@ -78,10 +80,12 @@ pub const Server = struct {
         session: ?*Session,
         identified: bool,
         choose_tree_state: ?ChooseTreeState,
+        recv_state: protocol.RecvState = .{},
         locked: bool = false,
         pid: i32 = 0,
         cols: u16 = 80,
         rows: u16 = 24,
+        prefix_active: bool = false,
     };
 
     pub const WindowOptionDefaults = struct {
@@ -126,6 +130,7 @@ pub const Server = struct {
             .socket_path = try alloc.dupe(u8, socket_path),
             .sessions = .empty,
             .clients = .empty,
+            .pending_pane_writes = std.AutoHashMap(u32, std.ArrayListAligned(u8, null)).init(alloc),
             .default_session = null,
             .choose_tree_state = null,
             .paste_stack = PasteStack.init(alloc),
@@ -166,9 +171,17 @@ pub const Server = struct {
             if (client.choose_tree_state) |*state| {
                 state.deinit();
             }
+            client.recv_state.deinit(self.allocator);
             if (client.fd >= 0) _ = std.c.close(client.fd);
         }
         self.clients.deinit(self.allocator);
+        {
+            var pending_iter = self.pending_pane_writes.iterator();
+            while (pending_iter.next()) |entry| {
+                entry.value_ptr.deinit(self.allocator);
+            }
+            self.pending_pane_writes.deinit();
+        }
         if (self.choose_tree_state) |*state| {
             state.deinit();
         }
@@ -594,6 +607,7 @@ pub const Server = struct {
     pub fn acceptClient(self: *Server) !void {
         const client_fd = std.c.accept(self.listen_fd, null, null);
         if (client_fd < 0) return;
+        setFdNonblocking(client_fd);
         try self.clients.append(self.allocator, .{
             .fd = client_fd,
             .session = null,
@@ -602,8 +616,20 @@ pub const Server = struct {
         });
     }
 
+    const RunStrategy = enum {
+        poll,
+        gcd,
+        io_uring,
+    };
+
+    fn preferredRunStrategy() RunStrategy {
+        if (builtin.os.tag == .macos) return .gcd;
+        if (builtin.os.tag == .linux) return .io_uring;
+        return .poll;
+    }
+
     pub fn run(self: *Server) !void {
-        if (builtin.os.tag == .macos) return self.runPoll();
+        if (builtin.os.tag == .macos) return self.runGcd();
         if (builtin.os.tag == .linux) {
             return self.runIoUring();
         }
@@ -884,6 +910,7 @@ pub const Server = struct {
     pub fn removeSession(self: *Server, session: *Session) void {
         for (session.windows.items) |window| {
             for (window.panes.items) |pane| {
+                self.clearPendingPaneWrites(pane.id);
                 self.session_loop.removePane(pane.id);
             }
         }
@@ -928,8 +955,8 @@ pub const Server = struct {
     }
 
     fn handleClientReadable(self: *Server, client_idx: usize) !void {
-        const fd = self.clients.items[client_idx].fd;
-        var message = protocol.recvMessageAlloc(self.allocator, fd) catch |err| switch (err) {
+        const client = &self.clients.items[client_idx];
+        var message = protocol.recvMessageAllocNonblocking(self.allocator, client.fd, &client.recv_state) catch |err| switch (err) {
             error.UnexpectedEof, error.ReadFailed => {
                 self.removeClient(client_idx);
                 return;
@@ -1060,6 +1087,165 @@ pub const Server = struct {
         }
     }
 
+    const ClientKey = struct {
+        key: u21,
+        mods: binding_mod.Modifiers,
+    };
+
+    const ClientKeyResolution = union(enum) {
+        passthrough,
+        prefix_armed,
+        prefix_miss,
+        command: []const u8,
+    };
+
+    fn decodeClientKey(byte: u8) ClientKey {
+        if (byte == 0) {
+            return .{
+                .key = ' ',
+                .mods = .{ .ctrl = true },
+            };
+        }
+        if (byte < 27) {
+            return .{
+                .key = @as(u21, 'a') + byte - 1,
+                .mods = .{ .ctrl = true },
+            };
+        }
+        if (byte < 32) {
+            return .{
+                .key = @as(u21, byte) + '@',
+                .mods = .{ .ctrl = true },
+            };
+        }
+        return .{
+            .key = byte,
+            .mods = .{},
+        };
+    }
+
+    fn lookupBindingCommand(self: *Server, table_name: []const u8, key: u21, mods: binding_mod.Modifiers) ?[]const u8 {
+        const table = self.binding_manager.tables.get(table_name) orelse return null;
+        const action = table.lookup(key, mods) orelse return null;
+        return switch (action) {
+            .command => |command| command,
+            .none => null,
+        };
+    }
+
+    fn normalizePrefixKey(prefix_key: u21) ?u21 {
+        if (prefix_key == 0) return ' ';
+        if (prefix_key < 27) return @as(u21, 'a') + prefix_key - 1;
+        if (prefix_key < 32) return prefix_key + '@';
+        return prefix_key;
+    }
+
+    fn matchesPrefixKey(prefix_key: u21, key: u21, mods: binding_mod.Modifiers) bool {
+        const normalized = normalizePrefixKey(prefix_key) orelse return false;
+        if (prefix_key < 32) {
+            return mods.ctrl and !mods.meta and !mods.shift and key == normalized;
+        }
+        return !mods.ctrl and !mods.meta and !mods.shift and key == normalized;
+    }
+
+    fn isSessionPrefixKey(session: *Session, key: u21, mods: binding_mod.Modifiers) bool {
+        if (matchesPrefixKey(session.options.prefix_key, key, mods)) return true;
+        if (session.options.prefix2_key) |prefix2_key| {
+            return matchesPrefixKey(prefix2_key, key, mods);
+        }
+        return false;
+    }
+
+    fn resolveClientKey(
+        self: *Server,
+        client: *ClientConnection,
+        session: *Session,
+        key: u21,
+        mods: binding_mod.Modifiers,
+    ) ClientKeyResolution {
+        if (!client.prefix_active) {
+            if (self.lookupBindingCommand("root", key, mods)) |command| {
+                return .{ .command = command };
+            }
+            if (isSessionPrefixKey(session, key, mods)) {
+                client.prefix_active = true;
+                return .prefix_armed;
+            }
+            return .passthrough;
+        }
+
+        client.prefix_active = false;
+        if (self.lookupBindingCommand("prefix", key, mods)) |command| {
+            return .{ .command = command };
+        }
+        return .prefix_miss;
+    }
+
+    fn shiftPendingPaneWrite(buffer: *std.ArrayListAligned(u8, null), written: usize) void {
+        if (written == 0) return;
+        if (written >= buffer.items.len) {
+            buffer.clearRetainingCapacity();
+            return;
+        }
+        const remaining = buffer.items.len - written;
+        std.mem.copyForwards(u8, buffer.items[0..remaining], buffer.items[written..]);
+        buffer.shrinkRetainingCapacity(remaining);
+    }
+
+    fn clearPendingPaneWrites(self: *Server, pane_id: u32) void {
+        if (self.pending_pane_writes.fetchRemove(pane_id)) |entry| {
+            var pending = entry.value;
+            pending.deinit(self.allocator);
+        }
+    }
+
+    fn flushPendingPaneWrites(self: *Server, pane: *Pane) void {
+        const pending = self.pending_pane_writes.getPtr(pane.id) orelse return;
+        if (pane.fd < 0) {
+            self.clearPendingPaneWrites(pane.id);
+            return;
+        }
+
+        const written = pane_mod.writeNonBlocking(pane.fd, pending.items);
+        shiftPendingPaneWrite(pending, written);
+        if (pending.items.len == 0) {
+            self.clearPendingPaneWrites(pane.id);
+        }
+    }
+
+    fn appendPendingPaneWrite(self: *Server, pane_id: u32, data: []const u8) void {
+        if (data.len == 0) return;
+
+        if (self.pending_pane_writes.getPtr(pane_id)) |pending| {
+            pending.appendSlice(self.allocator, data) catch {};
+            return;
+        }
+
+        self.pending_pane_writes.put(pane_id, .empty) catch return;
+        if (self.pending_pane_writes.getPtr(pane_id)) |pending| {
+            pending.appendSlice(self.allocator, data) catch {};
+        }
+    }
+
+    fn writePaneInput(self: *Server, pane: *Pane, data: []const u8) void {
+        if (pane.fd < 0 or data.len == 0) return;
+
+        if (self.pending_pane_writes.getPtr(pane.id)) |pending| {
+            if (pending.items.len > 0) {
+                self.appendPendingPaneWrite(pane.id, data);
+                self.flushPendingPaneWrites(pane);
+                return;
+            }
+            self.clearPendingPaneWrites(pane.id);
+        }
+
+        const written = pane_mod.writeNonBlocking(pane.fd, data);
+        if (written < data.len) {
+            self.appendPendingPaneWrite(pane.id, data[written..]);
+            self.flushPendingPaneWrites(pane);
+        }
+    }
+
     fn handleClientKey(self: *Server, client_idx: usize, payload: []const u8) void {
         const client = &self.clients.items[client_idx];
         const session = client.session orelse return;
@@ -1067,33 +1253,27 @@ pub const Server = struct {
         const pane = window.active_pane orelse return;
         if (pane.fd < 0 or payload.len == 0) return;
 
+        self.flushPendingPaneWrites(pane);
         self.drainPaneReadable(pane.fd);
 
         // Pass escape sequences (multi-byte starting with ESC) directly to the PTY.
         if (payload.len > 1 and payload[0] == 0x1b) {
+            client.prefix_active = false;
             // Check for SGR mouse sequence: ESC[<btn;x;yM or ESC[<btn;x;ym
             if (self.parseSgrMouse(payload, window, pane)) return;
-            writePaneAll(pane.fd, payload);
+            self.writePaneInput(pane, payload);
             return;
         }
 
         for (payload) |byte| {
-            var key: u21 = undefined;
-            var mods = binding_mod.Modifiers{};
-
-            if (byte < 32) {
-                // Control character: derive the letter and set ctrl modifier.
-                key = @as(u21, byte) + '@';
-                mods.ctrl = true;
-            } else {
-                key = byte;
-            }
-
-            if (self.binding_manager.processKey(key, mods)) |command_str| {
-                self.executeBindingCommand(client_idx, command_str);
-            } else {
-                const out: [1]u8 = .{byte};
-                writePaneAll(pane.fd, &out);
+            const decoded = decodeClientKey(byte);
+            switch (self.resolveClientKey(client, session, decoded.key, decoded.mods)) {
+                .command => |command_str| self.executeBindingCommand(client_idx, command_str),
+                .passthrough => {
+                    const out: [1]u8 = .{byte};
+                    self.writePaneInput(pane, &out);
+                },
+                .prefix_armed, .prefix_miss => {},
             }
         }
     }
@@ -1206,9 +1386,7 @@ pub const Server = struct {
             btn, local_x, local_y, final,
         }) catch return false;
 
-        if (target_pane.fd >= 0) {
-            _ = std.c.write(target_pane.fd, seq.ptr, seq.len);
-        }
+        self.writePaneInput(target_pane, seq);
         return true;
     }
 
@@ -1299,6 +1477,9 @@ pub const Server = struct {
     }
 
     fn drainPaneReadable(self: *Server, fd: std.c.fd_t) void {
+        if (self.findPaneByFd(fd)) |pane| {
+            self.flushPendingPaneWrites(pane);
+        }
         var count: usize = 0;
         while (count < 32) : (count += 1) {
             if (self.handlePtyReadable(fd) == 0) break;
@@ -1486,6 +1667,7 @@ pub const Server = struct {
         if (client.choose_tree_state) |*state| {
             state.deinit();
         }
+        client.recv_state.deinit(self.allocator);
         if (client.session) |session| {
             if (session.attached > 0) session.attached -= 1;
         }
@@ -1515,6 +1697,7 @@ pub const Server = struct {
         if (client_idx >= self.clients.items.len) return;
         const client = &self.clients.items[client_idx];
         if (client.session == session) return;
+        client.prefix_active = false;
         if (client.session) |existing| {
             if (existing.attached > 0) existing.attached -= 1;
         }
@@ -1580,6 +1763,7 @@ pub const Server = struct {
                 if (self.uring_loop) |*uring| uring.removeFd(ps.pty_fd);
             }
         }
+        self.clearPendingPaneWrites(pane_id);
         self.session_loop.removePane(pane_id);
     }
 
@@ -1638,30 +1822,45 @@ fn sleepMs(ms: u64) void {
     _ = std.c.nanosleep(&ts, null);
 }
 
-fn writePaneAll(fd: std.c.fd_t, data: []const u8) void {
-    var written: usize = 0;
-    while (written < data.len) {
-        const rc = std.c.write(fd, data[written..].ptr, data.len - written);
-        if (rc > 0) {
-            written += @intCast(rc);
-            continue;
-        }
-        if (rc < 0) {
-            switch (std.posix.errno(rc)) {
-                .AGAIN, .INTR => {
-                    sleepMs(1);
-                    continue;
-                },
-                else => return,
-            }
-        }
-        return;
+fn setFdNonblocking(fd: std.c.fd_t) void {
+    const flags = std.c.fcntl(fd, std.c.F.GETFL);
+    if (flags < 0) return;
+    _ = std.c.fcntl(fd, std.c.F.SETFL, flags | @as(i32, @bitCast(std.c.O{ .NONBLOCK = true })));
+}
+
+fn setNonBlockingForTest(fd: std.c.fd_t) !void {
+    const flags = std.c.fcntl(fd, std.c.F.GETFL);
+    try std.testing.expect(flags >= 0);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fcntl(fd, std.c.F.SETFL, flags | @as(i32, @bitCast(std.c.O{ .NONBLOCK = true }))));
+}
+
+fn drainFdForTest(fd: std.c.fd_t) void {
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = std.c.read(fd, &buf, buf.len);
+        if (n > 0) continue;
+        if (n < 0 and std.posix.errno(n) == .AGAIN) break;
+        break;
     }
+}
+
+fn fillFdForTest(fd: std.c.fd_t) void {
+    var buf: [4096]u8 = .{'x'} ** 4096;
+    while (pane_mod.writeNonBlocking(fd, &buf) == buf.len) {}
 }
 
 test "commandAllowsMissingSession includes if-shell" {
     try std.testing.expect(commandAllowsMissingSession("if-shell"));
     try std.testing.expect(!commandAllowsMissingSession("send-prefix"));
+}
+
+test "preferredRunStrategy matches platform runtime" {
+    const expected: Server.RunStrategy = switch (builtin.os.tag) {
+        .macos => .gcd,
+        .linux => .io_uring,
+        else => .poll,
+    };
+    try std.testing.expectEqual(expected, Server.preferredRunStrategy());
 }
 
 test "loadDefaultConfig falls back to legacy tmux path and stores window defaults" {
@@ -2177,6 +2376,108 @@ test "handlePtyReadable ignores EAGAIN on nonblocking panes" {
     try std.testing.expect(!pane.flags.exited);
 }
 
+test "handleClientKey queues pane input when nonblocking writes back up" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-pane-backpressure.sock");
+    defer server.deinit();
+
+    const session = try Session.init(std.testing.allocator, "demo");
+    try server.sessions.append(server.allocator, session);
+    server.default_session = session;
+
+    const window = try Window.init(std.testing.allocator, "win", 80, 24);
+    try session.addWindow(window);
+
+    const pane = try Pane.init(std.testing.allocator, 80, 24);
+    try window.addPane(pane);
+
+    var pipe_fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&pipe_fds));
+    defer _ = std.c.close(pipe_fds[0]);
+    pane.fd = pipe_fds[1];
+
+    try setNonBlockingForTest(pipe_fds[0]);
+    try setNonBlockingForTest(pipe_fds[1]);
+    fillFdForTest(pipe_fds[1]);
+
+    try server.clients.append(server.allocator, .{
+        .fd = -1,
+        .session = session,
+        .identified = true,
+        .choose_tree_state = null,
+    });
+
+    server.handleClientKey(0, "abc");
+
+    const pending = server.pending_pane_writes.getPtr(pane.id) orelse return error.ExpectedPendingWrite;
+    try std.testing.expectEqualStrings("abc", pending.items);
+
+    drainFdForTest(pipe_fds[0]);
+    server.flushPendingPaneWrites(pane);
+
+    var buf: [8]u8 = undefined;
+    const n = std.c.read(pipe_fds[0], &buf, buf.len);
+    try std.testing.expectEqual(@as(isize, 3), n);
+    try std.testing.expectEqualStrings("abc", buf[0..@intCast(n)]);
+    try std.testing.expect(server.pending_pane_writes.getPtr(pane.id) == null);
+}
+
+test "handleClientKey keeps prefix state per client" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-client-prefix-isolation.sock");
+    defer server.deinit();
+
+    const session = try server.createSession("demo", "/bin/sh", 80, 24);
+    try session.setDefaultShell("/bin/sh");
+
+    try server.clients.append(server.allocator, .{
+        .fd = -1,
+        .session = session,
+        .identified = true,
+        .choose_tree_state = null,
+    });
+    try server.clients.append(server.allocator, .{
+        .fd = -1,
+        .session = session,
+        .identified = true,
+        .choose_tree_state = null,
+    });
+
+    server.handleClientKey(0, &.{0x02}); // C-b
+    try std.testing.expect(server.clients.items[0].prefix_active);
+
+    server.handleClientKey(1, "c");
+    try std.testing.expectEqual(@as(usize, 1), session.windows.items.len);
+    try std.testing.expect(server.clients.items[0].prefix_active);
+    try std.testing.expect(!server.clients.items[1].prefix_active);
+
+    server.handleClientKey(0, "c");
+    try std.testing.expectEqual(@as(usize, 2), session.windows.items.len);
+    try std.testing.expect(!server.clients.items[0].prefix_active);
+}
+
+test "handleClientKey honors session prefix updates" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-prefix-update.sock");
+    defer server.deinit();
+
+    const session = try server.createSession("demo", "/bin/sh", 80, 24);
+    try session.setDefaultShell("/bin/sh");
+    try session.setPrefix("C-a", 0x01);
+
+    try server.clients.append(server.allocator, .{
+        .fd = -1,
+        .session = session,
+        .identified = true,
+        .choose_tree_state = null,
+    });
+
+    server.handleClientKey(0, &.{0x02}); // Old C-b should pass through.
+    server.handleClientKey(0, "c");
+    try std.testing.expectEqual(@as(usize, 1), session.windows.items.len);
+
+    server.handleClientKey(0, &.{0x01}); // New C-a prefix.
+    server.handleClientKey(0, "c");
+    try std.testing.expectEqual(@as(usize, 2), session.windows.items.len);
+}
+
 test "createSession drains startup output so pane accepts input" {
     const script_path = "/tmp/zmux-input-accepts-script.sh";
     const proof_path = "/tmp/zmux-create-session-proof";
@@ -2492,4 +2793,87 @@ test "protocol identify then new-session then key input reaches shell" {
     }
 
     try std.testing.expectEqual(@as(c_int, 0), std.c.access(proof_z, 0));
+}
+
+test "handleClientReadable preserves fragmented nonblocking client frames" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-fragmented-client.sock");
+    defer server.deinit();
+
+    const session = try server.createSession("demo", "/opt/homebrew/bin/zsh", 80, 24);
+
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+    setFdNonblocking(fds[0]);
+
+    try server.clients.append(server.allocator, .{
+        .fd = fds[0],
+        .session = null,
+        .identified = false,
+        .choose_tree_state = null,
+    });
+
+    const identify = protocol.IdentifyMsg{
+        .protocol_version = protocol.version,
+        .pid = std.c.getpid(),
+        .flags = .{},
+        .term_name = .{0} ** 64,
+        .tty_name = .{0} ** 64,
+        .cols = 120,
+        .rows = 40,
+        .xpixel = 0,
+        .ypixel = 0,
+    };
+    const identify_payload = std.mem.asBytes(&identify);
+    const identify_header = protocol.serializeHeader(.{
+        .msg_type = @intFromEnum(protocol.MessageType.identify),
+        .payload_len = identify_payload.len,
+        .flags = 0,
+    });
+
+    try std.testing.expectEqual(@as(isize, 3), std.c.write(fds[1], identify_header[0..3].ptr, 3));
+    try std.testing.expectError(error.WouldBlock, server.handleClientReadable(0));
+    try std.testing.expect(!server.clients.items[0].identified);
+
+    try std.testing.expectEqual(@as(isize, @intCast(identify_header.len - 3)), std.c.write(fds[1], identify_header[3..].ptr, identify_header.len - 3));
+    try std.testing.expectEqual(@as(isize, 5), std.c.write(fds[1], identify_payload[0..5].ptr, 5));
+    try std.testing.expectError(error.WouldBlock, server.handleClientReadable(0));
+    try std.testing.expect(!server.clients.items[0].identified);
+
+    try std.testing.expectEqual(@as(isize, @intCast(identify_payload.len - 5)), std.c.write(fds[1], identify_payload[5..].ptr, identify_payload.len - 5));
+    try server.handleClientReadable(0);
+    try std.testing.expect(server.clients.items[0].identified);
+    try std.testing.expectEqual(session, server.clients.items[0].session.?);
+    try std.testing.expectEqual(@as(u16, 120), server.clients.items[0].cols);
+    try std.testing.expectEqual(@as(u16, 40), server.clients.items[0].rows);
+
+    const command_args = [_][]const u8{"list-sessions"};
+    const command_payload = try protocol.encodeCommandArgs(std.testing.allocator, &command_args);
+    defer std.testing.allocator.free(command_payload);
+    const command_header = protocol.serializeHeader(.{
+        .msg_type = @intFromEnum(protocol.MessageType.command),
+        .payload_len = @intCast(command_payload.len),
+        .flags = 0,
+    });
+
+    try std.testing.expectEqual(@as(isize, 2), std.c.write(fds[1], command_header[0..2].ptr, 2));
+    try std.testing.expectError(error.WouldBlock, server.handleClientReadable(0));
+
+    try std.testing.expectEqual(@as(isize, @intCast(command_header.len - 2)), std.c.write(fds[1], command_header[2..].ptr, command_header.len - 2));
+    try std.testing.expectEqual(@as(isize, 4), std.c.write(fds[1], command_payload[0..4].ptr, 4));
+    try std.testing.expectError(error.WouldBlock, server.handleClientReadable(0));
+
+    try std.testing.expectEqual(@as(isize, @intCast(command_payload.len - 4)), std.c.write(fds[1], command_payload[4..].ptr, command_payload.len - 4));
+    try server.handleClientReadable(0);
+
+    var output = try protocol.recvMessageAlloc(std.testing.allocator, fds[1]);
+    defer output.deinit();
+    try std.testing.expectEqual(protocol.MessageType.output, output.msg_type);
+    try std.testing.expect(std.mem.indexOf(u8, output.payload, "demo") != null);
+
+    var exit_ack = try protocol.recvMessageAlloc(std.testing.allocator, fds[1]);
+    defer exit_ack.deinit();
+    try std.testing.expectEqual(protocol.MessageType.exit_ack, exit_ack.msg_type);
+    try std.testing.expectEqual(@as(u16, 0), exit_ack.flags);
 }

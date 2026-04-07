@@ -47,6 +47,28 @@ pub const Message = struct {
     }
 };
 
+pub const RecvState = struct {
+    header_buf: [@sizeOf(Header)]u8 = [_]u8{0} ** @sizeOf(Header),
+    header_len: usize = 0,
+    header: ?Header = null,
+    payload: ?[]u8 = null,
+    payload_read: usize = 0,
+
+    pub fn deinit(self: *RecvState, alloc: std.mem.Allocator) void {
+        self.reset(alloc);
+    }
+
+    pub fn reset(self: *RecvState, alloc: std.mem.Allocator) void {
+        if (self.payload) |payload| {
+            alloc.free(payload);
+        }
+        self.payload = null;
+        self.payload_read = 0;
+        self.header = null;
+        self.header_len = 0;
+    }
+};
+
 comptime {
     std.debug.assert(@sizeOf(Header) == 8);
 }
@@ -193,6 +215,65 @@ pub fn recvMessageAlloc(alloc: std.mem.Allocator, fd: std.posix.fd_t) !Message {
     };
 }
 
+fn readSome(fd: std.posix.fd_t, buf: []u8) !usize {
+    while (true) {
+        const rc = std.c.read(fd, buf.ptr, buf.len);
+        if (rc < 0) switch (std.posix.errno(rc)) {
+            .INTR => continue,
+            .AGAIN => return error.WouldBlock,
+            else => return error.ReadFailed,
+        };
+        return @intCast(rc);
+    }
+}
+
+pub fn recvMessageAllocNonblocking(alloc: std.mem.Allocator, fd: std.posix.fd_t, state: *RecvState) !Message {
+    while (state.header == null) {
+        while (state.header_len < @sizeOf(Header)) {
+            const n = readSome(fd, state.header_buf[state.header_len..]) catch |err| switch (err) {
+                error.WouldBlock => return error.WouldBlock,
+                else => return err,
+            };
+            if (n == 0) return error.UnexpectedEof;
+            state.header_len += n;
+        }
+
+        const header = deserializeHeader(@ptrCast(&state.header_buf));
+        _ = try messageTypeFromInt(header.msg_type);
+        if (header.payload_len > max_payload) {
+            state.reset(alloc);
+            return error.PayloadTooLarge;
+        }
+        state.header = header;
+        if (state.payload == null) {
+            state.payload = try alloc.alloc(u8, header.payload_len);
+        }
+    }
+
+    const header = state.header.?;
+    const msg_type = try messageTypeFromInt(header.msg_type);
+    const payload = state.payload.?;
+    while (state.payload_read < payload.len) {
+        const n = readSome(fd, payload[state.payload_read..]) catch |err| switch (err) {
+            error.WouldBlock => return error.WouldBlock,
+            else => return err,
+        };
+        if (n == 0) return error.UnexpectedEof;
+        state.payload_read += n;
+    }
+
+    state.payload = null;
+    state.payload_read = 0;
+    state.header = null;
+    state.header_len = 0;
+    return .{
+        .msg_type = msg_type,
+        .flags = header.flags,
+        .payload = payload,
+        .allocator = alloc,
+    };
+}
+
 pub fn encodeCommandArgs(alloc: std.mem.Allocator, args: []const []const u8) ![]u8 {
     var total: usize = 0;
     for (args) |arg| total += arg.len + 1;
@@ -269,4 +350,47 @@ test "command arg payload roundtrip" {
     for (input, decoded.items) |expected, actual| {
         try std.testing.expectEqualStrings(expected, actual);
     }
+}
+
+test "nonblocking recv preserves fragmented frame state" {
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    const fl = std.c.fcntl(fds[0], std.c.F.GETFL);
+    try std.testing.expect(fl >= 0);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fcntl(fds[0], std.c.F.SETFL, fl | @as(i32, @bitCast(std.c.O{ .NONBLOCK = true }))));
+
+    const payload = "split payload";
+    const header = serializeHeader(.{
+        .msg_type = @intFromEnum(MessageType.output),
+        .payload_len = payload.len,
+        .flags = 9,
+    });
+    var state = RecvState{};
+    defer state.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(isize, 3), std.c.write(fds[1], header[0..3].ptr, 3));
+    try std.testing.expectError(error.WouldBlock, recvMessageAllocNonblocking(std.testing.allocator, fds[0], &state));
+    try std.testing.expectEqual(@as(usize, 3), state.header_len);
+
+    try std.testing.expectEqual(@as(isize, 5), std.c.write(fds[1], header[3..8].ptr, 5));
+    try std.testing.expectEqual(@as(isize, 4), std.c.write(fds[1], payload[0..4].ptr, 4));
+    try std.testing.expectError(error.WouldBlock, recvMessageAllocNonblocking(std.testing.allocator, fds[0], &state));
+    try std.testing.expectEqual(@as(usize, 8), state.header_len);
+    try std.testing.expect(state.header != null);
+    try std.testing.expectEqual(@as(usize, 4), state.payload_read);
+
+    try std.testing.expectEqual(@as(isize, payload.len - 4), std.c.write(fds[1], payload[4..].ptr, payload.len - 4));
+    var msg = try recvMessageAllocNonblocking(std.testing.allocator, fds[0], &state);
+    defer msg.deinit();
+
+    try std.testing.expectEqual(MessageType.output, msg.msg_type);
+    try std.testing.expectEqual(@as(u16, 9), msg.flags);
+    try std.testing.expectEqualStrings(payload, msg.payload);
+    try std.testing.expectEqual(@as(usize, 0), state.header_len);
+    try std.testing.expect(state.header == null);
+    try std.testing.expect(state.payload == null);
+    try std.testing.expectEqual(@as(usize, 0), state.payload_read);
 }

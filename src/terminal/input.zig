@@ -62,10 +62,12 @@ pub const State = enum {
     csi_intermediate,
     csi_ignore,
     osc_string,
+    osc_escape,
     dcs_entry,
     dcs_param,
     dcs_intermediate,
     dcs_passthrough,
+    dcs_escape,
     dcs_ignore,
 };
 
@@ -80,6 +82,7 @@ pub const Parser = struct {
     osc_len: u16 = 0,
     osc_ps: u16 = 0,
     osc_ps_done: bool = false,
+    st_escape_pending: bool = false,
     // UTF-8 multi-byte accumulation
     utf8_buf: [4]u8 = .{ 0, 0, 0, 0 },
     utf8_len: u3 = 0,
@@ -94,6 +97,17 @@ pub const Parser = struct {
 
     /// Feed one byte. Returns an event if a sequence is complete.
     pub fn feed(self: *Parser, byte: u8) ?InputEvent {
+        if (self.st_escape_pending) {
+            return switch (self.state) {
+                .osc_string => self.handleOscSt(byte),
+                .dcs_passthrough => self.handleDcsSt(byte),
+                else => blk: {
+                    self.st_escape_pending = false;
+                    break :blk null;
+                },
+            };
+        }
+
         // If we're accumulating a UTF-8 multi-byte sequence, continue it.
         if (self.utf8_expected > 0) {
             if (byte >= 0x80 and byte <= 0xBF) {
@@ -121,7 +135,7 @@ pub const Parser = struct {
             }
         }
 
-        if (byte == 0x1b) {
+        if (byte == 0x1b and self.state != .osc_string and self.state != .osc_escape and self.state != .dcs_passthrough and self.state != .dcs_escape) {
             self.resetSequence();
             self.state = .escape;
             return null;
@@ -140,10 +154,12 @@ pub const Parser = struct {
             .csi_intermediate => self.handleCsiIntermediate(byte),
             .csi_ignore => self.handleCsiIgnore(byte),
             .osc_string => self.handleOscString(byte),
+            .osc_escape => self.handleOscEscape(byte),
             .dcs_entry => self.handleDcsEntry(byte),
             .dcs_param => self.handleDcsParam(byte),
             .dcs_intermediate => self.handleDcsIntermediate(byte),
             .dcs_passthrough => self.handleDcsPassthrough(byte),
+            .dcs_escape => self.handleDcsEscape(byte),
             .dcs_ignore => null,
         };
     }
@@ -304,6 +320,10 @@ pub const Parser = struct {
 
     fn handleOscString(self: *Parser, byte: u8) ?InputEvent {
         if (byte == 0x07 or byte == 0x9c) return self.dispatchOsc();
+        if (byte == 0x1b) {
+            self.state = .osc_escape;
+            return null;
+        }
         if (!self.osc_ps_done) {
             if (byte >= '0' and byte <= '9') {
                 self.osc_ps = self.osc_ps *| 10 +| (byte - '0');
@@ -321,11 +341,26 @@ pub const Parser = struct {
         return null;
     }
 
+    fn handleOscEscape(self: *Parser, byte: u8) ?InputEvent {
+        if (byte == '\\') return self.dispatchOsc();
+        self.state = .osc_string;
+        self.appendOscByte(0x1b);
+        return self.handleOscString(byte);
+    }
+
+    fn handleOscSt(self: *Parser, byte: u8) ?InputEvent {
+        self.st_escape_pending = false;
+        if (byte == '\\') return self.dispatchOsc();
+        self.appendOscByte(0x1b);
+        return self.handleOscString(byte);
+    }
+
     fn dispatchOsc(self: *Parser) InputEvent {
         var osc = OSC{ .ps = self.osc_ps };
         const len = @min(self.osc_len, @as(u16, @intCast(osc.data.len)));
         @memcpy(osc.data[0..len], self.osc_buf[0..len]);
         osc.data_len = len;
+        self.st_escape_pending = false;
         self.state = .ground;
         return .{ .osc = osc };
     }
@@ -392,11 +427,29 @@ pub const Parser = struct {
 
     fn handleDcsPassthrough(self: *Parser, byte: u8) ?InputEvent {
         if (byte == 0x9c) return self.dispatchDcs();
+        if (byte == 0x1b) {
+            self.state = .dcs_escape;
+            return null;
+        }
         if (self.dcs_len < self.dcs_buf.len) {
             self.dcs_buf[self.dcs_len] = byte;
             self.dcs_len += 1;
         }
         return null;
+    }
+
+    fn handleDcsEscape(self: *Parser, byte: u8) ?InputEvent {
+        if (byte == '\\') return self.dispatchDcs();
+        self.state = .dcs_passthrough;
+        self.appendDcsByte(0x1b);
+        return self.handleDcsPassthrough(byte);
+    }
+
+    fn handleDcsSt(self: *Parser, byte: u8) ?InputEvent {
+        self.st_escape_pending = false;
+        if (byte == '\\') return self.dispatchDcs();
+        self.appendDcsByte(0x1b);
+        return self.handleDcsPassthrough(byte);
     }
 
     fn dispatchDcs(self: *Parser) InputEvent {
@@ -410,6 +463,7 @@ pub const Parser = struct {
         const len = @min(self.dcs_len, @as(u16, @intCast(dcs.data.len)));
         @memcpy(dcs.data[0..len], self.dcs_buf[0..len]);
         dcs.data_len = len;
+        self.st_escape_pending = false;
         self.state = .ground;
         return .{ .dcs = dcs };
     }
@@ -419,6 +473,21 @@ pub const Parser = struct {
         self.param_count = 0;
         self.intermediates = .{ 0, 0, 0, 0 };
         self.intermediate_count = 0;
+        self.st_escape_pending = false;
+    }
+
+    fn appendOscByte(self: *Parser, byte: u8) void {
+        if (self.osc_len < self.osc_buf.len) {
+            self.osc_buf[self.osc_len] = byte;
+            self.osc_len += 1;
+        }
+    }
+
+    fn appendDcsByte(self: *Parser, byte: u8) void {
+        if (self.dcs_len < self.dcs_buf.len) {
+            self.dcs_buf[self.dcs_len] = byte;
+            self.dcs_len += 1;
+        }
     }
 };
 
@@ -487,6 +556,24 @@ test "parse OSC title" {
     }
 }
 
+test "parse OSC title with 7-bit ST terminator" {
+    var p = Parser.init();
+    _ = p.feed(0x1b);
+    _ = p.feed(']');
+    _ = p.feed('0');
+    _ = p.feed(';');
+    for ("title") |c| _ = p.feed(c);
+    _ = p.feed(0x1b);
+    const event = p.feed('\\').?;
+    switch (event) {
+        .osc => |osc| {
+            try std.testing.expectEqual(@as(u16, 0), osc.ps);
+            try std.testing.expectEqualStrings("title", osc.getData());
+        },
+        else => return error.UnexpectedEvent,
+    }
+}
+
 test "parse ESC M" {
     var p = Parser.init();
     _ = p.feed(0x1b);
@@ -495,6 +582,23 @@ test "parse ESC M" {
         .esc => |esc| {
             try std.testing.expectEqual(@as(u8, 'M'), esc.final);
             try std.testing.expectEqual(@as(u8, 0), esc.intermediate);
+        },
+        else => return error.UnexpectedEvent,
+    }
+}
+
+test "parse DCS passthrough with 7-bit ST terminator" {
+    var p = Parser.init();
+    _ = p.feed(0x1b);
+    _ = p.feed('P');
+    _ = p.feed('q');
+    for ("abc") |c| _ = p.feed(c);
+    _ = p.feed(0x1b);
+    const event = p.feed('\\').?;
+    switch (event) {
+        .dcs => |dcs| {
+            try std.testing.expectEqual(@as(u8, 'q'), dcs.final);
+            try std.testing.expectEqualStrings("abc", dcs.getData());
         },
         else => return error.UnexpectedEvent,
     }

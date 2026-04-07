@@ -117,9 +117,7 @@ pub const Pty = struct {
 
     /// Write data to the PTY master.
     pub fn write(self: *Pty, data: []const u8) usize {
-        const n = std.c.write(self.master_fd, data.ptr, data.len);
-        if (n <= 0) return 0;
-        return @intCast(n);
+        return writeNonBlocking(self.master_fd, data);
     }
 
     /// Resize the PTY.
@@ -161,6 +159,26 @@ fn setNonBlocking(fd: std.c.fd_t) !void {
     if (flags < 0) return Pty.Error.SetNonBlockFailed;
     const result = std.c.fcntl(fd, std.c.F.SETFL, flags | @as(i32, @bitCast(std.c.O{ .NONBLOCK = true })));
     if (result < 0) return Pty.Error.SetNonBlockFailed;
+}
+
+pub fn writeNonBlocking(fd: std.c.fd_t, data: []const u8) usize {
+    var written: usize = 0;
+    while (written < data.len) {
+        const n = std.c.write(fd, data[written..].ptr, data.len - written);
+        if (n > 0) {
+            written += @intCast(n);
+            continue;
+        }
+        if (n < 0) {
+            switch (std.posix.errno(n)) {
+                .INTR => continue,
+                .AGAIN => return written,
+                else => return written,
+            }
+        }
+        return written;
+    }
+    return written;
 }
 
 fn configureInteractiveTermios(fd: std.c.fd_t) void {
