@@ -18,6 +18,12 @@
       "transcript": "/be/223d6100ec/1/full.jsonl",
       "content_hash": "/be/223d6100ec/1/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/be/223d6100ec/2/metadata.json",
+      "transcript": "/be/223d6100ec/2/full.jsonl",
+      "content_hash": "/be/223d6100ec/2/content_hash.txt",
+      "prompt": ""
     }
   ],
   "token_usage": {
