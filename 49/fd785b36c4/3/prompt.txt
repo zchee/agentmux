@@ -465,3 +465,7 @@ Do we need the uncommitted files?
 ---
 
 Do we need the uncommitted file changes?
+
+---
+
+$commit
