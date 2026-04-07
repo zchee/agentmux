@@ -12,6 +12,12 @@
       "transcript": "/e8/9603ca926a/0/full.jsonl",
       "content_hash": "/e8/9603ca926a/0/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/e8/9603ca926a/1/metadata.json",
+      "transcript": "/e8/9603ca926a/1/full.jsonl",
+      "content_hash": "/e8/9603ca926a/1/content_hash.txt",
+      "prompt": ""
     }
   ],
   "token_usage": {
