@@ -3,7 +3,7 @@
   "checkpoint_id": "94d96f5a4716",
   "strategy": "manual-commit",
   "branch": "main",
-  "checkpoints_count": 0,
+  "checkpoints_count": 1,
   "files_touched": [
     "docs/zsh-startup-probe-audit-2026-04-08.md",
     "docs/zsh-startup-probe-relay-v1.md",
@@ -27,6 +27,19 @@
       "transcript": "/94/d96f5a4716/2/full.jsonl",
       "content_hash": "/94/d96f5a4716/2/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/94/d96f5a4716/3/metadata.json",
+      "transcript": "/94/d96f5a4716/3/full.jsonl",
+      "content_hash": "/94/d96f5a4716/3/content_hash.txt",
+      "prompt": "/94/d96f5a4716/3/prompt.txt"
     }
-  ]
+  ],
+  "token_usage": {
+    "input_tokens": 185611429,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 132394624,
+    "output_tokens": 433042,
+    "api_call_count": 518
+  }
 }
