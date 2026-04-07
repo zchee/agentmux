@@ -1407,6 +1407,23 @@ pub const Server = struct {
         try protocol.sendMessageWithFlags(fd, .exit_ack, exit_code, &.{});
     }
 
+    fn deactivatePaneFd(self: *Server, pane: *Pane) void {
+        if (pane.fd < 0) return;
+
+        if (builtin.os.tag == .macos) {
+            if (self.gcd_loop) |*gcd| gcd.removeFd(pane.fd);
+        }
+        if (builtin.os.tag == .linux) {
+            if (self.uring_loop) |*uring| uring.removeFd(pane.fd);
+        }
+        _ = std.c.close(pane.fd);
+        pane.fd = -1;
+        if (self.session_loop.getPane(pane.id)) |ps| {
+            ps.pty_fd = -1;
+        }
+        self.clearPendingPaneWrites(pane.id);
+    }
+
     fn handlePtyReadable(self: *Server, fd: std.c.fd_t) usize {
         const pane = self.findPaneByFd(fd) orelse return 0;
         var buf: [4096]u8 = undefined;
@@ -1419,26 +1436,30 @@ pub const Server = struct {
         }
         if (n == 0) {
             // EOF on PTY — pane process exited.
+            const session = self.findSessionForPaneFd(fd);
             if (!pane.flags.exited) {
                 pane.flags.exited = true;
                 self.fireHooks(.pane_exited);
 
                 // Check remain-on-exit: if set, write "Pane is dead" overlay.
-                const session = self.findSessionForPaneFd(fd) orelse return 0;
-                for (session.windows.items) |window| {
-                    for (window.panes.items) |wp| {
-                        if (wp == pane and window.options.remain_on_exit) {
-                            if (self.session_loop.getPane(pane.id)) |ps| {
-                                const dead_msg = "[Pane is dead]";
-                                @import("input_handler.zig").processBytes(&ps.parser, &ps.screen, "\x1b[H\x1b[2J");
-                                @import("input_handler.zig").processBytes(&ps.parser, &ps.screen, dead_msg);
-                                ps.dirty.markAllDirty();
+                if (session) |active_session| {
+                    for (active_session.windows.items) |window| {
+                        for (window.panes.items) |wp| {
+                            if (wp == pane and window.options.remain_on_exit) {
+                                if (self.session_loop.getPane(pane.id)) |ps| {
+                                    const dead_msg = "[Pane is dead]";
+                                    @import("input_handler.zig").processBytes(&ps.parser, &ps.screen, "\x1b[H\x1b[2J");
+                                    @import("input_handler.zig").processBytes(&ps.parser, &ps.screen, dead_msg);
+                                    ps.dirty.markAllDirty();
+                                }
+                                self.deactivatePaneFd(pane);
+                                return 0; // Keep pane state for remain-on-exit.
                             }
-                            return 0; // Don't remove the pane.
                         }
                     }
                 }
             }
+            self.deactivatePaneFd(pane);
             return 0;
         }
 
@@ -2374,6 +2395,38 @@ test "handlePtyReadable ignores EAGAIN on nonblocking panes" {
 
     try std.testing.expectEqual(@as(usize, 0), server.handlePtyReadable(pane.fd));
     try std.testing.expect(!pane.flags.exited);
+}
+
+test "handlePtyReadable deactivates pane fd on EOF" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-pty-eof.sock");
+    defer server.deinit();
+
+    var pipe_fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&pipe_fds));
+    defer {
+        if (pipe_fds[0] >= 0) _ = std.c.close(pipe_fds[0]);
+        if (pipe_fds[1] >= 0) _ = std.c.close(pipe_fds[1]);
+    }
+
+    const session = try Session.init(std.testing.allocator, "demo");
+    try server.sessions.append(server.allocator, session);
+    server.default_session = session;
+
+    const window = try Window.init(std.testing.allocator, "win", 80, 24);
+    try session.addWindow(window);
+    const pane = try Pane.init(std.testing.allocator, 80, 24);
+    pane.fd = pipe_fds[0];
+    pipe_fds[0] = -1;
+    try window.addPane(pane);
+    try server.session_loop.addPane(pane.id, pane.fd, pane.sx, pane.sy);
+
+    _ = std.c.close(pipe_fds[1]);
+    pipe_fds[1] = -1;
+
+    try std.testing.expectEqual(@as(usize, 0), server.handlePtyReadable(pane.fd));
+    try std.testing.expect(pane.flags.exited);
+    try std.testing.expectEqual(@as(std.c.fd_t, -1), pane.fd);
+    try std.testing.expectEqual(@as(std.c.fd_t, -1), server.session_loop.getPane(pane.id).?.pty_fd);
 }
 
 test "handleClientKey queues pane input when nonblocking writes back up" {
