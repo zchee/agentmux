@@ -1,0 +1,24 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "17db707b9052",
+  "strategy": "manual-commit",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "src/client.zig"
+  ],
+  "sessions": [
+    {
+      "metadata": "/17/db707b9052/0/metadata.json",
+      "transcript": "/17/db707b9052/0/full.jsonl",
+      "content_hash": "/17/db707b9052/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 613140,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 610560,
+    "output_tokens": 786,
+    "api_call_count": 5
+  }
+}
