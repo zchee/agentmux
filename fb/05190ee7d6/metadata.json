@@ -1,0 +1,24 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "fb05190ee7d6",
+  "strategy": "manual-commit",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "src/server.zig"
+  ],
+  "sessions": [
+    {
+      "metadata": "/fb/05190ee7d6/0/metadata.json",
+      "transcript": "/fb/05190ee7d6/0/full.jsonl",
+      "content_hash": "/fb/05190ee7d6/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 116493,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 116352,
+    "output_tokens": 1179,
+    "api_call_count": 1
+  }
+}
