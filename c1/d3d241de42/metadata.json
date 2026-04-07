@@ -1,0 +1,24 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "c1d3d241de42",
+  "strategy": "manual-commit",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "docs/zsh-startup-probe-audit-2026-04-08.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/c1/d3d241de42/0/metadata.json",
+      "transcript": "/c1/d3d241de42/0/full.jsonl",
+      "content_hash": "/c1/d3d241de42/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 441371,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 437248,
+    "output_tokens": 807,
+    "api_call_count": 2
+  }
+}
