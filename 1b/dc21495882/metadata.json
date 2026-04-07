@@ -12,6 +12,12 @@
       "transcript": "/1b/dc21495882/0/full.jsonl",
       "content_hash": "/1b/dc21495882/0/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/1b/dc21495882/1/metadata.json",
+      "transcript": "/1b/dc21495882/1/full.jsonl",
+      "content_hash": "/1b/dc21495882/1/content_hash.txt",
+      "prompt": ""
     }
   ],
   "token_usage": {
