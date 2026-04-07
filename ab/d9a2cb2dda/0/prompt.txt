@@ -1,0 +1,1 @@
+1 new msg(s): read $OMX_TEAM_STATE_ROOT/team/implement-the-startup-only-zsh/mailbox/worker-4.json, act, report progress, continue assigned work or next feasible task.
