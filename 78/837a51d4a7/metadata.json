@@ -103,6 +103,12 @@
       "transcript": "/78/837a51d4a7/15/full.jsonl",
       "content_hash": "/78/837a51d4a7/15/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/78/837a51d4a7/16/metadata.json",
+      "transcript": "/78/837a51d4a7/16/full.jsonl",
+      "content_hash": "/78/837a51d4a7/16/content_hash.txt",
+      "prompt": ""
     }
   ],
   "token_usage": {
