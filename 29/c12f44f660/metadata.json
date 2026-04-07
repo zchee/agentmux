@@ -79,6 +79,19 @@
       "transcript": "/29/c12f44f660/11/full.jsonl",
       "content_hash": "/29/c12f44f660/11/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/29/c12f44f660/12/metadata.json",
+      "transcript": "/29/c12f44f660/12/full.jsonl",
+      "content_hash": "/29/c12f44f660/12/content_hash.txt",
+      "prompt": ""
     }
-  ]
+  ],
+  "token_usage": {
+    "input_tokens": 281966,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 229,
+    "api_call_count": 1
+  }
 }
