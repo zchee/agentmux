@@ -1,0 +1,9 @@
+Cleanup (or squash) 7e326126c2f3...24ce5fc709ea commits. Splits if necessary.
+
+---
+
+$autopilot "The zsh instance started with `zmux new -s test` was not accepting any key input. Fix it."
+
+---
+
+$autopilot "When launching `zmux new -s test`, CPU usage was 100%. Fix it."
