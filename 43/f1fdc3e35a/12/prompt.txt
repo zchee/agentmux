@@ -73,3 +73,15 @@ Team task-1-fix-nonblocking-client: worker-3 said "ACK: worker-3 initialized" bu
 ---
 
 Team task-1-fix-nonblocking-client: worker panes stalled, no progress 2m. Next: omx team status task-1-fix-nonblocking-client; read worker messages; unblock/reassign or shutdown. [OMX_TMUX_INJECT]
+
+---
+
+Team task-1-fix-nonblocking-client: 24 msg(s) for leader. Next: read messages; keep orchestrating; if done, gracefully shut down: omx team shutdown task-1-fix-nonblocking-client. [OMX_TMUX_INJECT]
+
+---
+
+Team task-1-fix-nonblocking-client: worker panes stalled, no progress 2m. Next: omx team status task-1-fix-nonblocking-client; read worker messages; unblock/reassign or shutdown. [OMX_TMUX_INJECT]
+
+---
+
+[OMX] worker-5 idle. Next: read worker-5's latest message/output, then assign the next concrete step or mark the task complete.. [OMX_TMUX_INJECT]
