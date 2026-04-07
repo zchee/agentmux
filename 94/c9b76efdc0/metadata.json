@@ -1,0 +1,17 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "94c9b76efdc0",
+  "strategy": "manual-commit",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "src/core/event_loop.zig"
+  ],
+  "sessions": [
+    {
+      "metadata": "/94/c9b76efdc0/0/metadata.json",
+      "transcript": "/94/c9b76efdc0/0/full.jsonl",
+      "content_hash": "/94/c9b76efdc0/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}
