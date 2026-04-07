@@ -1,0 +1,31 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "94d96f5a4716",
+  "session_id": "019d64c7-be21-7b00-8ab5-a0f748047cb7",
+  "strategy": "manual-commit",
+  "created_at": "2026-04-07T19:55:01.512432Z",
+  "branch": "main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "docs/zsh-startup-probe-relay-v1.md",
+    "docs/zsh-startup-probe-test-matrix.md",
+    "docs/zsh-startup-probe-audit-2026-04-08.md"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.3-codex-spark",
+  "turn_id": "46c918e48272",
+  "checkpoint_transcript_start": 7,
+  "transcript_lines_at_start": 7,
+  "initial_attribution": {
+    "calculated_at": "2026-04-07T19:55:01.436801Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 0,
+    "total_lines_changed": 0,
+    "agent_percentage": 0,
+    "metric_version": 2
+  }
+}
