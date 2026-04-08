@@ -5,7 +5,18 @@
   "branch": "main",
   "checkpoints_count": 1,
   "files_touched": [
-    "src/core/event_loop.zig"
+    ".github/workflows/ci.yml",
+    "README.md",
+    "src/AGENTS.md",
+    "src/core/AGENTS.md",
+    "src/core/event_loop.zig",
+    "src/main.zig",
+    "src/platform/AGENTS.md",
+    "src/platform/darwin.zig",
+    "src/platform/linux.zig",
+    "src/platform/platform.zig",
+    "src/platform/std_io.zig",
+    "src/server.zig"
   ],
   "sessions": [
     {
@@ -13,6 +24,12 @@
       "transcript": "/b7/2ac7cdf080/0/full.jsonl",
       "content_hash": "/b7/2ac7cdf080/0/content_hash.txt",
       "prompt": "/b7/2ac7cdf080/0/prompt.txt"
+    },
+    {
+      "metadata": "/b7/2ac7cdf080/1/metadata.json",
+      "transcript": "/b7/2ac7cdf080/1/full.jsonl",
+      "content_hash": "/b7/2ac7cdf080/1/content_hash.txt",
+      "prompt": ""
     }
   ],
   "token_usage": {
