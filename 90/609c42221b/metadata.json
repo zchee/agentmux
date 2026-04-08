@@ -3,7 +3,7 @@
   "checkpoint_id": "90609c42221b",
   "strategy": "manual-commit",
   "branch": "main",
-  "checkpoints_count": 5,
+  "checkpoints_count": 6,
   "files_touched": [
     "src/server.zig"
   ],
@@ -37,13 +37,19 @@
       "transcript": "/90/609c42221b/4/full.jsonl",
       "content_hash": "/90/609c42221b/4/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/90/609c42221b/5/metadata.json",
+      "transcript": "/90/609c42221b/5/full.jsonl",
+      "content_hash": "/90/609c42221b/5/content_hash.txt",
+      "prompt": "/90/609c42221b/5/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 58941975,
+    "input_tokens": 59857546,
     "cache_creation_tokens": 0,
-    "cache_read_tokens": 52628736,
-    "output_tokens": 114909,
-    "api_call_count": 181
+    "cache_read_tokens": 53437312,
+    "output_tokens": 123446,
+    "api_call_count": 197
   }
 }
