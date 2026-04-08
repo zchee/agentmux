@@ -4,7 +4,7 @@
 # core
 
 ## Purpose
-Shared utility modules used across the entire codebase. Provides the custom allocator, colour representation, environment variable management, event loop abstraction, structured logging, and UTF-8 width calculation.
+Shared utility modules used across the entire codebase. Provides the custom allocator, colour representation, environment variable management, structured logging, and UTF-8 width calculation.
 
 ## Key Files
 
@@ -13,7 +13,6 @@ Shared utility modules used across the entire codebase. Provides the custom allo
 | `allocator.zig` | `ZmuxAllocator` u2014 custom allocator wrapping `std.heap.c_allocator` with tracking |
 | `colour.zig` | `Colour` union (default/palette/RGB), named constants, `Attributes` flags, tmux-style colour parsing |
 | `environ.zig` | `Environ` u2014 key-value environment variable store with get/set/unset/inherit |
-| `event_loop.zig` | Event loop abstraction u2014 interfaces for platform-specific event loops (GCD, io_uring) |
 | `log.zig` | Structured logging u2014 level-based (debug/info/warn/error), optional file output |
 | `utf8.zig` | UTF-8 utilities u2014 codepoint decoding, `charWidth()` for wide/zero-width character detection |
 

@@ -4,15 +4,13 @@ pub const core = struct {
     pub const allocator_mod = @import("core/allocator.zig");
     pub const colour = @import("core/colour.zig");
     pub const environ = @import("core/environ.zig");
-    pub const event_loop = @import("core/event_loop.zig");
     pub const log = @import("core/log.zig");
     pub const utf8 = @import("core/utf8.zig");
 };
 
 pub const platform = struct {
     pub const core = @import("platform/platform.zig");
-    pub const darwin = @import("platform/darwin.zig");
-    pub const linux = @import("platform/linux.zig");
+    pub const std_io = @import("platform/std_io.zig");
 };
 pub const protocol = @import("protocol.zig");
 pub const startup_probe = @import("startup_probe.zig");
@@ -405,7 +403,7 @@ test {
     _ = hooks.hooks_mod;
     _ = hooks.notify;
     _ = hooks.job;
-    _ = platform.darwin.GcdEventLoop;
+    _ = platform.std_io.Runtime;
     _ = tabs.tabs_mod;
     _ = render.atlas;
     _ = render.image;

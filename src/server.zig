@@ -22,10 +22,8 @@ const status_style = @import("status/style.zig");
 const log = @import("core/log.zig");
 const signals = @import("signals.zig");
 const builtin = @import("builtin");
-const event_loop_mod = @import("core/event_loop.zig");
 const platform = @import("platform/platform.zig");
-const GcdEventLoop = @import("platform/darwin.zig").GcdEventLoop;
-const IoUringEventLoop = @import("platform/linux.zig").IoUringEventLoop;
+const StdIoRuntime = @import("platform/std_io.zig").Runtime;
 const startup_probe = @import("startup_probe.zig");
 
 /// Server ACL entry.
@@ -75,8 +73,7 @@ pub const Server = struct {
     next_client_id: u64,
     running: bool,
     allocator: std.mem.Allocator,
-    gcd_loop: if (builtin.os.tag == .macos) ?GcdEventLoop else void,
-    uring_loop: if (builtin.os.tag == .linux) ?IoUringEventLoop else void,
+    std_io_runtime: StdIoRuntime,
 
     pub const ClientConnection = struct {
         const RelayState = enum {
@@ -204,8 +201,7 @@ pub const Server = struct {
             .next_client_id = 1,
             .running = false,
             .allocator = alloc,
-            .gcd_loop = if (builtin.os.tag == .macos) null else {},
-            .uring_loop = if (builtin.os.tag == .linux) null else {},
+            .std_io_runtime = StdIoRuntime.init(alloc),
         };
     }
 
@@ -254,12 +250,7 @@ pub const Server = struct {
         self.status_command_cache.deinit();
         for (self.messages.items) |msg| self.allocator.free(msg);
         self.messages.deinit(self.allocator);
-        if (builtin.os.tag == .macos) {
-            if (self.gcd_loop) |*loop| loop.deinit();
-        }
-        if (builtin.os.tag == .linux) {
-            if (self.uring_loop) |*loop| loop.deinit();
-        }
+        self.std_io_runtime.deinit();
         self.allocator.free(self.socket_path);
     }
 
@@ -490,22 +481,12 @@ pub const Server = struct {
     pub fn listen(self: *Server) !void {
         try self.ensureSocketDir();
         self.removeStaleSocket();
-
-        const fd = std.c.socket(std.c.AF.UNIX, std.c.SOCK.STREAM, 0);
-        if (fd < 0) return error.SocketFailed;
-        self.listen_fd = fd;
-
-        var addr: std.c.sockaddr.un = .{ .path = undefined };
-        if (self.socket_path.len >= addr.path.len) return error.PathTooLong;
-        @memset(&addr.path, 0);
-        @memcpy(addr.path[0..self.socket_path.len], self.socket_path);
-
-        if (std.c.bind(fd, @ptrCast(&addr), @sizeOf(std.c.sockaddr.un)) != 0) {
-            return error.BindFailed;
-        }
-        if (std.c.listen(fd, 128) != 0) {
-            return error.ListenFailed;
-        }
+        const io = self.std_io_runtime.io();
+        const address = try std.Io.net.UnixAddress.init(self.socket_path);
+        const listen_server = try address.listen(io, .{
+            .kernel_backlog = 128,
+        });
+        self.listen_fd = listen_server.socket.handle;
 
         var path_buf: [256]u8 = .{0} ** 256;
         @memcpy(path_buf[0..self.socket_path.len], self.socket_path);
@@ -642,8 +623,8 @@ pub const Server = struct {
         try session.addWindow(window);
         try self.sessions.append(self.allocator, session);
         if (self.default_session == null) self.default_session = session;
-        // Use trackPane to both register the pane for I/O processing
-        // and monitor its PTY fd with the platform event loop.
+        // Use trackPane to register the pane for I/O processing and perform an
+        // immediate drain on any startup output already waiting on the PTY.
         try self.trackPane(pane, cols, rows);
 
         self.fireHooks(.after_new_session);
@@ -652,8 +633,23 @@ pub const Server = struct {
     }
 
     pub fn acceptClient(self: *Server) !void {
-        const client_fd = std.c.accept(self.listen_fd, null, null);
-        if (client_fd < 0) return;
+        const io = self.std_io_runtime.io();
+        var listen_server = std.Io.net.Server{
+            .socket = .{
+                .handle = self.listen_fd,
+                .address = .{ .ip4 = .loopback(0) },
+            },
+            .options = if (std.Io.net.Server.AcceptOptions != void)
+                .{ .mode = .stream, .protocol = null }
+            else {},
+        };
+        var client_stream = listen_server.accept(io) catch |err| switch (err) {
+            error.WouldBlock, error.ConnectionAborted => return,
+            else => return err,
+        };
+        errdefer client_stream.close(io);
+
+        const client_fd = client_stream.socket.handle;
         setFdNonblocking(client_fd);
         const client_id = self.next_client_id;
         self.next_client_id += 1;
@@ -664,234 +660,20 @@ pub const Server = struct {
             .choose_tree_state = null,
             .client_id = client_id,
         });
+        client_stream.socket.handle = -1;
     }
 
-    const RunStrategy = enum {
-        poll,
-        gcd,
-        io_uring,
-    };
-
-    fn useGcdEventLoop() bool {
-        const value = std.c.getenv("ZMUX_USE_GCD") orelse return false;
-        return value[0] != '0';
-    }
-
-    fn preferredRunStrategy() RunStrategy {
-        if (builtin.os.tag == .macos) return if (useGcdEventLoop()) .gcd else .poll;
-        if (builtin.os.tag == .linux) return .io_uring;
-        return .poll;
-    }
-
+    /// Cross-platform std.Io-backed server runtime.
+    ///
+    /// `std.Io.Threaded` is the first-party stdlib backend that currently
+    /// supports the Unix-domain socket control plane zmux uses on both macOS
+    /// and Linux, while the actual descriptor readiness loop remains the
+    /// existing poll/tick dispatcher.
     pub fn run(self: *Server) !void {
-        if (builtin.os.tag == .macos) {
-            if (useGcdEventLoop()) return self.runGcd();
-            return self.runPoll();
-        }
-        if (builtin.os.tag == .linux) {
-            return self.runIoUring();
-        }
         return self.runPoll();
     }
 
-    /// GCD-based event loop for macOS. Uses dispatch sources for fd monitoring
-    /// instead of poll(), enabling efficient kernel-level event notification.
-    fn runGcd(self: *Server) !void {
-        if (builtin.os.tag != .macos) return self.runPoll();
-
-        self.gcd_loop = GcdEventLoop.init(self.allocator);
-        const gcd: *GcdEventLoop = &self.gcd_loop.?;
-
-        // Server context for dispatch callbacks — uses a stable pointer to self.
-        const ServerCtx = struct {
-            fn makeCallback(server: *Server) event_loop_mod.Callback {
-                return .{
-                    .context = @ptrCast(server),
-                    .func = @ptrCast(&handleGcdEvent),
-                };
-            }
-
-            fn handleGcdEvent(ctx: *anyopaque, fd: std.posix.fd_t, _: event_loop_mod.EventType) void {
-                const server: *Server = @ptrCast(@alignCast(ctx));
-                // Accept new clients on listen fd.
-                if (fd == server.listen_fd) {
-                    server.acceptClient() catch {};
-                    // Register the new client fd with GCD and drain any
-                    // data that arrived before the source was armed.
-                    if (server.clients.items.len > 0) {
-                        const new_idx = server.clients.items.len - 1;
-                        const new_client = server.clients.items[new_idx];
-                        if (builtin.os.tag == .macos) {
-                            if (server.gcd_loop) |*gl| {
-                                gl.addFd(new_client.fd, .read, makeCallback(server)) catch {};
-                            }
-                        }
-                        // Drain buffered messages (identify + command may
-                        // already be waiting before the dispatch source fires).
-                        server.drainClient(new_idx);
-                    }
-                    return;
-                }
-                // Client or PTY fd.
-                if (server.findClientIndex(fd)) |client_idx| {
-                    var detail: [160]u8 = undefined;
-                    const msg = std.fmt.bufPrint(&detail, "source=gcd client_id={d}", .{server.clients.items[client_idx].client_id}) catch "";
-                    startup_probe.traceEvent("server", "client_fd_event", msg);
-                    server.drainClient(client_idx);
-                } else {
-                    server.drainPaneReadable(fd);
-                }
-            }
-        };
-
-        const cb = ServerCtx.makeCallback(self);
-
-        // Register listen fd.
-        if (self.listen_fd >= 0) {
-            try gcd.addFd(self.listen_fd, .read, cb);
-        }
-
-        // Register existing pane fds.
-        for (self.sessions.items) |session| {
-            for (session.windows.items) |window| {
-                for (window.panes.items) |pane| {
-                    if (pane.fd >= 0) {
-                        gcd.addFd(pane.fd, .read, cb) catch {};
-                    }
-                }
-            }
-        }
-
-        // Register existing client fds.
-        for (self.clients.items) |client| {
-            if (client.fd >= 0) {
-                gcd.addFd(client.fd, .read, cb) catch {};
-            }
-        }
-
-        // Add signal check timer (100ms).
-        const signal_cb = event_loop_mod.TimerCallback{
-            .context = @ptrCast(self),
-            .func = @ptrCast(&struct {
-                fn check(ctx: *anyopaque) void {
-                    const server: *Server = @ptrCast(@alignCast(ctx));
-                    startup_probe.traceEvent("server", "timer_tick", "source=gcd");
-                    server.flushAllClientOutputs();
-                    server.drainAllClients();
-                    server.drainAllPanes();
-                    server.refreshStatusClientsIfDue();
-                    if (signals.SignalHandler.shouldExit()) {
-                        server.stop();
-                        if (builtin.os.tag == .macos) {
-                            if (server.gcd_loop) |*gl| gl.stop();
-                        }
-                    }
-                }
-            }.check),
-        };
-        _ = try gcd.addTimer(100, true, signal_cb);
-
-        // Block on the GCD run loop.
-        try gcd.run();
-    }
-
-    /// io_uring-based event loop for Linux. Uses kernel-level async I/O
-    /// instead of poll(), reducing syscall overhead.
-    fn runIoUring(self: *Server) !void {
-        if (builtin.os.tag != .linux) return self.runPoll();
-
-        self.uring_loop = IoUringEventLoop.init(self.allocator) catch return self.runPoll();
-        const uring: *IoUringEventLoop = &self.uring_loop.?;
-
-        const cb = event_loop_mod.Callback{
-            .context = @ptrCast(self),
-            .func = @ptrCast(&struct {
-                fn handleEvent(ctx: *anyopaque, fd: std.posix.fd_t, _: event_loop_mod.EventType) void {
-                    const server: *Server = @ptrCast(@alignCast(ctx));
-                    // Accept new clients on listen fd.
-                    if (fd == server.listen_fd) {
-                        server.acceptClient() catch {};
-                        // Register the new client fd with io_uring and
-                        // drain any buffered messages.
-                        if (server.clients.items.len > 0) {
-                            const new_idx = server.clients.items.len - 1;
-                            const new_client = server.clients.items[new_idx];
-                            if (builtin.os.tag == .linux) {
-                                if (server.uring_loop) |*ul| {
-                                    const new_cb = event_loop_mod.Callback{
-                                        .context = @ptrCast(server),
-                                        .func = @ptrCast(&handleEvent),
-                                    };
-                                    ul.addFd(new_client.fd, .read, new_cb) catch {};
-                                }
-                            }
-                            server.drainClient(new_idx);
-                        }
-                        return;
-                    }
-                    // Client or PTY fd.
-                    if (server.findClientIndex(fd)) |client_idx| {
-                        var detail: [160]u8 = undefined;
-                        const msg = std.fmt.bufPrint(&detail, "source=io_uring client_id={d}", .{server.clients.items[client_idx].client_id}) catch "";
-                        startup_probe.traceEvent("server", "client_fd_event", msg);
-                        server.drainClient(client_idx);
-                    } else {
-                        server.drainPaneReadable(fd);
-                    }
-                }
-            }.handleEvent),
-        };
-
-        // Register listen fd.
-        if (self.listen_fd >= 0) {
-            try uring.addFd(self.listen_fd, .read, cb);
-        }
-
-        // Register existing pane fds.
-        for (self.sessions.items) |session| {
-            for (session.windows.items) |window| {
-                for (window.panes.items) |pane| {
-                    if (pane.fd >= 0) {
-                        uring.addFd(pane.fd, .read, cb) catch {};
-                    }
-                }
-            }
-        }
-
-        // Register existing client fds.
-        for (self.clients.items) |client| {
-            if (client.fd >= 0) {
-                uring.addFd(client.fd, .read, cb) catch {};
-            }
-        }
-
-        // Add signal check timer (100ms).
-        const signal_cb = event_loop_mod.TimerCallback{
-            .context = @ptrCast(self),
-            .func = @ptrCast(&struct {
-                fn check(ctx: *anyopaque) void {
-                    const server: *Server = @ptrCast(@alignCast(ctx));
-                    startup_probe.traceEvent("server", "timer_tick", "source=io_uring");
-                    server.flushAllClientOutputs();
-                    server.drainAllClients();
-                    server.drainAllPanes();
-                    server.refreshStatusClientsIfDue();
-                    if (signals.SignalHandler.shouldExit()) {
-                        server.stop();
-                        if (builtin.os.tag == .linux) {
-                            if (server.uring_loop) |*ul| ul.stop();
-                        }
-                    }
-                }
-            }.check),
-        };
-        _ = try uring.addTimer(100, true, signal_cb);
-
-        // Block on the io_uring event loop.
-        try uring.run();
-    }
-
-    /// Traditional poll()-based event loop. Used as fallback when platform-specific loops unavailable.
+    /// Cross-platform fd-readiness loop used by the std.Io-backed server runtime.
     fn runPoll(self: *Server) !void {
         const max_fds = 256;
         var pollfds: [max_fds]std.c.pollfd = undefined;
@@ -1760,12 +1542,6 @@ pub const Server = struct {
     fn deactivatePaneFd(self: *Server, pane: *Pane) void {
         if (pane.fd < 0) return;
 
-        if (builtin.os.tag == .macos) {
-            if (self.gcd_loop) |*gcd| gcd.removeFd(pane.fd);
-        }
-        if (builtin.os.tag == .linux) {
-            if (self.uring_loop) |*uring| uring.removeFd(pane.fd);
-        }
         _ = std.c.close(pane.fd);
         pane.fd = -1;
         if (self.session_loop.getPane(pane.id)) |ps| {
@@ -2058,8 +1834,8 @@ pub const Server = struct {
     }
 
     /// Drain all pending messages on a newly accepted client.
-    /// Called after registering the fd with the platform event loop to
-    /// handle data that arrived before the dispatch source was armed.
+    /// Called after accepting a client to handle data that arrived before the
+    /// next poll iteration.
     fn drainClient(self: *Server, client_idx: usize) void {
         if (client_idx >= self.clients.items.len) return;
         const fd = self.clients.items[client_idx].fd;
@@ -2164,36 +1940,11 @@ pub const Server = struct {
     pub fn trackPane(self: *Server, pane: *Pane, cols: u32, rows: u32) !void {
         try self.session_loop.addPane(pane.id, pane.fd, cols, rows);
         if (pane.fd >= 0) {
-            const cb = event_loop_mod.Callback{
-                .context = @ptrCast(self),
-                .func = @ptrCast(&struct {
-                    fn handle(ctx: *anyopaque, fd: std.posix.fd_t, _: event_loop_mod.EventType) void {
-                        const server: *Server = @ptrCast(@alignCast(ctx));
-                        server.drainPaneReadable(fd);
-                    }
-                }.handle),
-            };
-            // Register with platform event loop if active.
-            if (builtin.os.tag == .macos) {
-                if (self.gcd_loop) |*gcd| gcd.addFd(pane.fd, .read, cb) catch {};
-            }
-            if (builtin.os.tag == .linux) {
-                if (self.uring_loop) |*uring| uring.addFd(pane.fd, .read, cb) catch {};
-            }
             self.drainPaneReadable(pane.fd);
         }
     }
 
     pub fn untrackPane(self: *Server, pane_id: u32) void {
-        // Remove from platform event loop if active.
-        if (self.session_loop.getPane(pane_id)) |ps| {
-            if (builtin.os.tag == .macos) {
-                if (self.gcd_loop) |*gcd| gcd.removeFd(ps.pty_fd);
-            }
-            if (builtin.os.tag == .linux) {
-                if (self.uring_loop) |*uring| uring.removeFd(ps.pty_fd);
-            }
-        }
         self.clearPendingPaneWrites(pane_id);
         self.session_loop.removePane(pane_id);
     }
@@ -2283,15 +2034,6 @@ fn fillFdForTest(fd: std.c.fd_t) void {
 test "commandAllowsMissingSession includes if-shell" {
     try std.testing.expect(commandAllowsMissingSession("if-shell"));
     try std.testing.expect(!commandAllowsMissingSession("send-prefix"));
-}
-
-test "preferredRunStrategy matches platform runtime" {
-    const expected: Server.RunStrategy = switch (builtin.os.tag) {
-        .macos => .poll,
-        .linux => .io_uring,
-        else => .poll,
-    };
-    try std.testing.expectEqual(expected, Server.preferredRunStrategy());
 }
 
 test "loadDefaultConfig falls back to legacy tmux path and stores window defaults" {

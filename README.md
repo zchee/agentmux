@@ -33,7 +33,7 @@ A terminal multiplexer written in [Zig](https://ziglang.org/), feature-compatibl
 - **GPU-accelerated rendering** via Metal (macOS) and Vulkan (Linux)
 - **Image protocol decoding modules**: sixel and kitty parsers are implemented; interactive runtime/display integration is still in progress
 - **Native tab bar module**: tab data structures/rendering exist; runtime wiring is still in progress
-- **Modern event loops**: Grand Central Dispatch on macOS, io_uring on Linux
+- **Stdlib I/O runtime**: `std.Io.Threaded` for the control-plane runtime, with a portable `poll()` dispatcher for fd readiness
 - **Clipboard integration** via OSC 52
 - **Written in Zig**: memory safety, no hidden allocations, comptime, cross-compilation
 
@@ -120,7 +120,7 @@ Client                            Server
 ```
 src/
   main.zig                 Entry point, argument parsing
-  server.zig               Unix socket server, platform event loops
+  server.zig               Unix socket server, std.Io-backed runtime bootstrap
   client.zig               Unix socket client
   server_loop.zig          PTY -> parser -> screen -> redraw pipeline
   input_handler.zig        Map escape sequences to screen operations
@@ -136,7 +136,6 @@ src/
     allocator.zig          Debug allocator with leak tracking
     colour.zig             Colour types (256, RGB, named)
     environ.zig            Environment variable store
-    event_loop.zig         Platform-agnostic event loop interface
     log.zig                Logging
     utf8.zig               UTF-8 encoding/decoding + width
 
@@ -201,9 +200,8 @@ src/
     kitty.zig              Kitty graphics decoder primitives
 
   platform/
-    platform.zig           Platform detection
-    darwin.zig             GCD event loop (macOS)
-    linux.zig              io_uring event loop (Linux)
+    platform.zig           Platform detection + process/socket helpers
+    std_io.zig             std.Io runtime wrapper used by the server control plane
 
   tabs/
     tabs.zig               Native tab bar module
@@ -245,7 +243,7 @@ set -g mode-keys vi
 | Feature | tmux | zmux |
 |---------|------|------|
 | Language | C | Zig |
-| Event loop | libevent | GCD (macOS) / io_uring (Linux) |
+| Event loop | libevent | std.Io.Threaded + poll dispatcher |
 | Rendering | TTY escape sequences | GPU (Metal/Vulkan) + TTY fallback |
 | Image support | Sixel (partial) | Sixel + Kitty decoders (runtime integration in progress) |
 | Tabs | N/A | Tab bar module (runtime integration in progress) |

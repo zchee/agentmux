@@ -43,3 +43,17 @@ jobs:
 
       - name: Test
         run: zig build test
+
+      - name: Linux std.Io runtime smoke
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          socket_name="ci-smoke-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}"
+          trap './zig-out/bin/zmux -L "$socket_name" kill-server >/dev/null 2>&1 || true' EXIT
+
+          ./zig-out/bin/zmux -L "$socket_name" start-server
+          ./zig-out/bin/zmux -L "$socket_name" new-session -d -s demo
+          ./zig-out/bin/zmux -L "$socket_name" list-sessions | tee /tmp/zmux-list-sessions.txt
+          grep -q '^demo:' /tmp/zmux-list-sessions.txt
+          ./zig-out/bin/zmux -L "$socket_name" kill-server

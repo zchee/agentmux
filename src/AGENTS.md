@@ -11,7 +11,7 @@ All application source code for zmux. The root module is `main.zig`, which re-ex
 | File | Description |
 |------|-------------|
 | `main.zig` | Entry point — CLI arg parsing, server/client dispatch, module re-exports, test root |
-| `server.zig` | Server state — owns sessions, clients, bindings, hooks, paste stack, event loops |
+| `server.zig` | Server state — owns sessions, clients, bindings, hooks, paste stack, and the std.Io-backed runtime bootstrap |
 | `server_loop.zig` | Per-pane processing state (`PaneState`) — parser + screen + dirty tracker pipeline |
 | `client.zig` | Client connection — Unix socket connect, identify, command request, interactive loop |
 | `client_terminal.zig` | Raw terminal mode (`RawTerminal`) — saves/restores termios, enters raw mode |
@@ -31,12 +31,12 @@ All application source code for zmux. The root module is `main.zig`, which re-ex
 | `config/` | Configuration parser, option types, and option table (see `config/AGENTS.md`) |
 | `control/` | Control mode for programmatic client access (see `control/AGENTS.md`) |
 | `copy/` | Copy mode state machine and paste buffer stack (see `copy/AGENTS.md`) |
-| `core/` | Shared utilities — allocator, colour, environ, event loop, logging, UTF-8 (see `core/AGENTS.md`) |
+| `core/` | Shared utilities — allocator, colour, environ, logging, UTF-8 (see `core/AGENTS.md`) |
 | `hooks/` | Hook registry, job execution, and notification system (see `hooks/AGENTS.md`) |
 | `keybind/` | Key binding manager and key string parser (see `keybind/AGENTS.md`) |
 | `layout/` | Pane layout tree, preset layouts, and custom layout serialization (see `layout/AGENTS.md`) |
 | `mode/` | Interactive chooser UI — tree widget for choose-tree/choose-buffer (see `mode/AGENTS.md`) |
-| `platform/` | OS abstraction — platform detection, macOS GCD event loop, Linux io_uring (see `platform/AGENTS.md`) |
+| `platform/` | OS abstraction — platform detection, process/socket helpers, and the std.Io runtime wrapper (see `platform/AGENTS.md`) |
 | `render/` | GPU rendering — Metal, Vulkan, glyph atlas, font, image, sixel, kitty, shaders (see `render/AGENTS.md`) |
 | `screen/` | Terminal screen state — grid, cell model, writer, dirty-tracked redraw (see `screen/AGENTS.md`) |
 | `status/` | Status bar — format expansion, style, rendering (see `status/AGENTS.md`) |
