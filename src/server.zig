@@ -76,6 +76,8 @@ pub const Server = struct {
     allocator: std.mem.Allocator,
     fd_registry: std.AutoHashMap(std.c.fd_t, FdOwner),
     pane_registry: std.AutoHashMap(u32, PaneRef),
+    pending_client_fds: std.AutoHashMap(std.c.fd_t, void),
+    session_client_fds: std.AutoHashMap(*Session, std.ArrayListAligned(std.c.fd_t, null)),
     fd_poller: FdPoller,
     std_io_runtime: StdIoRuntime,
 
@@ -218,6 +220,8 @@ pub const Server = struct {
             .allocator = alloc,
             .fd_registry = std.AutoHashMap(std.c.fd_t, FdOwner).init(alloc),
             .pane_registry = std.AutoHashMap(u32, PaneRef).init(alloc),
+            .pending_client_fds = std.AutoHashMap(std.c.fd_t, void).init(alloc),
+            .session_client_fds = std.AutoHashMap(*Session, std.ArrayListAligned(std.c.fd_t, null)).init(alloc),
             .fd_poller = try FdPoller.init(alloc),
             .std_io_runtime = StdIoRuntime.init(alloc),
         };
@@ -270,6 +274,14 @@ pub const Server = struct {
         self.messages.deinit(self.allocator);
         self.fd_registry.deinit();
         self.pane_registry.deinit();
+        self.pending_client_fds.deinit();
+        {
+            var iter = self.session_client_fds.iterator();
+            while (iter.next()) |entry| {
+                entry.value_ptr.deinit(self.allocator);
+            }
+            self.session_client_fds.deinit();
+        }
         self.fd_poller.deinit();
         self.std_io_runtime.deinit();
         self.allocator.free(self.socket_path);
@@ -479,8 +491,8 @@ pub const Server = struct {
         var now: i64 = 0;
         _ = time(&now);
 
-        for (self.clients.items) |client| {
-            const session = client.session orelse continue;
+        for (self.sessions.items) |session| {
+            if (session.attached == 0 and !self.hasClientForSession(session)) continue;
             if (self.sessionStartupRelayActive(session)) continue;
             if (!session.options.status or session.options.status_interval == 0) continue;
 
@@ -495,7 +507,17 @@ pub const Server = struct {
             const pane_state = self.session_loop.getPane(pane.id) orelse continue;
             pane_state.dirty.markAllDirty();
 
-            self.renderComposedToClient(client.fd, session, pane_state) catch {};
+            const client_fds = self.sessionClientFds(session);
+            if (client_fds.len > 0) {
+                for (client_fds) |client_fd| {
+                    self.renderComposedToClient(client_fd, session, pane_state) catch {};
+                }
+            } else {
+                for (self.clients.items) |client| {
+                    if (client.session != session) continue;
+                    self.renderComposedToClient(client.fd, session, pane_state) catch {};
+                }
+            }
             session.status_next_refresh_at = now + @as(i64, @intCast(session.options.status_interval));
         }
     }
@@ -504,10 +526,7 @@ pub const Server = struct {
     const pending_write_retry_timeout_ms: c_int = 10;
 
     fn hasPendingClientOutput(self: *const Server) bool {
-        for (self.clients.items) |client| {
-            if (client.pending_output.items.len > 0) return true;
-        }
-        return false;
+        return self.pending_client_fds.count() > 0;
     }
 
     fn hasPendingPaneWrites(self: *const Server) bool {
@@ -518,11 +537,56 @@ pub const Server = struct {
         return false;
     }
 
+    fn hasClientForSession(self: *const Server, session: *Session) bool {
+        if (self.session_client_fds.getPtr(session)) |client_fds| {
+            return client_fds.items.len > 0;
+        }
+        for (self.clients.items) |client| {
+            if (client.session == session) return true;
+        }
+        return false;
+    }
+
+    fn sessionClientFds(self: *const Server, session: *Session) []const std.c.fd_t {
+        return if (self.session_client_fds.getPtr(session)) |client_fds|
+            client_fds.items
+        else
+            &.{};
+    }
+
+    fn addSessionClientFd(self: *Server, session: *Session, fd: std.c.fd_t) void {
+        if (fd < 0) return;
+        const gop = self.session_client_fds.getOrPut(session) catch return;
+        if (!gop.found_existing) {
+            gop.value_ptr.* = .empty;
+        }
+        for (gop.value_ptr.items) |existing_fd| {
+            if (existing_fd == fd) return;
+        }
+        gop.value_ptr.append(self.allocator, fd) catch {};
+    }
+
+    fn removeSessionClientFd(self: *Server, session: *Session, fd: std.c.fd_t) void {
+        const client_fds = self.session_client_fds.getPtr(session) orelse return;
+        for (client_fds.items, 0..) |existing_fd, idx| {
+            if (existing_fd == fd) {
+                _ = client_fds.swapRemove(idx);
+                break;
+            }
+        }
+        if (client_fds.items.len == 0) {
+            if (self.session_client_fds.fetchRemove(session)) |entry| {
+                var fds = entry.value;
+                fds.deinit(self.allocator);
+            }
+        }
+    }
+
     fn nextStatusRefreshDelayMs(self: *const Server, now: i64) ?c_int {
         var next_refresh_at: ?i64 = null;
 
-        for (self.clients.items) |client| {
-            const session = client.session orelse continue;
+        for (self.sessions.items) |session| {
+            if (session.attached == 0 and !self.hasClientForSession(session)) continue;
             if (self.sessionStartupRelayActive(session)) continue;
             if (!session.options.status or session.options.status_interval == 0) continue;
 
@@ -553,13 +617,20 @@ pub const Server = struct {
     }
 
     fn flushAllPendingPaneWrites(self: *Server) void {
-        for (self.sessions.items) |session| {
-            for (session.windows.items) |window| {
-                for (window.panes.items) |pane| {
-                    if (self.pending_pane_writes.contains(pane.id)) {
-                        self.flushPendingPaneWrites(pane);
-                    }
-                }
+        var pane_ids: [FdPoller.max_fds]u32 = undefined;
+        var pane_count: usize = 0;
+        var iter = self.pending_pane_writes.iterator();
+        while (iter.next()) |entry| {
+            if (pane_count >= pane_ids.len) break;
+            pane_ids[pane_count] = entry.key_ptr.*;
+            pane_count += 1;
+        }
+
+        for (pane_ids[0..pane_count]) |pane_id| {
+            if (self.findPaneRefById(pane_id)) |pane_ref| {
+                self.flushPendingPaneWrites(pane_ref.pane);
+            } else {
+                self.clearPendingPaneWrites(pane_id);
             }
         }
     }
@@ -880,8 +951,13 @@ pub const Server = struct {
         }
         for (self.clients.items) |*client| {
             if (client.session == session) {
+                self.removeSessionClientFd(session, client.fd);
                 client.session = null;
             }
+        }
+        if (self.session_client_fds.fetchRemove(session)) |entry| {
+            var fds = entry.value;
+            fds.deinit(self.allocator);
         }
         for (self.sessions.items, 0..) |existing, i| {
             if (existing == session) {
@@ -905,6 +981,7 @@ pub const Server = struct {
         const client = &self.clients.items[client_idx];
         if (client.session) |session| {
             if (session.attached > 0) session.attached -= 1;
+            self.removeSessionClientFd(session, client.fd);
         }
         protocol.sendMessage(client.fd, .detach, &.{}) catch {};
         client.session = null;
@@ -1079,9 +1156,11 @@ pub const Server = struct {
 
     fn beginClientStartupRelay(self: *Server, client_idx: usize) void {
         const session = self.clients.items[client_idx].session orelse return;
-        for (self.clients.items) |*other| {
-            if (other.session != session) continue;
-            if (other.client_id == self.clients.items[client_idx].client_id) continue;
+        const owner_client_id = self.clients.items[client_idx].client_id;
+        for (self.sessionClientFds(session)) |client_fd| {
+            const other_idx = self.findClientIndex(client_fd) orelse continue;
+            const other = &self.clients.items[other_idx];
+            if (other.client_id == owner_client_id) continue;
             other.relay_state = .inactive;
             other.inflight_probe_requests.clearRetainingCapacity();
             other.pending_probe_requests.clearRetainingCapacity();
@@ -1282,11 +1361,29 @@ pub const Server = struct {
         if (client.fd < 0 or client.pending_output.items.len == 0) return;
         const written = pane_mod.writeNonBlocking(client.fd, client.pending_output.items);
         shiftPendingPaneWrite(&client.pending_output, written);
+        if (client.pending_output.items.len == 0) {
+            _ = self.pending_client_fds.remove(client.fd);
+        } else {
+            self.pending_client_fds.put(client.fd, {}) catch {};
+        }
     }
 
     fn flushAllClientOutputs(self: *Server) void {
-        for (self.clients.items, 0..) |_, idx| {
-            self.flushPendingClientOutput(idx);
+        var client_fds: [FdPoller.max_fds]std.c.fd_t = undefined;
+        var client_count: usize = 0;
+        var iter = self.pending_client_fds.iterator();
+        while (iter.next()) |entry| {
+            if (client_count >= client_fds.len) break;
+            client_fds[client_count] = entry.key_ptr.*;
+            client_count += 1;
+        }
+
+        for (client_fds[0..client_count]) |fd| {
+            if (self.findClientIndex(fd)) |idx| {
+                self.flushPendingClientOutput(idx);
+            } else {
+                _ = self.pending_client_fds.remove(fd);
+            }
         }
     }
 
@@ -1296,6 +1393,9 @@ pub const Server = struct {
         const encoded = protocol.encodeMessageAlloc(self.allocator, msg_type, 0, payload) catch return;
         defer self.allocator.free(encoded);
         client.pending_output.appendSlice(self.allocator, encoded) catch return;
+        if (client.fd >= 0 and client.pending_output.items.len > 0) {
+            self.pending_client_fds.put(client.fd, {}) catch {};
+        }
         self.flushPendingClientOutput(client_idx);
     }
 
@@ -1541,10 +1641,21 @@ pub const Server = struct {
     }
 
     fn ownerRelayClientIndexForSession(self: *const Server, session: *Session) ?usize {
-        for (self.clients.items, 0..) |client, idx| {
-            if (client.session != session) continue;
-            if (client.relay_state != .inactive) {
-                return idx;
+        const client_fds = self.sessionClientFds(session);
+        if (client_fds.len > 0) {
+            for (client_fds) |client_fd| {
+                if (self.findClientIndex(client_fd)) |idx| {
+                    if (self.clients.items[idx].relay_state != .inactive) {
+                        return idx;
+                    }
+                }
+            }
+        } else {
+            for (self.clients.items, 0..) |client, idx| {
+                if (client.session != session) continue;
+                if (client.relay_state != .inactive) {
+                    return idx;
+                }
             }
         }
         return null;
@@ -1752,23 +1863,29 @@ pub const Server = struct {
         else
             false;
 
-        for (self.clients.items) |client| {
-            if (client.session != session) continue;
-            if (relay_render_bypass) {
-                if (self.findClientIndex(client.fd)) |client_idx| {
+        const client_fds = self.sessionClientFds(session);
+        if (client_fds.len > 0) {
+            for (client_fds) |client_fd| {
+                const client_idx = self.findClientIndex(client_fd) orelse continue;
+                if (relay_render_bypass) {
                     self.queueClientMessage(client_idx, .output, filtered_output.items);
-                } else {
-                    protocol.sendMessage(client.fd, .output, filtered_output.items) catch {};
+                    continue;
                 }
-                continue;
+                self.renderComposedToClient(client_fd, session, pane_state) catch {
+                    self.queueClientMessage(client_idx, .output, filtered_output.items);
+                };
             }
-            self.renderComposedToClient(client.fd, session, pane_state) catch {
-                if (self.findClientIndex(client.fd)) |client_idx| {
+        } else {
+            for (self.clients.items, 0..) |client, client_idx| {
+                if (client.session != session) continue;
+                if (relay_render_bypass) {
                     self.queueClientMessage(client_idx, .output, filtered_output.items);
-                } else {
-                    protocol.sendMessage(client.fd, .output, filtered_output.items) catch {};
+                    continue;
                 }
-            };
+                self.renderComposedToClient(client.fd, session, pane_state) catch {
+                    self.queueClientMessage(client_idx, .output, filtered_output.items);
+                };
+            }
         }
 
         const end_msg = std.fmt.bufPrint(&detail, "fd={d} bytes={d}", .{ fd, n }) catch "";
@@ -1990,9 +2107,11 @@ pub const Server = struct {
         if (client_idx >= self.clients.items.len) return;
         var client = self.clients.orderedRemove(client_idx);
         self.unregisterReadableFd(client.fd);
+        _ = self.pending_client_fds.remove(client.fd);
         self.updateClientFdOwnersFrom(client_idx);
         if (client.session) |session| {
             if (session.attached > 0) session.attached -= 1;
+            self.removeSessionClientFd(session, client.fd);
         }
         client.deinit(self.allocator);
     }
@@ -2023,6 +2142,7 @@ pub const Server = struct {
         client.prefix_active = false;
         if (client.session) |existing| {
             if (existing.attached > 0) existing.attached -= 1;
+            self.removeSessionClientFd(existing, client.fd);
         }
         client.session = session;
         client.relay_state = .inactive;
@@ -2031,6 +2151,7 @@ pub const Server = struct {
         client.probe_parse_buffer.clearRetainingCapacity();
         if (session) |current| {
             current.attached += 1;
+            self.addSessionClientFd(current, client.fd);
             self.fireHooks(.client_attached);
         }
     }
@@ -2215,6 +2336,7 @@ test "nextPollTimeoutMs retries quickly when client output is pending" {
         .choose_tree_state = null,
     });
     try server.clients.items[0].pending_output.append(server.allocator, 'x');
+    try server.pending_client_fds.put(42, {});
 
     try std.testing.expectEqual(Server.pending_write_retry_timeout_ms, server.nextPollTimeoutMs());
 }
@@ -2288,6 +2410,35 @@ test "removeClient reindexes fd registry for remaining clients" {
 
     try std.testing.expectEqual(@as(usize, 1), server.clients.items.len);
     try std.testing.expectEqual(@as(?usize, 0), server.findClientIndex(pipe_b[0]));
+}
+
+test "setClientSession maintains per-session client fd registry" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-session-client-fds.sock");
+    defer server.deinit();
+
+    const session = try Session.init(std.testing.allocator, "demo");
+    try server.sessions.append(server.allocator, session);
+    server.default_session = session;
+
+    var pipe_fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&pipe_fds));
+    defer _ = std.c.close(pipe_fds[0]);
+    defer _ = std.c.close(pipe_fds[1]);
+
+    try server.registerReadableFd(pipe_fds[0], .{ .client = 0 });
+    try server.clients.append(server.allocator, .{
+        .fd = pipe_fds[0],
+        .session = null,
+        .identified = true,
+        .choose_tree_state = null,
+    });
+
+    server.setClientSession(0, session);
+    try std.testing.expectEqual(@as(usize, 1), server.sessionClientFds(session).len);
+    try std.testing.expectEqual(pipe_fds[0], server.sessionClientFds(session)[0]);
+
+    server.detachClient(0);
+    try std.testing.expectEqual(@as(usize, 0), server.sessionClientFds(session).len);
 }
 
 test "trackPane registers pane registry entry and untrackPane clears it" {
@@ -2699,6 +2850,65 @@ test "status interval refresh renders attached clients when due" {
     try std.testing.expect(std.mem.indexOf(u8, msg.payload, "LEFT") != null);
     try std.testing.expect(std.mem.indexOf(u8, msg.payload, "RIGHT") != null);
     try std.testing.expect(session.status_next_refresh_at > now);
+}
+
+test "status interval refresh renders all clients attached to the same session when due" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-status-refresh-multi.sock");
+    defer server.deinit();
+
+    const session = try Session.init(std.testing.allocator, "demo");
+    try server.sessions.append(server.allocator, session);
+    server.default_session = session;
+
+    const window = try Window.init(std.testing.allocator, "win", 28, 4);
+    try session.addWindow(window);
+    const pane = try Pane.init(std.testing.allocator, 28, 3);
+    try window.addPane(pane);
+    try server.session_loop.addPane(pane.id, -1, pane.sx, pane.sy);
+    const pane_state = server.session_loop.getPane(pane.id).?;
+    pane_state.processPtyOutput("body");
+
+    try session.setStatusLeft("LEFT");
+    try session.setStatusRight("RIGHT");
+    session.options.status_interval = 1;
+    var now: i64 = 0;
+    _ = time(&now);
+    session.status_next_refresh_at = now - 1;
+
+    var client_a: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&client_a));
+    defer _ = std.c.close(client_a[0]);
+    defer _ = std.c.close(client_a[1]);
+
+    var client_b: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&client_b));
+    defer _ = std.c.close(client_b[0]);
+    defer _ = std.c.close(client_b[1]);
+
+    try server.clients.append(server.allocator, .{
+        .fd = client_a[1],
+        .session = session,
+        .identified = true,
+        .choose_tree_state = null,
+    });
+    try server.clients.append(server.allocator, .{
+        .fd = client_b[1],
+        .session = session,
+        .identified = true,
+        .choose_tree_state = null,
+    });
+
+    server.refreshStatusClientsIfDue();
+
+    var msg_a = try protocol.recvMessageAlloc(std.testing.allocator, client_a[0]);
+    defer msg_a.deinit();
+    try std.testing.expectEqual(protocol.MessageType.output, msg_a.msg_type);
+    try std.testing.expect(std.mem.indexOf(u8, msg_a.payload, "LEFT") != null);
+
+    var msg_b = try protocol.recvMessageAlloc(std.testing.allocator, client_b[0]);
+    defer msg_b.deinit();
+    try std.testing.expectEqual(protocol.MessageType.output, msg_b.msg_type);
+    try std.testing.expect(std.mem.indexOf(u8, msg_b.payload, "RIGHT") != null);
 }
 
 test "renderComposedToClient interprets inline status styles and shell segments" {
