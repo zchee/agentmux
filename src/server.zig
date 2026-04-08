@@ -478,6 +478,76 @@ pub const Server = struct {
         }
     }
 
+    const idle_poll_timeout_ms: c_int = 1000;
+    const pending_write_retry_timeout_ms: c_int = 10;
+
+    fn hasPendingClientOutput(self: *const Server) bool {
+        for (self.clients.items) |client| {
+            if (client.pending_output.items.len > 0) return true;
+        }
+        return false;
+    }
+
+    fn hasPendingPaneWrites(self: *const Server) bool {
+        var iter = self.pending_pane_writes.iterator();
+        while (iter.next()) |entry| {
+            if (entry.value_ptr.items.len > 0) return true;
+        }
+        return false;
+    }
+
+    fn nextStatusRefreshDelayMs(self: *const Server, now: i64) ?c_int {
+        var next_refresh_at: ?i64 = null;
+
+        for (self.clients.items) |client| {
+            const session = client.session orelse continue;
+            if (self.sessionStartupRelayActive(session)) continue;
+            if (!session.options.status or session.options.status_interval == 0) continue;
+
+            if (session.status_next_refresh_at == 0 or session.status_next_refresh_at <= now) {
+                return 0;
+            }
+
+            next_refresh_at = if (next_refresh_at) |current|
+                @min(current, session.status_next_refresh_at)
+            else
+                session.status_next_refresh_at;
+        }
+
+        const refresh_at = next_refresh_at orelse return null;
+        const delay_s = @max(refresh_at - now, 0);
+        const delay_ms: i64 = delay_s * std.time.ms_per_s;
+        return @intCast(@min(delay_ms, idle_poll_timeout_ms));
+    }
+
+    fn nextPollTimeoutMs(self: *const Server) c_int {
+        if (self.hasPendingClientOutput() or self.hasPendingPaneWrites()) {
+            return pending_write_retry_timeout_ms;
+        }
+
+        var now: i64 = 0;
+        _ = time(&now);
+        return self.nextStatusRefreshDelayMs(now) orelse idle_poll_timeout_ms;
+    }
+
+    fn flushAllPendingPaneWrites(self: *Server) void {
+        for (self.sessions.items) |session| {
+            for (session.windows.items) |window| {
+                for (window.panes.items) |pane| {
+                    if (self.pending_pane_writes.contains(pane.id)) {
+                        self.flushPendingPaneWrites(pane);
+                    }
+                }
+            }
+        }
+    }
+
+    fn runMaintenanceTick(self: *Server) void {
+        self.flushAllClientOutputs();
+        self.flushAllPendingPaneWrites();
+        self.refreshStatusClientsIfDue();
+    }
+
     pub fn listen(self: *Server) !void {
         try self.ensureSocketDir();
         self.removeStaleSocket();
@@ -679,12 +749,16 @@ pub const Server = struct {
         var pollfds: [max_fds]std.c.pollfd = undefined;
 
         while (self.running) {
-            self.drainAllClients();
-            self.drainAllPanes();
-            self.refreshStatusClientsIfDue();
             if (signals.SignalHandler.shouldExit()) {
                 self.stop();
                 break;
+            }
+
+            var timeout_ms = self.nextPollTimeoutMs();
+            if (timeout_ms == 0) {
+                startup_probe.traceEvent("server", "timer_tick", "source=poll");
+                self.runMaintenanceTick();
+                timeout_ms = self.nextPollTimeoutMs();
             }
 
             var nfds: usize = 0;
@@ -711,14 +785,11 @@ pub const Server = struct {
                 }
             }
 
-            const result = std.c.poll(pollfds[0..nfds].ptr, @intCast(nfds), 100);
+            const result = std.c.poll(pollfds[0..nfds].ptr, @intCast(nfds), timeout_ms);
             if (result < 0) continue;
             if (result == 0) {
                 startup_probe.traceEvent("server", "timer_tick", "source=poll");
-                self.flushAllClientOutputs();
-                self.drainAllClients();
-                self.drainAllPanes();
-                self.refreshStatusClientsIfDue();
+                self.runMaintenanceTick();
                 continue;
             }
 
@@ -1425,7 +1496,7 @@ pub const Server = struct {
         try protocol.sendMessageWithFlags(fd, .exit_ack, exit_code, &.{});
     }
 
-    fn ownerRelayClientIndexForSession(self: *Server, session: *Session) ?usize {
+    fn ownerRelayClientIndexForSession(self: *const Server, session: *Session) ?usize {
         for (self.clients.items, 0..) |client, idx| {
             if (client.session != session) continue;
             if (client.relay_state != .inactive) {
@@ -1435,7 +1506,7 @@ pub const Server = struct {
         return null;
     }
 
-    fn sessionStartupRelayActive(self: *Server, session: *Session) bool {
+    fn sessionStartupRelayActive(self: *const Server, session: *Session) bool {
         if (self.ownerRelayClientIndexForSession(session)) |idx| {
             const state = self.clients.items[idx].relay_state;
             return state == .startup_pending or state == .startup_active;
@@ -2034,6 +2105,66 @@ fn fillFdForTest(fd: std.c.fd_t) void {
 test "commandAllowsMissingSession includes if-shell" {
     try std.testing.expect(commandAllowsMissingSession("if-shell"));
     try std.testing.expect(!commandAllowsMissingSession("send-prefix"));
+}
+
+test "nextPollTimeoutMs uses idle timeout when no maintenance is pending" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-next-poll-timeout-idle.sock");
+    defer server.deinit();
+
+    try std.testing.expectEqual(Server.idle_poll_timeout_ms, server.nextPollTimeoutMs());
+}
+
+test "nextPollTimeoutMs retries quickly when client output is pending" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-next-poll-timeout-client-output.sock");
+    defer server.deinit();
+
+    try server.clients.append(server.allocator, .{
+        .fd = 42,
+        .session = null,
+        .identified = true,
+        .choose_tree_state = null,
+    });
+    try server.clients.items[0].pending_output.append(server.allocator, 'x');
+
+    try std.testing.expectEqual(Server.pending_write_retry_timeout_ms, server.nextPollTimeoutMs());
+}
+
+test "nextPollTimeoutMs retries quickly when pane writes are pending" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-next-poll-timeout-pane-write.sock");
+    defer server.deinit();
+
+    try server.pending_pane_writes.put(42, .empty);
+    if (server.pending_pane_writes.getPtr(42)) |pending| {
+        try pending.append(server.allocator, 'x');
+    } else {
+        return error.ExpectedPendingPaneWrite;
+    }
+
+    try std.testing.expectEqual(Server.pending_write_retry_timeout_ms, server.nextPollTimeoutMs());
+}
+
+test "nextPollTimeoutMs returns immediate when status refresh is due" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-next-poll-timeout-status.sock");
+    defer server.deinit();
+
+    const session = try Session.init(std.testing.allocator, "demo");
+    try server.sessions.append(server.allocator, session);
+    server.default_session = session;
+    session.options.status = true;
+    session.options.status_interval = 1;
+
+    var now: i64 = 0;
+    _ = time(&now);
+    session.status_next_refresh_at = now - 1;
+
+    try server.clients.append(server.allocator, .{
+        .fd = -1,
+        .session = session,
+        .identified = true,
+        .choose_tree_state = null,
+    });
+
+    try std.testing.expectEqual(@as(c_int, 0), server.nextPollTimeoutMs());
 }
 
 test "loadDefaultConfig falls back to legacy tmux path and stores window defaults" {
