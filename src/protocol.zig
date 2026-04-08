@@ -209,6 +209,22 @@ pub fn sendMessage(fd: std.posix.fd_t, msg_type: MessageType, payload: []const u
     return sendMessageWithFlags(fd, msg_type, 0, payload);
 }
 
+pub fn encodeMessageAlloc(alloc: std.mem.Allocator, msg_type: MessageType, flags: u16, payload: []const u8) ![]u8 {
+    if (payload.len > max_payload) return error.PayloadTooLarge;
+    const total = @sizeOf(Header) + payload.len;
+    const bytes = try alloc.alloc(u8, total);
+    const header_bytes = serializeHeader(.{
+        .msg_type = @intFromEnum(msg_type),
+        .payload_len = @intCast(payload.len),
+        .flags = flags,
+    });
+    @memcpy(bytes[0..@sizeOf(Header)], &header_bytes);
+    if (payload.len > 0) {
+        @memcpy(bytes[@sizeOf(Header)..], payload);
+    }
+    return bytes;
+}
+
 pub fn sendMessageWithFlags(fd: std.posix.fd_t, msg_type: MessageType, flags: u16, payload: []const u8) !void {
     if (payload.len > max_payload) return error.PayloadTooLarge;
 

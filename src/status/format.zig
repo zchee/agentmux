@@ -1,5 +1,7 @@
 const std = @import("std");
 const style_mod = @import("style.zig");
+const process = std.process;
+const builtin = @import("builtin");
 
 const ClockTm = extern struct {
     tm_sec: i32,
@@ -34,11 +36,162 @@ pub const FormatContext = struct {
     client_name: []const u8 = "",
 };
 
+fn monotonicNs() u64 {
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts) != 0) return 0;
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
+pub const ShellCommandCache = struct {
+    allocator: std.mem.Allocator,
+    threaded: std.Io.Threaded,
+    mutex: std.Io.Mutex = .init,
+    entries: std.ArrayListAligned(Entry, null) = .empty,
+
+    const Entry = struct {
+        command: []u8,
+        output: []u8,
+        last_update_ns: u64,
+        running: bool,
+    };
+
+    const RefreshContext = struct {
+        cache: *ShellCommandCache,
+        command: []const u8,
+    };
+
+    pub fn init(allocator: std.mem.Allocator) ShellCommandCache {
+        return .{
+            .allocator = allocator,
+            .threaded = std.Io.Threaded.init(allocator, .{}),
+        };
+    }
+
+    pub fn deinit(self: *ShellCommandCache) void {
+        const io = self.threaded.io();
+        self.mutex.lockUncancelable(io);
+        for (self.entries.items) |entry| {
+            self.allocator.free(entry.command);
+            self.allocator.free(entry.output);
+        }
+        self.entries.deinit(self.allocator);
+        self.mutex.unlock(io);
+        self.threaded.deinit();
+    }
+
+    fn findIndex(self: *ShellCommandCache, command: []const u8) ?usize {
+        for (self.entries.items, 0..) |entry, idx| {
+            if (std.mem.eql(u8, entry.command, command)) return idx;
+        }
+        return null;
+    }
+
+    pub fn resolve(self: *ShellCommandCache, alloc: std.mem.Allocator, command: []const u8, refresh_interval_ns: u64) ![]u8 {
+        const now = monotonicNs();
+        var cached: []const u8 = "";
+        var refresh_command: ?[]const u8 = null;
+
+        const io = self.threaded.io();
+        self.mutex.lockUncancelable(io);
+        errdefer self.mutex.unlock(io);
+
+        const entry_idx = if (self.findIndex(command)) |idx|
+            idx
+        else blk: {
+            try self.entries.append(self.allocator, .{
+                .command = try self.allocator.dupe(u8, command),
+                .output = try self.allocator.dupe(u8, ""),
+                .last_update_ns = 0,
+                .running = false,
+            });
+            break :blk self.entries.items.len - 1;
+        };
+
+        const entry = &self.entries.items[entry_idx];
+        cached = entry.output;
+        const stale = entry.last_update_ns == 0 or (refresh_interval_ns > 0 and now - entry.last_update_ns >= refresh_interval_ns);
+        if (stale and !entry.running) {
+            entry.running = true;
+            refresh_command = entry.command;
+        }
+
+        if (builtin.is_test and cached.len == 0 and refresh_command != null) {
+            entry.running = false;
+            self.mutex.unlock(io);
+            return runShellCommand(alloc, command);
+        }
+
+        const owned = try alloc.dupe(u8, cached);
+        self.mutex.unlock(io);
+        if (refresh_command) |cmd| {
+            const ctx = try self.allocator.create(RefreshContext);
+            ctx.* = .{ .cache = self, .command = cmd };
+            const thread = try std.Thread.spawn(.{}, refreshThread, .{ctx});
+            thread.detach();
+        }
+        return owned;
+    }
+
+    fn refreshThread(ctx: *RefreshContext) void {
+        defer ctx.cache.allocator.destroy(ctx);
+
+        const io = ctx.cache.threaded.io();
+
+        const result = process.run(std.heap.c_allocator, io, .{
+            .argv = &.{ "/bin/sh", "-c", ctx.command },
+            .stdout_limit = .limited(8192),
+            .stderr_limit = .limited(1024),
+        }) catch |err| {
+            ctx.cache.finishRefresh(ctx.command, "", err == error.StreamTooLong);
+            return;
+        };
+        defer std.heap.c_allocator.free(result.stdout);
+        defer std.heap.c_allocator.free(result.stderr);
+
+        const cleaned = sanitizeCommandOutput(result.stdout);
+        ctx.cache.finishRefresh(ctx.command, cleaned, false);
+    }
+
+    fn finishRefresh(self: *ShellCommandCache, command: []const u8, output: []const u8, truncated: bool) void {
+        _ = truncated;
+        const now = monotonicNs();
+        const io = self.threaded.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        const idx = self.findIndex(command) orelse return;
+        const entry = &self.entries.items[idx];
+        self.allocator.free(entry.output);
+        entry.output = self.allocator.dupe(u8, output) catch self.allocator.dupe(u8, "") catch return;
+        entry.last_update_ns = now;
+        entry.running = false;
+    }
+};
+
 /// Expand a tmux format string.
 /// Supports: #S (session), #W (window), #I (window index), #P (pane index),
 /// #T (title), #H (hostname), #{variable_name} long form,
 /// #{?var,true,false} conditional, #{==:a,b} equality, #{l:str} string length.
 pub fn expand(alloc: std.mem.Allocator, fmt: []const u8, ctx: *const FormatContext) ![]u8 {
+    return expandInternal(alloc, fmt, ctx, null, 0);
+}
+
+pub fn expandCached(
+    alloc: std.mem.Allocator,
+    fmt: []const u8,
+    ctx: *const FormatContext,
+    cache: *ShellCommandCache,
+    refresh_interval_ns: u64,
+) ![]u8 {
+    return expandInternal(alloc, fmt, ctx, cache, refresh_interval_ns);
+}
+
+fn expandInternal(
+    alloc: std.mem.Allocator,
+    fmt: []const u8,
+    ctx: *const FormatContext,
+    cache: ?*ShellCommandCache,
+    refresh_interval_ns: u64,
+) ![]u8 {
     var result: std.ArrayListAligned(u8, null) = .empty;
     errdefer result.deinit(alloc);
 
@@ -121,7 +274,7 @@ pub fn expand(alloc: std.mem.Allocator, fmt: []const u8, ctx: *const FormatConte
                                 const resolved = resolveVariable(var_name, ctx);
                                 const truthy = resolved.len > 0 and !std.mem.eql(u8, resolved, "0");
                                 const branch = if (truthy) true_val else false_val;
-                                const expanded = try expand(alloc, branch, ctx);
+                                const expanded = try expandInternal(alloc, branch, ctx, cache, refresh_interval_ns);
                                 defer alloc.free(expanded);
                                 try result.appendSlice(alloc, expanded);
                             }
@@ -132,16 +285,16 @@ pub fn expand(alloc: std.mem.Allocator, fmt: []const u8, ctx: *const FormatConte
                         if (findComma(body)) |comma| {
                             const a_raw = body[0..comma];
                             const b_raw = body[comma + 1 ..];
-                            const a_exp = try expand(alloc, a_raw, ctx);
+                            const a_exp = try expandInternal(alloc, a_raw, ctx, cache, refresh_interval_ns);
                             defer alloc.free(a_exp);
-                            const b_exp = try expand(alloc, b_raw, ctx);
+                            const b_exp = try expandInternal(alloc, b_raw, ctx, cache, refresh_interval_ns);
                             defer alloc.free(b_exp);
                             try result.append(alloc, if (std.mem.eql(u8, a_exp, b_exp)) '1' else '0');
                         }
                     } else if (content.len > 2 and std.mem.startsWith(u8, content, "l:")) {
                         // Length: #{l:string} -- expand the argument first
                         const body = content[2..];
-                        const s_exp = try expand(alloc, body, ctx);
+                        const s_exp = try expandInternal(alloc, body, ctx, cache, refresh_interval_ns);
                         defer alloc.free(s_exp);
                         var buf: [16]u8 = undefined;
                         const s = std.fmt.bufPrint(&buf, "{d}", .{s_exp.len}) catch "?";
@@ -160,7 +313,10 @@ pub fn expand(alloc: std.mem.Allocator, fmt: []const u8, ctx: *const FormatConte
             },
             '(' => {
                 if (findCommandEnd(fmt, i + 1)) |end| {
-                    const output = try runShellCommand(alloc, fmt[i + 1 .. end]);
+                    const output = if (cache) |command_cache|
+                        try command_cache.resolve(alloc, fmt[i + 1 .. end], refresh_interval_ns)
+                    else
+                        try runShellCommand(alloc, fmt[i + 1 .. end]);
                     defer alloc.free(output);
                     try result.appendSlice(alloc, output);
                     i = end + 1;
@@ -537,6 +693,23 @@ test "expand shell command segment" {
     const result = try expand(std.testing.allocator, "#(printf status-ok)", &ctx);
     defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("status-ok", result);
+}
+
+test "expandCached uses cached shell output without blocking" {
+    var cache = ShellCommandCache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    try cache.entries.append(std.testing.allocator, .{
+        .command = try std.testing.allocator.dupe(u8, "printf cached"),
+        .output = try std.testing.allocator.dupe(u8, "cached"),
+        .last_update_ns = monotonicNs(),
+        .running = false,
+    });
+
+    const ctx = FormatContext{};
+    const result = try expandCached(std.testing.allocator, "left #(printf cached) right", &ctx, &cache, std.time.ns_per_s);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("left cached right", result);
 }
 
 test "expand shell command preserves inline styles around output" {

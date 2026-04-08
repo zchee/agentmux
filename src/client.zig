@@ -41,24 +41,11 @@ pub const Client = struct {
         kind: startup_probe.ProbeKind,
     };
 
-    const ActiveProbe = struct {
-        request_id: u32,
-        kind: startup_probe.ProbeKind,
-        capture_started: bool = false,
-        capture: std.ArrayListAligned(u8, null) = .empty,
-        deadline_ns: u64 = 0,
-
-        fn deinit(self: *ActiveProbe, alloc: std.mem.Allocator) void {
-            self.capture.deinit(alloc);
-            self.* = undefined;
-        }
-    };
-
     const StartupRelay = struct {
         started_at_ns: u64,
         last_probe_ns: u64,
-        queued_requests: std.ArrayListAligned(PendingProbeRequest, null) = .empty,
-        active_probe: ?ActiveProbe = null,
+        expected_requests: std.ArrayListAligned(PendingProbeRequest, null) = .empty,
+        reply_capture: std.ArrayListAligned(u8, null) = .empty,
         buffered_user_input: std.ArrayListAligned(u8, null) = .empty,
         active: bool = true,
 
@@ -71,10 +58,8 @@ pub const Client = struct {
         }
 
         fn deinit(self: *StartupRelay, alloc: std.mem.Allocator) void {
-            if (self.active_probe) |*probe| {
-                probe.deinit(alloc);
-            }
-            self.queued_requests.deinit(alloc);
+            self.expected_requests.deinit(alloc);
+            self.reply_capture.deinit(alloc);
             self.buffered_user_input.deinit(alloc);
             self.* = undefined;
         }
@@ -250,13 +235,18 @@ pub const Client = struct {
 
     /// Send raw bytes as key input to the server.
     pub fn sendKeyRaw(self: *Client, data: []const u8) !void {
+        var detail: [160]u8 = undefined;
+        const msg = std.fmt.bufPrint(&detail, "fd={d} bytes={d} newline={any}", .{ self.fd, data.len, std.mem.indexOfAny(u8, data, "\r\n") != null }) catch "";
+        startup_probe.traceEvent("client", "send_key_raw_begin", msg);
         protocol.sendMessage(self.fd, .key, data) catch |err| {
             log.err("failed to send key data: {}", .{err});
             return err;
         };
+        startup_probe.traceEvent("client", "send_key_raw_end", msg);
     }
 
     fn sendTerminalProbeReady(self: *Client) !void {
+        startup_probe.traceEvent("client", "send_probe_ready", "");
         protocol.sendMessage(self.fd, .terminal_probe_ready, &.{}) catch |err| {
             log.err("failed to send terminal probe ready: {}", .{err});
             return err;
@@ -269,6 +259,9 @@ pub const Client = struct {
         status: startup_probe.ResponseStatus,
         reply_bytes: []const u8,
     ) !void {
+        var detail: [160]u8 = undefined;
+        const msg = std.fmt.bufPrint(&detail, "fd={d} id={d} status={s} bytes={d}", .{ self.fd, request_id, @tagName(status), reply_bytes.len }) catch "";
+        startup_probe.traceEvent("client", "send_probe_rsp_begin", msg);
         const payload = try protocol.encodeTerminalProbeRsp(self.allocator, request_id, status, reply_bytes);
         defer self.allocator.free(payload);
 
@@ -276,69 +269,78 @@ pub const Client = struct {
             log.err("failed to send terminal probe response: {}", .{err});
             return err;
         };
+        startup_probe.traceEvent("client", "send_probe_rsp_end", msg);
     }
 
     fn queueStartupProbe(self: *Client, relay: *StartupRelay, view: protocol.TerminalProbeReqView) !void {
-        try relay.queued_requests.append(self.allocator, .{
+        try relay.expected_requests.append(self.allocator, .{
             .request_id = view.request_id,
             .kind = view.probe_kind,
         });
         relay.last_probe_ns = monotonicNs();
+        var detail: [160]u8 = undefined;
+        const msg = std.fmt.bufPrint(&detail, "fd={d} id={d} kind={s} queued={d}", .{ self.fd, view.request_id, @tagName(view.probe_kind), relay.expected_requests.items.len }) catch "";
+        startup_probe.traceEvent("client", "queue_probe_req", msg);
+        const request = startup_probe.requestBytes(view.probe_kind);
+        const request_detail = std.fmt.bufPrint(&detail, "fd={d} id={d} kind={s} bytes={d}", .{ self.fd, view.request_id, @tagName(view.probe_kind), request.len }) catch "";
+        startup_probe.traceEvent("client", "write_probe_request_to_terminal", request_detail);
+        _ = std.c.write(1, request.ptr, request.len);
     }
 
     fn flushBufferedUserInput(self: *Client, relay: *StartupRelay) !void {
         if (relay.buffered_user_input.items.len == 0) return;
+        var detail: [160]u8 = undefined;
+        const msg = std.fmt.bufPrint(&detail, "bytes={d}", .{relay.buffered_user_input.items.len}) catch "";
+        startup_probe.traceEvent("client", "flush_buffered_user_input", msg);
         try self.sendKeyRaw(relay.buffered_user_input.items);
         relay.buffered_user_input.clearRetainingCapacity();
     }
 
     fn finishStartupRelay(self: *Client, relay: *StartupRelay) !void {
+        var detail: [160]u8 = undefined;
+        const msg = std.fmt.bufPrint(&detail, "remaining_expected={d} buffered={d}", .{ relay.expected_requests.items.len, relay.buffered_user_input.items.len }) catch "";
+        startup_probe.traceEvent("client", "finish_relay", msg);
         try self.flushBufferedUserInput(relay);
+        relay.reply_capture.clearRetainingCapacity();
         relay.active = false;
     }
 
-    fn startNextProbe(self: *Client, relay: *StartupRelay) !void {
-        if (!relay.active or relay.active_probe != null or relay.queued_requests.items.len == 0) return;
-
-        const queued = relay.queued_requests.orderedRemove(0);
-        var active = ActiveProbe{
-            .request_id = queued.request_id,
-            .kind = queued.kind,
-            .deadline_ns = monotonicNs() + relay_timeout_ns,
-        };
-        try active.capture.ensureTotalCapacity(self.allocator, 64);
-        relay.active_probe = active;
-        relay.last_probe_ns = monotonicNs();
-
-        const request = startup_probe.requestBytes(queued.kind);
-        _ = std.c.write(1, request.ptr, request.len);
+    fn timeoutOutstandingProbes(self: *Client, relay: *StartupRelay) !void {
+        while (relay.expected_requests.items.len > 0) {
+            const request = relay.expected_requests.orderedRemove(0);
+            var detail: [160]u8 = undefined;
+            const msg = std.fmt.bufPrint(&detail, "id={d} kind={s}", .{ request.request_id, @tagName(request.kind) }) catch "";
+            startup_probe.traceEvent("client", "timeout_probe", msg);
+            try self.sendTerminalProbeRsp(request.request_id, .timeout, &.{});
+        }
+        relay.reply_capture.clearRetainingCapacity();
     }
 
-    fn maybeTimeoutActiveProbe(self: *Client, relay: *StartupRelay, now_ns: u64) !void {
-        if (!relay.active) return;
-        if (relay.active_probe) |*probe| {
-            if (now_ns < probe.deadline_ns) return;
-            try self.sendTerminalProbeRsp(probe.request_id, .timeout, &.{});
-            probe.deinit(self.allocator);
-            relay.active_probe = null;
-            relay.last_probe_ns = now_ns;
-            try self.startNextProbe(relay);
+    fn matchingExpectedRequestIndex(relay: *const StartupRelay) ?usize {
+        for (relay.expected_requests.items, 0..) |request, idx| {
+            switch (startup_probe.classifyReply(request.kind, relay.reply_capture.items)) {
+                .complete => return idx,
+                .need_more => return null,
+                .invalid => {},
+            }
         }
+        return null;
     }
 
     fn maybeFinishStartupRelay(self: *Client, relay: *StartupRelay, now_ns: u64) !void {
         if (!relay.active) return;
-        if (relay.active_probe != null or relay.queued_requests.items.len != 0) return;
+        if (now_ns - relay.started_at_ns >= relay_total_timeout_ns) {
+            try self.timeoutOutstandingProbes(relay);
+            try self.finishStartupRelay(relay);
+            return;
+        }
+        if (relay.expected_requests.items.len != 0 or relay.reply_capture.items.len != 0) return;
 
         if (relay.hasBufferedNewline()) {
             try self.finishStartupRelay(relay);
             return;
         }
         if (now_ns - relay.last_probe_ns >= relay_quiescence_ns) {
-            try self.finishStartupRelay(relay);
-            return;
-        }
-        if (now_ns - relay.started_at_ns >= relay_total_timeout_ns) {
             try self.finishStartupRelay(relay);
         }
     }
@@ -351,37 +353,43 @@ pub const Client = struct {
                 return;
             }
 
-            if (relay.active_probe == null) {
+            if (relay.expected_requests.items.len == 0 and relay.reply_capture.items.len == 0) {
+                try relay.buffered_user_input.appendSlice(self.allocator, data[index..]);
+                relay.last_probe_ns = monotonicNs();
+                try self.finishStartupRelay(relay);
+                return;
+            }
+
+            if (relay.reply_capture.items.len == 0 and data[index] != 0x1b) {
                 try relay.buffered_user_input.append(self.allocator, data[index]);
                 continue;
             }
 
-            var probe = &relay.active_probe.?;
-            if (!probe.capture_started) {
-                if (data[index] == 0x1b) {
-                    probe.capture_started = true;
-                    try probe.capture.append(self.allocator, data[index]);
-                } else {
-                    try relay.buffered_user_input.append(self.allocator, data[index]);
-                }
+            try relay.reply_capture.append(self.allocator, data[index]);
+            if (matchingExpectedRequestIndex(relay)) |request_idx| {
+                const request = relay.expected_requests.orderedRemove(request_idx);
+                var detail: [160]u8 = undefined;
+                const msg = std.fmt.bufPrint(&detail, "id={d} kind={s} bytes={d}", .{ request.request_id, @tagName(request.kind), relay.reply_capture.items.len }) catch "";
+                startup_probe.traceEvent("client", "matched_probe_reply", msg);
+                try self.sendTerminalProbeRsp(request.request_id, .complete, relay.reply_capture.items);
+                relay.reply_capture.clearRetainingCapacity();
+                relay.last_probe_ns = monotonicNs();
                 continue;
             }
 
-            try probe.capture.append(self.allocator, data[index]);
-            switch (startup_probe.classifyReply(probe.kind, probe.capture.items)) {
-                .need_more => {},
-                .invalid => {
-                    try relay.buffered_user_input.appendSlice(self.allocator, probe.capture.items);
-                    probe.capture.clearRetainingCapacity();
-                    probe.capture_started = false;
-                },
-                .complete => {
-                    try self.sendTerminalProbeRsp(probe.request_id, .complete, probe.capture.items);
-                    probe.deinit(self.allocator);
-                    relay.active_probe = null;
-                    relay.last_probe_ns = monotonicNs();
-                    try self.startNextProbe(relay);
-                },
+            var needs_more = false;
+            for (relay.expected_requests.items) |request| {
+                if (startup_probe.classifyReply(request.kind, relay.reply_capture.items) == .need_more) {
+                    needs_more = true;
+                    break;
+                }
+            }
+            if (!needs_more) {
+                var detail: [160]u8 = undefined;
+                const msg = std.fmt.bufPrint(&detail, "bytes={d}", .{relay.reply_capture.items.len}) catch "";
+                startup_probe.traceEvent("client", "classify_non_probe_bytes", msg);
+                try relay.buffered_user_input.appendSlice(self.allocator, relay.reply_capture.items);
+                relay.reply_capture.clearRetainingCapacity();
             }
         }
     }
@@ -391,9 +399,7 @@ pub const Client = struct {
 
         const now_ns = monotonicNs();
         var next_deadline = relay.started_at_ns + relay_total_timeout_ns;
-        if (relay.active_probe) |probe| {
-            if (probe.deadline_ns < next_deadline) next_deadline = probe.deadline_ns;
-        } else {
+        if (relay.expected_requests.items.len == 0 and relay.reply_capture.items.len == 0) {
             const quiescence_deadline = relay.last_probe_ns + relay_quiescence_ns;
             if (quiescence_deadline < next_deadline) next_deadline = quiescence_deadline;
         }
@@ -440,7 +446,9 @@ pub const Client = struct {
             if (ret < 0) break;
 
             const now_ns = monotonicNs();
-            self.maybeTimeoutActiveProbe(&relay, now_ns) catch break;
+            if (now_ns - relay.started_at_ns >= relay_total_timeout_ns) {
+                self.timeoutOutstandingProbes(&relay) catch break;
+            }
             self.maybeFinishStartupRelay(&relay, now_ns) catch break;
 
             // stdin readable: forward to server as key data.
@@ -470,7 +478,6 @@ pub const Client = struct {
                     .terminal_probe_req => {
                         const view = protocol.decodeTerminalProbeReq(msg.payload) catch continue;
                         self.queueStartupProbe(&relay, view) catch break;
-                        self.startNextProbe(&relay) catch break;
                     },
                     .detach, .shutdown, .exit_ack => break,
                     else => {},
@@ -581,15 +588,16 @@ test "startup relay classifies probe replies separately from buffered user input
 
     var relay = Client.StartupRelay.init();
     defer relay.deinit(std.testing.allocator);
-    relay.active_probe = .{
+    try relay.expected_requests.append(std.testing.allocator, .{
         .request_id = 7,
         .kind = .osc_10,
-    };
+    });
 
     try client.routeStartupInput(&relay, "ls\x1b]10;rgb:0000/0000/0000\x1b\\\r");
 
-    try std.testing.expectEqualStrings("ls\r", relay.buffered_user_input.items);
-    try std.testing.expect(relay.active_probe == null);
+    try std.testing.expectEqualStrings("", relay.buffered_user_input.items);
+    try std.testing.expectEqual(@as(usize, 0), relay.expected_requests.items.len);
+    try std.testing.expect(!relay.active);
 
     var msg = try protocol.recvMessageAlloc(std.testing.allocator, fds[0]);
     defer msg.deinit();
@@ -598,6 +606,11 @@ test "startup relay classifies probe replies separately from buffered user input
     try std.testing.expectEqual(@as(u32, 7), rsp.request_id);
     try std.testing.expectEqual(startup_probe.ResponseStatus.complete, rsp.status);
     try std.testing.expectEqualStrings("\x1b]10;rgb:0000/0000/0000\x1b\\", rsp.reply_bytes);
+
+    var key_msg = try protocol.recvMessageAlloc(std.testing.allocator, fds[0]);
+    defer key_msg.deinit();
+    try std.testing.expectEqual(protocol.MessageType.key, key_msg.msg_type);
+    try std.testing.expectEqualStrings("ls\r", key_msg.payload);
 }
 
 test "startup relay flushes buffered user input when the first command is complete" {
@@ -615,6 +628,28 @@ test "startup relay flushes buffered user input when the first command is comple
     relay.last_probe_ns = monotonicNs() - relay_quiescence_ns;
 
     try client.maybeFinishStartupRelay(&relay, monotonicNs());
+
+    try std.testing.expect(!relay.active);
+    var msg = try protocol.recvMessageAlloc(std.testing.allocator, fds[0]);
+    defer msg.deinit();
+    try std.testing.expectEqual(protocol.MessageType.key, msg.msg_type);
+    try std.testing.expectEqualStrings("echo hi\r", msg.payload);
+}
+
+test "startup relay flushes newly typed input immediately once no probe replies remain" {
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    var client = Client.init(std.testing.allocator, "/tmp/unused.sock");
+    client.fd = fds[1];
+
+    var relay = Client.StartupRelay.init();
+    defer relay.deinit(std.testing.allocator);
+    relay.last_probe_ns = monotonicNs();
+
+    try client.routeStartupInput(&relay, "echo hi\r");
 
     try std.testing.expect(!relay.active);
     var msg = try protocol.recvMessageAlloc(std.testing.allocator, fds[0]);

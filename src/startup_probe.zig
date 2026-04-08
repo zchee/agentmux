@@ -26,6 +26,23 @@ pub const ReplyMatch = enum {
     complete,
 };
 
+fn monotonicNs() u64 {
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts) != 0) return 0;
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
+pub fn traceEvent(component: []const u8, event: []const u8, detail: []const u8) void {
+    const path = std.c.getenv("ZMUX_STARTUP_TRACE_FILE") orelse return;
+    const fd = std.c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, @as(std.c.mode_t, 0o644));
+    if (fd < 0) return;
+    defer _ = std.c.close(fd);
+
+    var buf: [1024]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "{d} {s} {s} {s}\n", .{ monotonicNs(), component, event, detail }) catch return;
+    _ = std.c.write(fd, line.ptr, line.len);
+}
+
 pub fn probeKindFromInt(raw: u16) !ProbeKind {
     return switch (raw) {
         @intFromEnum(ProbeKind.osc_10) => .osc_10,
