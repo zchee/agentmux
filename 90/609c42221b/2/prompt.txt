@@ -1,0 +1,33 @@
+do 2
+
+---
+
+Can we optimize the `std.c.poll`?
+
+---
+
+Can we optimize the `std.c.poll`, using kqueue on macOS / epoll on Linux?
+
+---
+
+do work planned step
+
+---
+
+continue
+
+---
+
+continue
+
+---
+
+continue
+
+---
+
+continue
+
+---
+
+continue
