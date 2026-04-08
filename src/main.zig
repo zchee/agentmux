@@ -10,6 +10,7 @@ pub const core = struct {
 
 pub const platform = struct {
     pub const core = @import("platform/platform.zig");
+    pub const poller = @import("platform/poller.zig");
     pub const std_io = @import("platform/std_io.zig");
 };
 pub const protocol = @import("protocol.zig");
@@ -403,6 +404,7 @@ test {
     _ = hooks.hooks_mod;
     _ = hooks.notify;
     _ = hooks.job;
+    _ = platform.poller.Poller;
     _ = platform.std_io.Runtime;
     _ = tabs.tabs_mod;
     _ = render.atlas;

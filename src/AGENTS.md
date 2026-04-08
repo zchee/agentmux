@@ -36,7 +36,7 @@ All application source code for zmux. The root module is `main.zig`, which re-ex
 | `keybind/` | Key binding manager and key string parser (see `keybind/AGENTS.md`) |
 | `layout/` | Pane layout tree, preset layouts, and custom layout serialization (see `layout/AGENTS.md`) |
 | `mode/` | Interactive chooser UI — tree widget for choose-tree/choose-buffer (see `mode/AGENTS.md`) |
-| `platform/` | OS abstraction — platform detection, process/socket helpers, and the std.Io runtime wrapper (see `platform/AGENTS.md`) |
+| `platform/` | OS abstraction — platform detection, process/socket helpers, the std.Io runtime wrapper, and readiness backend glue (see `platform/AGENTS.md`) |
 | `render/` | GPU rendering — Metal, Vulkan, glyph atlas, font, image, sixel, kitty, shaders (see `render/AGENTS.md`) |
 | `screen/` | Terminal screen state — grid, cell model, writer, dirty-tracked redraw (see `screen/AGENTS.md`) |
 | `status/` | Status bar — format expansion, style, rendering (see `status/AGENTS.md`) |

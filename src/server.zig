@@ -23,6 +23,7 @@ const log = @import("core/log.zig");
 const signals = @import("signals.zig");
 const builtin = @import("builtin");
 const platform = @import("platform/platform.zig");
+const FdPoller = @import("platform/poller.zig").Poller;
 const StdIoRuntime = @import("platform/std_io.zig").Runtime;
 const startup_probe = @import("startup_probe.zig");
 
@@ -73,7 +74,21 @@ pub const Server = struct {
     next_client_id: u64,
     running: bool,
     allocator: std.mem.Allocator,
+    fd_registry: std.AutoHashMap(std.c.fd_t, FdOwner),
+    pane_registry: std.AutoHashMap(u32, PaneRef),
+    fd_poller: FdPoller,
     std_io_runtime: StdIoRuntime,
+
+    const FdOwner = union(enum) {
+        listen,
+        client: usize,
+        pane: u32,
+    };
+
+    const PaneRef = struct {
+        session: *Session,
+        pane: *Pane,
+    };
 
     pub const ClientConnection = struct {
         const RelayState = enum {
@@ -201,6 +216,9 @@ pub const Server = struct {
             .next_client_id = 1,
             .running = false,
             .allocator = alloc,
+            .fd_registry = std.AutoHashMap(std.c.fd_t, FdOwner).init(alloc),
+            .pane_registry = std.AutoHashMap(u32, PaneRef).init(alloc),
+            .fd_poller = try FdPoller.init(alloc),
             .std_io_runtime = StdIoRuntime.init(alloc),
         };
     }
@@ -250,6 +268,9 @@ pub const Server = struct {
         self.status_command_cache.deinit();
         for (self.messages.items) |msg| self.allocator.free(msg);
         self.messages.deinit(self.allocator);
+        self.fd_registry.deinit();
+        self.pane_registry.deinit();
+        self.fd_poller.deinit();
         self.std_io_runtime.deinit();
         self.allocator.free(self.socket_path);
     }
@@ -473,6 +494,7 @@ pub const Server = struct {
             const pane = window.active_pane orelse continue;
             const pane_state = self.session_loop.getPane(pane.id) orelse continue;
             pane_state.dirty.markAllDirty();
+
             self.renderComposedToClient(client.fd, session, pane_state) catch {};
             session.status_next_refresh_at = now + @as(i64, @intCast(session.options.status_interval));
         }
@@ -548,6 +570,39 @@ pub const Server = struct {
         self.refreshStatusClientsIfDue();
     }
 
+    fn registerReadableFd(self: *Server, fd: std.posix.fd_t, owner: FdOwner) !void {
+        if (fd < 0) return;
+        try self.fd_registry.put(fd, owner);
+        try self.fd_poller.add(fd);
+    }
+
+    fn unregisterReadableFd(self: *Server, fd: std.posix.fd_t) void {
+        if (fd < 0) return;
+        _ = self.fd_registry.remove(fd);
+        self.fd_poller.remove(fd);
+    }
+
+    fn updateClientFdOwnersFrom(self: *Server, start_idx: usize) void {
+        var idx = start_idx;
+        while (idx < self.clients.items.len) : (idx += 1) {
+            const fd = self.clients.items[idx].fd;
+            if (fd < 0) continue;
+            self.fd_registry.put(fd, .{ .client = idx }) catch {};
+        }
+    }
+
+    fn fdOwner(self: *const Server, fd: std.posix.fd_t) ?FdOwner {
+        return self.fd_registry.get(fd);
+    }
+
+    fn registerPaneRef(self: *Server, pane_ref: PaneRef) void {
+        self.pane_registry.put(pane_ref.pane.id, pane_ref) catch {};
+    }
+
+    fn unregisterPaneRef(self: *Server, pane_id: u32) void {
+        _ = self.pane_registry.remove(pane_id);
+    }
+
     pub fn listen(self: *Server) !void {
         try self.ensureSocketDir();
         self.removeStaleSocket();
@@ -557,6 +612,8 @@ pub const Server = struct {
             .kernel_backlog = 128,
         });
         self.listen_fd = listen_server.socket.handle;
+        errdefer self.listen_fd = -1;
+        try self.registerReadableFd(self.listen_fd, .listen);
 
         var path_buf: [256]u8 = .{0} ** 256;
         @memcpy(path_buf[0..self.socket_path.len], self.socket_path);
@@ -723,6 +780,9 @@ pub const Server = struct {
         setFdNonblocking(client_fd);
         const client_id = self.next_client_id;
         self.next_client_id += 1;
+        const client_idx = self.clients.items.len;
+        try self.registerReadableFd(client_fd, .{ .client = client_idx });
+        errdefer self.unregisterReadableFd(client_fd);
         try self.clients.append(self.allocator, .{
             .fd = client_fd,
             .session = null,
@@ -737,16 +797,15 @@ pub const Server = struct {
     ///
     /// `std.Io.Threaded` is the first-party stdlib backend that currently
     /// supports the Unix-domain socket control plane zmux uses on both macOS
-    /// and Linux, while the actual descriptor readiness loop remains the
-    /// existing poll/tick dispatcher.
+    /// and Linux, while fd readiness is handled by the platform poller
+    /// (`kqueue` on macOS, `epoll` on Linux, `poll` fallback elsewhere).
     pub fn run(self: *Server) !void {
         return self.runPoll();
     }
 
     /// Cross-platform fd-readiness loop used by the std.Io-backed server runtime.
     fn runPoll(self: *Server) !void {
-        const max_fds = 256;
-        var pollfds: [max_fds]std.c.pollfd = undefined;
+        var ready_fds: [FdPoller.max_fds]std.posix.fd_t = undefined;
 
         while (self.running) {
             if (signals.SignalHandler.shouldExit()) {
@@ -761,53 +820,29 @@ pub const Server = struct {
                 timeout_ms = self.nextPollTimeoutMs();
             }
 
-            var nfds: usize = 0;
-            if (self.listen_fd >= 0) {
-                pollfds[nfds] = .{ .fd = self.listen_fd, .events = POLLIN, .revents = 0 };
-                nfds += 1;
-            }
-
-            for (self.clients.items) |client| {
-                if (nfds >= max_fds) break;
-                pollfds[nfds] = .{ .fd = client.fd, .events = POLLIN, .revents = 0 };
-                nfds += 1;
-            }
-
-            for (self.sessions.items) |session| {
-                for (session.windows.items) |window| {
-                    for (window.panes.items) |pane| {
-                        if (nfds >= max_fds) break;
-                        if (pane.fd >= 0) {
-                            pollfds[nfds] = .{ .fd = pane.fd, .events = POLLIN, .revents = 0 };
-                            nfds += 1;
-                        }
-                    }
-                }
-            }
-
-            const result = std.c.poll(pollfds[0..nfds].ptr, @intCast(nfds), timeout_ms);
-            if (result < 0) continue;
-            if (result == 0) {
+            const ready = try self.fd_poller.wait(timeout_ms, &ready_fds);
+            if (ready.len == 0) {
                 startup_probe.traceEvent("server", "timer_tick", "source=poll");
                 self.runMaintenanceTick();
                 continue;
             }
 
-            if (nfds > 0 and pollfds[0].revents & POLLIN != 0) {
-                self.acceptClient() catch {};
-            }
-
-            var i: usize = if (self.listen_fd >= 0) 1 else 0;
-            while (i < nfds) : (i += 1) {
-                if (pollfds[i].revents & POLLIN == 0) continue;
-                const fd = pollfds[i].fd;
-                if (self.findClientIndex(fd)) |client_idx| {
-                    var detail: [160]u8 = undefined;
-                    const msg = std.fmt.bufPrint(&detail, "source=poll client_id={d}", .{self.clients.items[client_idx].client_id}) catch "";
-                    startup_probe.traceEvent("server", "client_fd_event", msg);
-                    self.drainClient(client_idx);
-                } else {
-                    self.drainPaneReadable(fd);
+            for (ready) |fd| {
+                const owner = self.fdOwner(fd) orelse continue;
+                switch (owner) {
+                    .listen => self.acceptClient() catch {},
+                    .client => |client_idx| {
+                        if (client_idx >= self.clients.items.len or self.clients.items[client_idx].fd != fd) continue;
+                        var detail: [160]u8 = undefined;
+                        const msg = std.fmt.bufPrint(&detail, "source=poll client_id={d}", .{self.clients.items[client_idx].client_id}) catch "";
+                        startup_probe.traceEvent("server", "client_fd_event", msg);
+                        self.drainClient(client_idx);
+                    },
+                    .pane => |pane_id| {
+                        if (self.findPaneRefById(pane_id)) |pane_ref| {
+                            self.drainPaneReadableRef(pane_ref);
+                        }
+                    },
                 }
             }
         }
@@ -816,6 +851,7 @@ pub const Server = struct {
     pub fn stop(self: *Server) void {
         self.running = false;
         if (self.listen_fd >= 0) {
+            self.unregisterReadableFd(self.listen_fd);
             _ = std.c.close(self.listen_fd);
             self.listen_fd = -1;
         }
@@ -836,6 +872,8 @@ pub const Server = struct {
     pub fn removeSession(self: *Server, session: *Session) void {
         for (session.windows.items) |window| {
             for (window.panes.items) |pane| {
+                self.unregisterReadableFd(pane.fd);
+                self.unregisterPaneRef(pane.id);
                 self.clearPendingPaneWrites(pane.id);
                 self.session_loop.removePane(pane.id);
             }
@@ -878,6 +916,12 @@ pub const Server = struct {
     }
 
     pub fn findClientIndex(self: *const Server, fd: std.c.fd_t) ?usize {
+        if (self.fdOwner(fd)) |owner| switch (owner) {
+            .client => |idx| {
+                if (idx < self.clients.items.len and self.clients.items[idx].fd == fd) return idx;
+            },
+            else => {},
+        };
         for (self.clients.items, 0..) |client, i| {
             if (client.fd == fd) return i;
         }
@@ -1613,6 +1657,7 @@ pub const Server = struct {
     fn deactivatePaneFd(self: *Server, pane: *Pane) void {
         if (pane.fd < 0) return;
 
+        self.unregisterReadableFd(pane.fd);
         _ = std.c.close(pane.fd);
         pane.fd = -1;
         if (self.session_loop.getPane(pane.id)) |ps| {
@@ -1621,11 +1666,13 @@ pub const Server = struct {
         self.clearPendingPaneWrites(pane.id);
     }
 
-    fn handlePtyReadable(self: *Server, fd: std.c.fd_t) usize {
+    fn handlePtyReadableRef(self: *Server, pane_ref: PaneRef) usize {
+        const session = pane_ref.session;
+        const pane = pane_ref.pane;
+        const fd = pane.fd;
         var detail: [160]u8 = undefined;
         const start_msg = std.fmt.bufPrint(&detail, "fd={d}", .{fd}) catch "";
         startup_probe.traceEvent("server", "handle_pty_readable_begin", start_msg);
-        const pane = self.findPaneByFd(fd) orelse return 0;
         var buf: [4096]u8 = undefined;
         const n = std.c.read(fd, &buf, buf.len);
         if (n < 0) {
@@ -1635,26 +1682,21 @@ pub const Server = struct {
             }
         }
         if (n == 0) {
-            // EOF on PTY — pane process exited.
-            const session = self.findSessionForPaneFd(fd);
             if (!pane.flags.exited) {
                 pane.flags.exited = true;
                 self.fireHooks(.pane_exited);
 
-                // Check remain-on-exit: if set, write "Pane is dead" overlay.
-                if (session) |active_session| {
-                    for (active_session.windows.items) |window| {
-                        for (window.panes.items) |wp| {
-                            if (wp == pane and window.options.remain_on_exit) {
-                                if (self.session_loop.getPane(pane.id)) |ps| {
-                                    const dead_msg = "[Pane is dead]";
-                                    @import("input_handler.zig").processBytes(&ps.parser, &ps.screen, "\x1b[H\x1b[2J");
-                                    @import("input_handler.zig").processBytes(&ps.parser, &ps.screen, dead_msg);
-                                    ps.dirty.markAllDirty();
-                                }
-                                self.deactivatePaneFd(pane);
-                                return 0; // Keep pane state for remain-on-exit.
+                for (session.windows.items) |window| {
+                    for (window.panes.items) |wp| {
+                        if (wp == pane and window.options.remain_on_exit) {
+                            if (self.session_loop.getPane(pane.id)) |ps| {
+                                const dead_msg = "[Pane is dead]";
+                                @import("input_handler.zig").processBytes(&ps.parser, &ps.screen, "\x1b[H\x1b[2J");
+                                @import("input_handler.zig").processBytes(&ps.parser, &ps.screen, dead_msg);
+                                ps.dirty.markAllDirty();
                             }
+                            self.deactivatePaneFd(pane);
+                            return 0;
                         }
                     }
                 }
@@ -1663,7 +1705,6 @@ pub const Server = struct {
             return 0;
         }
 
-        const session = self.findSessionForPaneFd(fd) orelse return 0;
         if (self.ownerRelayClientIndexForSession(session)) |relay_client_idx| {
             self.maybeExpireStartupRelay(relay_client_idx);
         }
@@ -1691,7 +1732,6 @@ pub const Server = struct {
             ps.processPtyOutput(filtered_output.items);
         }
 
-        // Auto-rename: update window name from foreground process.
         if (pane.pid > 0) {
             for (session.windows.items) |window| {
                 if (window.active_pane == pane) {
@@ -1723,7 +1763,6 @@ pub const Server = struct {
                 continue;
             }
             self.renderComposedToClient(client.fd, session, pane_state) catch {
-                // Fall back to raw relay on render failure.
                 if (self.findClientIndex(client.fd)) |client_idx| {
                     self.queueClientMessage(client_idx, .output, filtered_output.items);
                 } else {
@@ -1737,14 +1776,22 @@ pub const Server = struct {
         return @intCast(n);
     }
 
-    fn drainPaneReadable(self: *Server, fd: std.c.fd_t) void {
-        if (self.findPaneByFd(fd)) |pane| {
-            self.flushPendingPaneWrites(pane);
-        }
+    fn handlePtyReadable(self: *Server, fd: std.c.fd_t) usize {
+        const pane_ref = self.findPaneRefByFd(fd) orelse return 0;
+        return self.handlePtyReadableRef(pane_ref);
+    }
+
+    fn drainPaneReadableRef(self: *Server, pane_ref: PaneRef) void {
+        self.flushPendingPaneWrites(pane_ref.pane);
         var count: usize = 0;
         while (count < 32) : (count += 1) {
-            if (self.handlePtyReadable(fd) == 0) break;
+            if (self.handlePtyReadableRef(pane_ref) == 0) break;
         }
+    }
+
+    fn drainPaneReadable(self: *Server, fd: std.c.fd_t) void {
+        const pane_ref = self.findPaneRefByFd(fd) orelse return;
+        self.drainPaneReadableRef(pane_ref);
     }
 
     fn drainAllPanes(self: *Server) void {
@@ -1942,6 +1989,8 @@ pub const Server = struct {
     fn removeClient(self: *Server, client_idx: usize) void {
         if (client_idx >= self.clients.items.len) return;
         var client = self.clients.orderedRemove(client_idx);
+        self.unregisterReadableFd(client.fd);
+        self.updateClientFdOwnersFrom(client_idx);
         if (client.session) |session| {
             if (session.attached > 0) session.attached -= 1;
         }
@@ -1986,36 +2035,78 @@ pub const Server = struct {
         }
     }
 
-    fn findSessionForPaneFd(self: *Server, fd: std.c.fd_t) ?*Session {
+    fn scanPaneRefById(self: *Server, pane_id: u32) ?PaneRef {
         for (self.sessions.items) |session| {
             for (session.windows.items) |window| {
                 for (window.panes.items) |pane| {
-                    if (pane.fd == fd) return session;
+                    if (pane.id == pane_id) {
+                        return .{
+                            .session = session,
+                            .pane = pane,
+                        };
+                    }
                 }
             }
         }
         return null;
     }
 
-    pub fn findPaneByFd(self: *Server, fd: std.c.fd_t) ?*Pane {
+    fn findPaneRefById(self: *Server, pane_id: u32) ?PaneRef {
+        if (self.pane_registry.get(pane_id)) |pane_ref| {
+            return pane_ref;
+        }
+        const pane_ref = self.scanPaneRefById(pane_id) orelse return null;
+        self.registerPaneRef(pane_ref);
+        return pane_ref;
+    }
+
+    fn findPaneRefByFd(self: *Server, fd: std.c.fd_t) ?PaneRef {
+        if (self.fdOwner(fd)) |owner| switch (owner) {
+            .pane => |pane_id| return self.findPaneRefById(pane_id),
+            else => {},
+        };
         for (self.sessions.items) |session| {
             for (session.windows.items) |window| {
                 for (window.panes.items) |pane| {
-                    if (pane.fd == fd) return pane;
+                    if (pane.fd == fd) {
+                        const pane_ref: PaneRef = .{
+                            .session = session,
+                            .pane = pane,
+                        };
+                        self.registerPaneRef(pane_ref);
+                        return pane_ref;
+                    }
                 }
             }
         }
         return null;
+    }
+
+    fn findSessionForPaneFd(self: *Server, fd: std.c.fd_t) ?*Session {
+        return if (self.findPaneRefByFd(fd)) |pane_ref| pane_ref.session else null;
+    }
+
+    pub fn findPaneByFd(self: *Server, fd: std.c.fd_t) ?*Pane {
+        return if (self.findPaneRefByFd(fd)) |pane_ref| pane_ref.pane else null;
     }
 
     pub fn trackPane(self: *Server, pane: *Pane, cols: u32, rows: u32) !void {
         try self.session_loop.addPane(pane.id, pane.fd, cols, rows);
+        errdefer self.session_loop.removePane(pane.id);
+        if (self.scanPaneRefById(pane.id)) |pane_ref| {
+            self.registerPaneRef(pane_ref);
+        }
         if (pane.fd >= 0) {
+            try self.registerReadableFd(pane.fd, .{ .pane = pane.id });
             self.drainPaneReadable(pane.fd);
         }
     }
 
     pub fn untrackPane(self: *Server, pane_id: u32) void {
+        if (self.session_loop.getPane(pane_id)) |pane_state| {
+            self.unregisterReadableFd(pane_state.pty_fd);
+        }
+        self.unregisterPaneRef(pane_id);
         self.clearPendingPaneWrites(pane_id);
         self.session_loop.removePane(pane_id);
     }
@@ -2062,7 +2153,6 @@ fn commandErrorMessage(err: cmd.CmdError) []const u8 {
     };
 }
 
-const POLLIN: i16 = 0x0001;
 extern "c" fn time(timer: ?*i64) i64;
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
@@ -2165,6 +2255,60 @@ test "nextPollTimeoutMs returns immediate when status refresh is due" {
     });
 
     try std.testing.expectEqual(@as(c_int, 0), server.nextPollTimeoutMs());
+}
+
+test "removeClient reindexes fd registry for remaining clients" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-remove-client-reindex.sock");
+    defer server.deinit();
+
+    var pipe_a: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&pipe_a));
+    defer _ = std.c.close(pipe_a[1]);
+
+    var pipe_b: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&pipe_b));
+    defer _ = std.c.close(pipe_b[1]);
+
+    try server.registerReadableFd(pipe_a[0], .{ .client = 0 });
+    try server.clients.append(server.allocator, .{
+        .fd = pipe_a[0],
+        .session = null,
+        .identified = true,
+        .choose_tree_state = null,
+    });
+    try server.registerReadableFd(pipe_b[0], .{ .client = 1 });
+    try server.clients.append(server.allocator, .{
+        .fd = pipe_b[0],
+        .session = null,
+        .identified = true,
+        .choose_tree_state = null,
+    });
+
+    server.removeClient(0);
+
+    try std.testing.expectEqual(@as(usize, 1), server.clients.items.len);
+    try std.testing.expectEqual(@as(?usize, 0), server.findClientIndex(pipe_b[0]));
+}
+
+test "trackPane registers pane registry entry and untrackPane clears it" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-pane-registry.sock");
+    defer server.deinit();
+
+    const session = try Session.init(std.testing.allocator, "demo");
+    try server.sessions.append(server.allocator, session);
+    server.default_session = session;
+
+    const window = try Window.init(std.testing.allocator, "win", 20, 5);
+    try session.addWindow(window);
+
+    const pane = try Pane.init(std.testing.allocator, 20, 4);
+    try window.addPane(pane);
+
+    try server.trackPane(pane, pane.sx, pane.sy);
+    try std.testing.expect(server.findPaneRefById(pane.id) != null);
+
+    server.untrackPane(pane.id);
+    try std.testing.expect(server.pane_registry.get(pane.id) == null);
 }
 
 test "loadDefaultConfig falls back to legacy tmux path and stores window defaults" {

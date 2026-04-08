@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub const std_io = @import("std_io.zig");
+pub const poller = @import("poller.zig");
 
 pub const Os = enum {
     macos,

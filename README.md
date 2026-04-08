@@ -33,7 +33,7 @@ A terminal multiplexer written in [Zig](https://ziglang.org/), feature-compatibl
 - **GPU-accelerated rendering** via Metal (macOS) and Vulkan (Linux)
 - **Image protocol decoding modules**: sixel and kitty parsers are implemented; interactive runtime/display integration is still in progress
 - **Native tab bar module**: tab data structures/rendering exist; runtime wiring is still in progress
-- **Stdlib I/O runtime**: `std.Io.Threaded` for the control-plane runtime, with a portable `poll()` dispatcher for fd readiness
+- **Stdlib I/O runtime**: `std.Io.Threaded` for the control-plane runtime, with `kqueue` on macOS, `epoll` on Linux, and `poll()` fallback for fd readiness
 - **Clipboard integration** via OSC 52
 - **Written in Zig**: memory safety, no hidden allocations, comptime, cross-compilation
 
@@ -120,7 +120,7 @@ Client                            Server
 ```
 src/
   main.zig                 Entry point, argument parsing
-  server.zig               Unix socket server, std.Io-backed runtime bootstrap
+  server.zig               Unix socket server, std.Io-backed runtime + readiness backend
   client.zig               Unix socket client
   server_loop.zig          PTY -> parser -> screen -> redraw pipeline
   input_handler.zig        Map escape sequences to screen operations
@@ -202,6 +202,7 @@ src/
   platform/
     platform.zig           Platform detection + process/socket helpers
     std_io.zig             std.Io runtime wrapper used by the server control plane
+    poller.zig             kqueue/epoll/poll readiness backend wrapper
 
   tabs/
     tabs.zig               Native tab bar module
@@ -243,7 +244,7 @@ set -g mode-keys vi
 | Feature | tmux | zmux |
 |---------|------|------|
 | Language | C | Zig |
-| Event loop | libevent | std.Io.Threaded + poll dispatcher |
+| Event loop | libevent | std.Io.Threaded + kqueue/epoll/poll readiness backend |
 | Rendering | TTY escape sequences | GPU (Metal/Vulkan) + TTY fallback |
 | Image support | Sixel (partial) | Sixel + Kitty decoders (runtime integration in progress) |
 | Tabs | N/A | Tab bar module (runtime integration in progress) |
