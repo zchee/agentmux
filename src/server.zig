@@ -78,6 +78,7 @@ pub const Server = struct {
     pane_registry: std.AutoHashMap(u32, PaneRef),
     pending_client_fds: std.AutoHashMap(std.c.fd_t, void),
     session_client_fds: std.AutoHashMap(*Session, std.ArrayListAligned(std.c.fd_t, null)),
+    session_relay_owner_fds: std.AutoHashMap(*Session, std.c.fd_t),
     fd_poller: FdPoller,
     std_io_runtime: StdIoRuntime,
 
@@ -222,6 +223,7 @@ pub const Server = struct {
             .pane_registry = std.AutoHashMap(u32, PaneRef).init(alloc),
             .pending_client_fds = std.AutoHashMap(std.c.fd_t, void).init(alloc),
             .session_client_fds = std.AutoHashMap(*Session, std.ArrayListAligned(std.c.fd_t, null)).init(alloc),
+            .session_relay_owner_fds = std.AutoHashMap(*Session, std.c.fd_t).init(alloc),
             .fd_poller = try FdPoller.init(alloc),
             .std_io_runtime = StdIoRuntime.init(alloc),
         };
@@ -282,6 +284,7 @@ pub const Server = struct {
             }
             self.session_client_fds.deinit();
         }
+        self.session_relay_owner_fds.deinit();
         self.fd_poller.deinit();
         self.std_io_runtime.deinit();
         self.allocator.free(self.socket_path);
@@ -579,6 +582,18 @@ pub const Server = struct {
                 var fds = entry.value;
                 fds.deinit(self.allocator);
             }
+        }
+    }
+
+    fn setSessionRelayOwnerFd(self: *Server, session: *Session, fd: std.c.fd_t) void {
+        if (fd < 0) return;
+        self.session_relay_owner_fds.put(session, fd) catch {};
+    }
+
+    fn clearSessionRelayOwnerFd(self: *Server, session: *Session, fd: std.c.fd_t) void {
+        const owner_fd = self.session_relay_owner_fds.get(session) orelse return;
+        if (owner_fd == fd) {
+            _ = self.session_relay_owner_fds.remove(session);
         }
     }
 
@@ -952,6 +967,7 @@ pub const Server = struct {
         for (self.clients.items) |*client| {
             if (client.session == session) {
                 self.removeSessionClientFd(session, client.fd);
+                self.clearSessionRelayOwnerFd(session, client.fd);
                 client.session = null;
             }
         }
@@ -959,6 +975,7 @@ pub const Server = struct {
             var fds = entry.value;
             fds.deinit(self.allocator);
         }
+        _ = self.session_relay_owner_fds.remove(session);
         for (self.sessions.items, 0..) |existing, i| {
             if (existing == session) {
                 _ = self.sessions.orderedRemove(i);
@@ -982,6 +999,7 @@ pub const Server = struct {
         if (client.session) |session| {
             if (session.attached > 0) session.attached -= 1;
             self.removeSessionClientFd(session, client.fd);
+            self.clearSessionRelayOwnerFd(session, client.fd);
         }
         protocol.sendMessage(client.fd, .detach, &.{}) catch {};
         client.session = null;
@@ -1176,6 +1194,7 @@ pub const Server = struct {
         client.inflight_probe_requests.clearRetainingCapacity();
         client.pending_probe_requests.clearRetainingCapacity();
         client.probe_parse_buffer.clearRetainingCapacity();
+        self.setSessionRelayOwnerFd(session, client.fd);
         var detail: [160]u8 = undefined;
         const msg = std.fmt.bufPrint(&detail, "client_id={d} fd={d}", .{ client.client_id, client.fd }) catch "";
         startup_probe.traceEvent("server", "begin_relay", msg);
@@ -1641,6 +1660,14 @@ pub const Server = struct {
     }
 
     fn ownerRelayClientIndexForSession(self: *const Server, session: *Session) ?usize {
+        if (self.session_relay_owner_fds.get(session)) |client_fd| {
+            if (self.findClientIndex(client_fd)) |idx| {
+                if (self.clients.items[idx].relay_state != .inactive) {
+                    return idx;
+                }
+            }
+        }
+
         const client_fds = self.sessionClientFds(session);
         if (client_fds.len > 0) {
             for (client_fds) |client_fd| {
@@ -1679,6 +1706,7 @@ pub const Server = struct {
             client.relay_state = .relay_done;
             client.inflight_probe_requests.clearRetainingCapacity();
             client.pending_probe_requests.clearRetainingCapacity();
+            if (client.session) |session| self.clearSessionRelayOwnerFd(session, client.fd);
             var detail: [160]u8 = undefined;
             const msg = std.fmt.bufPrint(&detail, "client_id={d} reason=timeout", .{client.client_id}) catch "";
             startup_probe.traceEvent("server", "finish_relay", msg);
@@ -1689,6 +1717,7 @@ pub const Server = struct {
             now - client.relay_last_probe_ns >= 200 * std.time.ns_per_ms)
         {
             client.relay_state = .relay_done;
+            if (client.session) |session| self.clearSessionRelayOwnerFd(session, client.fd);
             var detail: [160]u8 = undefined;
             const msg = std.fmt.bufPrint(&detail, "client_id={d} reason=quiescence", .{client.client_id}) catch "";
             startup_probe.traceEvent("server", "finish_relay", msg);
@@ -2112,6 +2141,7 @@ pub const Server = struct {
         if (client.session) |session| {
             if (session.attached > 0) session.attached -= 1;
             self.removeSessionClientFd(session, client.fd);
+            self.clearSessionRelayOwnerFd(session, client.fd);
         }
         client.deinit(self.allocator);
     }
@@ -2143,6 +2173,7 @@ pub const Server = struct {
         if (client.session) |existing| {
             if (existing.attached > 0) existing.attached -= 1;
             self.removeSessionClientFd(existing, client.fd);
+            self.clearSessionRelayOwnerFd(existing, client.fd);
         }
         client.session = session;
         client.relay_state = .inactive;
@@ -2439,6 +2470,36 @@ test "setClientSession maintains per-session client fd registry" {
 
     server.detachClient(0);
     try std.testing.expectEqual(@as(usize, 0), server.sessionClientFds(session).len);
+}
+
+test "beginClientStartupRelay records and detachClient clears relay owner" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-relay-owner-registry.sock");
+    defer server.deinit();
+
+    const session = try Session.init(std.testing.allocator, "demo");
+    try server.sessions.append(server.allocator, session);
+    server.default_session = session;
+
+    var owner_pipe: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&owner_pipe));
+    defer _ = std.c.close(owner_pipe[0]);
+    defer _ = std.c.close(owner_pipe[1]);
+
+    try server.registerReadableFd(owner_pipe[0], .{ .client = 0 });
+    try server.clients.append(server.allocator, .{
+        .fd = owner_pipe[0],
+        .session = null,
+        .identified = true,
+        .choose_tree_state = null,
+        .client_id = 700,
+    });
+    server.setClientSession(0, session);
+
+    server.beginClientStartupRelay(0);
+    try std.testing.expectEqual(@as(?std.c.fd_t, owner_pipe[0]), server.session_relay_owner_fds.get(session));
+
+    server.detachClient(0);
+    try std.testing.expect(server.session_relay_owner_fds.get(session) == null);
 }
 
 test "trackPane registers pane registry entry and untrackPane clears it" {
