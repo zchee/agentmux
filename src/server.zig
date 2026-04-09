@@ -1011,15 +1011,20 @@ pub const Server = struct {
     }
 
     pub fn findClientIndex(self: *const Server, fd: std.c.fd_t) ?usize {
+        if (self.clientIndexFromRegistry(fd)) |idx| return idx;
+        for (self.clients.items, 0..) |client, i| {
+            if (client.fd == fd) return i;
+        }
+        return null;
+    }
+
+    fn clientIndexFromRegistry(self: *const Server, fd: std.c.fd_t) ?usize {
         if (self.fdOwner(fd)) |owner| switch (owner) {
             .client => |idx| {
                 if (idx < self.clients.items.len and self.clients.items[idx].fd == fd) return idx;
             },
             else => {},
         };
-        for (self.clients.items, 0..) |client, i| {
-            if (client.fd == fd) return i;
-        }
         return null;
     }
 
@@ -1176,7 +1181,7 @@ pub const Server = struct {
         const session = self.clients.items[client_idx].session orelse return;
         const owner_client_id = self.clients.items[client_idx].client_id;
         for (self.sessionClientFds(session)) |client_fd| {
-            const other_idx = self.findClientIndex(client_fd) orelse continue;
+            const other_idx = self.clientIndexFromRegistry(client_fd) orelse continue;
             const other = &self.clients.items[other_idx];
             if (other.client_id == owner_client_id) continue;
             other.relay_state = .inactive;
@@ -1398,7 +1403,7 @@ pub const Server = struct {
         }
 
         for (client_fds[0..client_count]) |fd| {
-            if (self.findClientIndex(fd)) |idx| {
+            if (self.clientIndexFromRegistry(fd)) |idx| {
                 self.flushPendingClientOutput(idx);
             } else {
                 _ = self.pending_client_fds.remove(fd);
@@ -1661,7 +1666,7 @@ pub const Server = struct {
 
     fn ownerRelayClientIndexForSession(self: *const Server, session: *Session) ?usize {
         if (self.session_relay_owner_fds.get(session)) |client_fd| {
-            if (self.findClientIndex(client_fd)) |idx| {
+            if (self.clientIndexFromRegistry(client_fd)) |idx| {
                 if (self.clients.items[idx].relay_state != .inactive) {
                     return idx;
                 }
@@ -1671,7 +1676,7 @@ pub const Server = struct {
         const client_fds = self.sessionClientFds(session);
         if (client_fds.len > 0) {
             for (client_fds) |client_fd| {
-                if (self.findClientIndex(client_fd)) |idx| {
+                if (self.clientIndexFromRegistry(client_fd)) |idx| {
                     if (self.clients.items[idx].relay_state != .inactive) {
                         return idx;
                     }
@@ -1895,7 +1900,7 @@ pub const Server = struct {
         const client_fds = self.sessionClientFds(session);
         if (client_fds.len > 0) {
             for (client_fds) |client_fd| {
-                const client_idx = self.findClientIndex(client_fd) orelse continue;
+                const client_idx = self.clientIndexFromRegistry(client_fd) orelse continue;
                 if (relay_render_bypass) {
                     self.queueClientMessage(client_idx, .output, filtered_output.items);
                     continue;
@@ -2034,7 +2039,7 @@ pub const Server = struct {
         }
 
         if (total > 0) {
-            if (self.findClientIndex(client_fd)) |client_idx| {
+            if (self.clientIndexFromRegistry(client_fd)) |client_idx| {
                 self.queueClientMessage(client_idx, .output, rendered[0..total]);
             } else {
                 try protocol.sendMessage(client_fd, .output, rendered[0..total]);
