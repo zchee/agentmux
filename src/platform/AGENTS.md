@@ -19,7 +19,7 @@ OS abstraction layer. Provides platform detection, default socket directory reso
 ### Working In This Directory
 - Platform-specific code uses `builtin.os.tag` for conditional compilation
 - `platform.zig` is the unified entry point for helpers; keep the std.Io runtime wrapper and readiness poller small and reusable rather than reintroducing large bespoke event-loop stacks
-- Socket directory resolution: `$ZMUX_TMPDIR` > `$TMPDIR` > `/tmp`
+- Socket directory resolution: `$ZMUX_TMPDIR` > Linux `$XDG_RUNTIME_DIR` > `$TMPDIR` > `/tmp`
 - Process name lookup: `proc_pidpath` on macOS, `/proc/<pid>/comm` on Linux
 
 ### Testing Requirements
