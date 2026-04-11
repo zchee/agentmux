@@ -702,8 +702,10 @@ pub const Server = struct {
         try self.registerReadableFd(self.listen_fd, .listen);
 
         var path_buf: [256]u8 = .{0} ** 256;
-        @memcpy(path_buf[0..self.socket_path.len], self.socket_path);
-        _ = std.c.chmod(@ptrCast(path_buf[0..self.socket_path.len :0]), 0o700);
+        if (self.socket_path.len < path_buf.len) {
+            @memcpy(path_buf[0..self.socket_path.len], self.socket_path);
+            _ = std.c.chmod(@ptrCast(path_buf[0..self.socket_path.len :0]), 0o700);
+        }
 
         self.running = true;
 
@@ -877,6 +879,7 @@ pub const Server = struct {
             .client_id = client_id,
         });
         client_stream.socket.handle = -1;
+        self.drainClient(client_idx);
     }
 
     /// Cross-platform std.Io-backed server runtime.
@@ -3594,6 +3597,72 @@ test "handleClientReadable attaches a new session without fixed startup delay" {
 
     try std.testing.expect(elapsed_ns < 300 * std.time.ns_per_ms);
     try std.testing.expect(server.clients.items[0].session != null);
+}
+
+test "acceptClient drains queued identify and command bytes immediately" {
+    var path_buf: [128]u8 = undefined;
+    const socket_path = try std.fmt.bufPrint(
+        &path_buf,
+        "/tmp/zmux-accept-fastpath-{d}-{d}.sock",
+        .{ std.c.getpid(), try monotonicNsForTest() },
+    );
+
+    var server = try Server.init(std.testing.allocator, socket_path);
+    defer server.deinit();
+
+    _ = try server.createSession("demo", "/opt/homebrew/bin/zsh", 80, 24);
+    try server.listen();
+
+    const io = server.std_io_runtime.io();
+    const address = try std.Io.net.UnixAddress.init(socket_path);
+    var client_stream = try address.connect(io);
+    defer client_stream.close(io);
+    setFdNonblocking(client_stream.socket.handle);
+
+    const identify = protocol.IdentifyMsg{
+        .protocol_version = protocol.version,
+        .pid = std.c.getpid(),
+        .flags = .{},
+        .term_name = .{0} ** 64,
+        .tty_name = .{0} ** 64,
+        .cols = 120,
+        .rows = 40,
+        .xpixel = 0,
+        .ypixel = 0,
+    };
+    try protocol.sendMessage(client_stream.socket.handle, .identify, std.mem.asBytes(&identify));
+
+    const command_args = [_][]const u8{"list-sessions"};
+    const command_payload = try protocol.encodeCommandArgs(std.testing.allocator, &command_args);
+    defer std.testing.allocator.free(command_payload);
+    try protocol.sendMessage(client_stream.socket.handle, .command, command_payload);
+
+    try server.acceptClient();
+
+    try std.testing.expectEqual(@as(usize, 1), server.clients.items.len);
+    try std.testing.expect(server.clients.items[0].identified);
+    try std.testing.expectEqual(server.default_session.?, server.clients.items[0].session.?);
+
+    var recv_state: protocol.RecvState = .{};
+    defer recv_state.deinit(std.testing.allocator);
+
+    var output = try protocol.recvMessageAllocNonblocking(
+        std.testing.allocator,
+        client_stream.socket.handle,
+        &recv_state,
+    );
+    defer output.deinit();
+    try std.testing.expectEqual(protocol.MessageType.output, output.msg_type);
+    try std.testing.expect(std.mem.indexOf(u8, output.payload, "demo") != null);
+
+    var exit_ack = try protocol.recvMessageAllocNonblocking(
+        std.testing.allocator,
+        client_stream.socket.handle,
+        &recv_state,
+    );
+    defer exit_ack.deinit();
+    try std.testing.expectEqual(protocol.MessageType.exit_ack, exit_ack.msg_type);
+    try std.testing.expectEqual(@as(u16, 0), exit_ack.flags);
 }
 
 test "handleClientReadable preserves fragmented nonblocking client frames" {
