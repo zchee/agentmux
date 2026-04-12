@@ -13,6 +13,7 @@ pub const CommandResult = struct {
 const relay_quiescence_ns = 200 * std.time.ns_per_ms;
 const relay_timeout_ns = 150 * std.time.ns_per_ms;
 const relay_total_timeout_ns = std.time.ns_per_s;
+const relay_first_probe_grace_ns = @max(relay_timeout_ns, relay_quiescence_ns);
 
 pub fn commandStartsStartupRelay(args: []const []const u8, control_mode: bool) bool {
     if (control_mode or args.len == 0) return false;
@@ -47,6 +48,7 @@ pub const Client = struct {
         expected_requests: std.ArrayListAligned(PendingProbeRequest, null) = .empty,
         reply_capture: std.ArrayListAligned(u8, null) = .empty,
         buffered_user_input: std.ArrayListAligned(u8, null) = .empty,
+        saw_probe_request: bool = false,
         active: bool = true,
 
         fn init() StartupRelay {
@@ -277,6 +279,7 @@ pub const Client = struct {
             .request_id = view.request_id,
             .kind = view.probe_kind,
         });
+        relay.saw_probe_request = true;
         relay.last_probe_ns = monotonicNs();
         var detail: [160]u8 = undefined;
         const msg = std.fmt.bufPrint(&detail, "fd={d} id={d} kind={s} queued={d}", .{ self.fd, view.request_id, @tagName(view.probe_kind), relay.expected_requests.items.len }) catch "";
@@ -335,6 +338,7 @@ pub const Client = struct {
             return;
         }
         if (relay.expected_requests.items.len != 0 or relay.reply_capture.items.len != 0) return;
+        if (!relay.saw_probe_request and now_ns - relay.started_at_ns < relay_first_probe_grace_ns) return;
 
         if (relay.hasBufferedNewline()) {
             try self.finishStartupRelay(relay);
@@ -356,7 +360,6 @@ pub const Client = struct {
             if (relay.expected_requests.items.len == 0 and relay.reply_capture.items.len == 0) {
                 try relay.buffered_user_input.appendSlice(self.allocator, data[index..]);
                 relay.last_probe_ns = monotonicNs();
-                try self.finishStartupRelay(relay);
                 return;
             }
 
@@ -400,8 +403,13 @@ pub const Client = struct {
         const now_ns = monotonicNs();
         var next_deadline = relay.started_at_ns + relay_total_timeout_ns;
         if (relay.expected_requests.items.len == 0 and relay.reply_capture.items.len == 0) {
-            const quiescence_deadline = relay.last_probe_ns + relay_quiescence_ns;
-            if (quiescence_deadline < next_deadline) next_deadline = quiescence_deadline;
+            if (!relay.saw_probe_request) {
+                const first_probe_deadline = relay.started_at_ns + relay_first_probe_grace_ns;
+                if (first_probe_deadline < next_deadline) next_deadline = first_probe_deadline;
+            } else {
+                const quiescence_deadline = relay.last_probe_ns + relay_quiescence_ns;
+                if (quiescence_deadline < next_deadline) next_deadline = quiescence_deadline;
+            }
         }
 
         if (next_deadline <= now_ns) return 0;
@@ -448,20 +456,7 @@ pub const Client = struct {
             const now_ns = monotonicNs();
             if (now_ns - relay.started_at_ns >= relay_total_timeout_ns) {
                 self.timeoutOutstandingProbes(&relay) catch break;
-            }
-            self.maybeFinishStartupRelay(&relay, now_ns) catch break;
-
-            // stdin readable: forward to server as key data.
-            if (pollfds[0].revents & POLLIN != 0) {
-                var buf: [4096]u8 = undefined;
-                const n = std.c.read(0, &buf, buf.len);
-                if (n <= 0) break;
-                if (relay.active) {
-                    self.routeStartupInput(&relay, buf[0..@intCast(n)]) catch break;
-                    self.maybeFinishStartupRelay(&relay, monotonicNs()) catch break;
-                } else {
-                    self.sendKeyRaw(buf[0..@intCast(n)]) catch break;
-                }
+                self.finishStartupRelay(&relay) catch break;
             }
 
             // Server readable: handle messages.
@@ -476,6 +471,7 @@ pub const Client = struct {
                         }
                     },
                     .terminal_probe_req => {
+                        if (!relay.active) continue;
                         const view = protocol.decodeTerminalProbeReq(msg.payload) catch continue;
                         self.queueStartupProbe(&relay, view) catch break;
                     },
@@ -483,6 +479,20 @@ pub const Client = struct {
                     else => {},
                 }
             }
+
+            // stdin readable: forward to server as key data.
+            if (pollfds[0].revents & POLLIN != 0) {
+                var buf: [4096]u8 = undefined;
+                const n = std.c.read(0, &buf, buf.len);
+                if (n <= 0) break;
+                if (relay.active) {
+                    self.routeStartupInput(&relay, buf[0..@intCast(n)]) catch break;
+                } else {
+                    self.sendKeyRaw(buf[0..@intCast(n)]) catch break;
+                }
+            }
+
+            self.maybeFinishStartupRelay(&relay, monotonicNs()) catch break;
         }
     }
 
@@ -588,12 +598,14 @@ test "startup relay classifies probe replies separately from buffered user input
 
     var relay = Client.StartupRelay.init();
     defer relay.deinit(std.testing.allocator);
+    relay.saw_probe_request = true;
     try relay.expected_requests.append(std.testing.allocator, .{
         .request_id = 7,
         .kind = .osc_10,
     });
 
     try client.routeStartupInput(&relay, "ls\x1b]10;rgb:0000/0000/0000\x1b\\\r");
+    try client.maybeFinishStartupRelay(&relay, monotonicNs());
 
     try std.testing.expectEqualStrings("", relay.buffered_user_input.items);
     try std.testing.expectEqual(@as(usize, 0), relay.expected_requests.items.len);
@@ -624,6 +636,7 @@ test "startup relay flushes buffered user input when the first command is comple
 
     var relay = Client.StartupRelay.init();
     defer relay.deinit(std.testing.allocator);
+    relay.saw_probe_request = true;
     try relay.buffered_user_input.appendSlice(std.testing.allocator, "echo hi\r");
     relay.last_probe_ns = monotonicNs() - relay_quiescence_ns;
 
@@ -647,13 +660,62 @@ test "startup relay flushes newly typed input immediately once no probe replies 
 
     var relay = Client.StartupRelay.init();
     defer relay.deinit(std.testing.allocator);
+    relay.saw_probe_request = true;
     relay.last_probe_ns = monotonicNs();
 
     try client.routeStartupInput(&relay, "echo hi\r");
+    try client.maybeFinishStartupRelay(&relay, monotonicNs());
 
     try std.testing.expect(!relay.active);
     var msg = try protocol.recvMessageAlloc(std.testing.allocator, fds[0]);
     defer msg.deinit();
     try std.testing.expectEqual(protocol.MessageType.key, msg.msg_type);
     try std.testing.expectEqualStrings("echo hi\r", msg.payload);
+}
+
+test "startup relay keeps buffered newline until first-probe grace elapses" {
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+    const flags = std.c.fcntl(fds[0], std.c.F.GETFL);
+    try std.testing.expect(flags >= 0);
+    try std.testing.expectEqual(@as(i32, 0), std.c.fcntl(fds[0], std.c.F.SETFL, flags | @as(i32, @bitCast(std.c.O{ .NONBLOCK = true }))));
+
+    var client = Client.init(std.testing.allocator, "/tmp/unused.sock");
+    client.fd = fds[1];
+
+    var relay = Client.StartupRelay.init();
+    defer relay.deinit(std.testing.allocator);
+    relay.last_probe_ns = monotonicNs();
+    var recv_state: protocol.RecvState = .{};
+    defer recv_state.deinit(std.testing.allocator);
+
+    try client.routeStartupInput(&relay, "echo hi\r");
+    try client.maybeFinishStartupRelay(&relay, monotonicNs());
+
+    try std.testing.expect(relay.active);
+    try std.testing.expectEqualStrings("echo hi\r", relay.buffered_user_input.items);
+    try std.testing.expectError(error.WouldBlock, protocol.recvMessageAllocNonblocking(std.testing.allocator, fds[0], &recv_state));
+
+    relay.started_at_ns = monotonicNs() - relay_first_probe_grace_ns;
+    try client.maybeFinishStartupRelay(&relay, monotonicNs());
+
+    try std.testing.expect(!relay.active);
+    var msg = try protocol.recvMessageAlloc(std.testing.allocator, fds[0]);
+    defer msg.deinit();
+    try std.testing.expectEqual(protocol.MessageType.key, msg.msg_type);
+    try std.testing.expectEqualStrings("echo hi\r", msg.payload);
+}
+
+test "startup relay poll timeout prefers first-probe grace before first request" {
+    var relay = Client.StartupRelay.init();
+    defer relay.deinit(std.testing.allocator);
+
+    relay.started_at_ns = monotonicNs() - (relay_first_probe_grace_ns - 10 * std.time.ns_per_ms);
+    relay.last_probe_ns = monotonicNs();
+
+    const timeout_ms = Client.startupRelayPollTimeout(&relay);
+    try std.testing.expect(timeout_ms >= 0);
+    try std.testing.expect(timeout_ms <= 25);
 }
