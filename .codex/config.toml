@@ -1,2 +1,5 @@
 [mcp_servers.zls]
 enabled = true
+
+[features]
+codex_hooks = true
