@@ -390,8 +390,7 @@ pub const Server = struct {
         return "-";
     }
 
-    fn buildWindowStatusList(self: *Server, alloc: std.mem.Allocator, session: *const Session) ![]u8 {
-        _ = self;
+    fn buildWindowStatusList(self: *Server, alloc: std.mem.Allocator, session: *const Session, refresh_interval_ns: u64) ![]u8 {
         var windows: std.ArrayListAligned(u8, null) = .empty;
         errdefer windows.deinit(alloc);
 
@@ -416,7 +415,7 @@ pub const Server = struct {
                 window.options.window_status_current_format
             else
                 window.options.window_status_format;
-            const expanded = try status_fmt.expand(alloc, status_format, &fmt_ctx);
+            const expanded = try status_fmt.expandCached(alloc, status_format, &fmt_ctx, &self.status_command_cache, refresh_interval_ns);
             defer alloc.free(expanded);
             try windows.appendSlice(alloc, expanded);
         }
@@ -472,7 +471,7 @@ pub const Server = struct {
         defer self.allocator.free(left);
         const right = try status_fmt.expandCached(self.allocator, session.options.status_right, &fmt_ctx, &self.status_command_cache, refresh_interval_ns);
         defer self.allocator.free(right);
-        const center = try self.buildWindowStatusList(self.allocator, session);
+        const center = try self.buildWindowStatusList(self.allocator, session, refresh_interval_ns);
         defer self.allocator.free(center);
 
         const status_bar = status_mod.StatusBar{
@@ -1004,7 +1003,7 @@ pub const Server = struct {
             self.removeSessionClientFd(session, client.fd);
             self.clearSessionRelayOwnerFd(session, client.fd);
         }
-        protocol.sendMessage(client.fd, .detach, &.{}) catch {};
+        self.sendClientMessage(client.fd, .detach, &.{}) catch {};
         client.session = null;
         client.relay_state = .inactive;
         client.inflight_probe_requests.clearRetainingCapacity();
@@ -1156,14 +1155,14 @@ pub const Server = struct {
             if (startup_attach_candidate) {
                 self.beginClientStartupRelay(client_idx);
             }
-            try protocol.sendMessage(client.fd, .ready, &.{});
+            try self.sendClientMessage(client.fd, .ready, &.{});
             if (!startup_attach_candidate) {
                 if (ctx.session) |session| {
                     self.renderActivePaneToClient(session, client.fd);
                 }
             }
         } else {
-            try protocol.sendMessageWithFlags(client.fd, .exit_ack, 0, &.{});
+            try self.sendClientMessageWithFlags(client.fd, .exit_ack, 0, &.{});
         }
     }
 
@@ -1273,7 +1272,7 @@ pub const Server = struct {
             ) catch return;
             defer self.allocator.free(payload);
 
-            protocol.sendMessage(client.fd, .terminal_probe_req, payload) catch {};
+            self.sendClientMessage(client.fd, .terminal_probe_req, payload) catch {};
         }
     }
 
@@ -1415,15 +1414,37 @@ pub const Server = struct {
     }
 
     fn queueClientMessage(self: *Server, client_idx: usize, msg_type: protocol.MessageType, payload: []const u8) void {
+        self.queueClientMessageWithFlags(client_idx, msg_type, 0, payload);
+    }
+
+    fn queueClientMessageWithFlags(self: *Server, client_idx: usize, msg_type: protocol.MessageType, flags: u16, payload: []const u8) void {
         if (client_idx >= self.clients.items.len) return;
         const client = &self.clients.items[client_idx];
-        const encoded = protocol.encodeMessageAlloc(self.allocator, msg_type, 0, payload) catch return;
+        const encoded = protocol.encodeMessageAlloc(self.allocator, msg_type, flags, payload) catch return;
         defer self.allocator.free(encoded);
         client.pending_output.appendSlice(self.allocator, encoded) catch return;
         if (client.fd >= 0 and client.pending_output.items.len > 0) {
             self.pending_client_fds.put(client.fd, {}) catch {};
         }
         self.flushPendingClientOutput(client_idx);
+    }
+
+    pub fn sendClientMessage(self: *Server, fd: std.c.fd_t, msg_type: protocol.MessageType, payload: []const u8) !void {
+        return self.sendClientMessageWithFlags(fd, msg_type, 0, payload);
+    }
+
+    pub fn sendClientMessageWithFlags(
+        self: *Server,
+        fd: std.c.fd_t,
+        msg_type: protocol.MessageType,
+        flags: u16,
+        payload: []const u8,
+    ) !void {
+        if (self.findClientIndex(fd)) |client_idx| {
+            self.queueClientMessageWithFlags(client_idx, msg_type, flags, payload);
+            return;
+        }
+        try protocol.sendMessageWithFlags(fd, msg_type, flags, payload);
     }
 
     fn clearPendingPaneWrites(self: *Server, pane_id: u32) void {
@@ -1662,9 +1683,8 @@ pub const Server = struct {
     }
 
     fn sendError(self: *Server, fd: std.c.fd_t, message: []const u8, exit_code: u16) !void {
-        _ = self;
-        try protocol.sendMessage(fd, .error_msg, message);
-        try protocol.sendMessageWithFlags(fd, .exit_ack, exit_code, &.{});
+        try self.sendClientMessage(fd, .error_msg, message);
+        try self.sendClientMessageWithFlags(fd, .exit_ack, exit_code, &.{});
     }
 
     fn ownerRelayClientIndexForSession(self: *const Server, session: *Session) ?usize {
@@ -1980,24 +2000,13 @@ pub const Server = struct {
         startup_probe.traceEvent("server", "render_composed_begin", start_msg);
         _ = pane_state_opt;
 
-        // Use a pipe so Output can flush to the write end while we
-        // collect the bytes from the read end. Set write end non-blocking
-        // to prevent deadlock when output exceeds the kernel pipe buffer.
-        var pipe_fds: [2]std.c.fd_t = undefined;
-        if (std.c.pipe(&pipe_fds) != 0) return error.PipeFailed;
-        defer _ = std.c.close(pipe_fds[0]);
-
-        const fl = std.c.fcntl(pipe_fds[1], std.c.F.GETFL);
-        if (fl >= 0) {
-            _ = std.c.fcntl(pipe_fds[1], std.c.F.SETFL, fl | @as(i32, @bitCast(std.c.O{ .NONBLOCK = true })));
-        }
-
         const redraw_mod = @import("screen/redraw.zig");
-        var out = output_mod.Output.init(pipe_fds[1]);
+        var rendered: [protocol.max_payload]u8 = undefined;
+        var capture = output_mod.Output.Capture.init(rendered[0..]);
+        var out = output_mod.Output.initCapture(&capture);
 
         // Render all panes in the active window at their layout offsets.
         const window = session.active_window orelse {
-            _ = std.c.close(pipe_fds[1]);
             return error.NoPaneState;
         };
         const pane_count = window.panes.items.len;
@@ -2029,26 +2038,10 @@ pub const Server = struct {
 
         out.flush();
 
-        // Close write end so read gets EOF.
-        _ = std.c.close(pipe_fds[1]);
-
-        // Read rendered bytes from the pipe.
-        var rendered: [protocol.max_payload]u8 = undefined;
-        var total: usize = 0;
-        while (total < rendered.len) {
-            const rc = std.c.read(pipe_fds[0], rendered[total..].ptr, rendered.len - total);
-            if (rc <= 0) break;
-            total += @intCast(rc);
+        if (capture.len > 0) {
+            try self.sendClientMessage(client_fd, .output, capture.written());
         }
-
-        if (total > 0) {
-            if (self.clientIndexFromRegistry(client_fd)) |client_idx| {
-                self.queueClientMessage(client_idx, .output, rendered[0..total]);
-            } else {
-                try protocol.sendMessage(client_fd, .output, rendered[0..total]);
-            }
-        }
-        const end_msg = std.fmt.bufPrint(&detail, "client_fd={d} bytes={d}", .{ client_fd, total }) catch "";
+        const end_msg = std.fmt.bufPrint(&detail, "client_fd={d} bytes={d} truncated={any}", .{ client_fd, capture.len, capture.truncated }) catch "";
         startup_probe.traceEvent("server", "render_composed_end", end_msg);
     }
 
@@ -2980,6 +2973,30 @@ test "status interval refresh renders all clients attached to the same session w
     try std.testing.expect(std.mem.indexOf(u8, msg_b.payload, "RIGHT") != null);
 }
 
+test "sendClientMessageWithFlags queues exit_ack for registered client" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-send-client-message.sock");
+    defer server.deinit();
+
+    var client_pipe: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&client_pipe));
+    defer _ = std.c.close(client_pipe[0]);
+    defer _ = std.c.close(client_pipe[1]);
+
+    try server.clients.append(server.allocator, .{
+        .fd = client_pipe[1],
+        .session = null,
+        .identified = true,
+        .choose_tree_state = null,
+    });
+
+    try server.sendClientMessageWithFlags(client_pipe[1], .exit_ack, 7, &.{});
+
+    var msg = try protocol.recvMessageAlloc(std.testing.allocator, client_pipe[0]);
+    defer msg.deinit();
+    try std.testing.expectEqual(protocol.MessageType.exit_ack, msg.msg_type);
+    try std.testing.expectEqual(@as(u16, 7), msg.flags);
+}
+
 test "renderComposedToClient interprets inline status styles and shell segments" {
     var server = try Server.init(std.testing.allocator, "/tmp/zmux-render-status-inline-style.sock");
     defer server.deinit();
@@ -3078,6 +3095,62 @@ test "renderComposedToClient uses current window format for the active window" {
 
     try std.testing.expect(std.mem.indexOf(u8, payload, "ACTIVE 0 zsh") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "  0  zsh ") == null);
+}
+
+test "renderComposedToClient uses cached shell output in window status formats" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-render-window-format-cached-shell.sock");
+    defer server.deinit();
+
+    const session = try Session.init(std.testing.allocator, "demo");
+    try server.sessions.append(server.allocator, session);
+    server.default_session = session;
+
+    const first = try Window.init(std.testing.allocator, "editor", 72, 5);
+    try server.applyWindowDefaults(first);
+    try first.setWindowStatusCurrentFormat("ACTIVE #(printf live-active)");
+    try session.addWindow(first);
+
+    const first_pane = try Pane.init(std.testing.allocator, 72, 4);
+    try first.addPane(first_pane);
+    try server.session_loop.addPane(first_pane.id, -1, first_pane.sx, first_pane.sy);
+
+    const second = try Window.init(std.testing.allocator, "shell", 72, 5);
+    try server.applyWindowDefaults(second);
+    try second.setWindowStatusFormat("INACTIVE #(printf live-inactive)");
+    try session.addWindow(second);
+
+    const second_pane = try Pane.init(std.testing.allocator, 72, 4);
+    try second.addPane(second_pane);
+    try server.session_loop.addPane(second_pane.id, -1, second_pane.sx, second_pane.sy);
+
+    try session.setStatusLeft("");
+    try session.setStatusRight("");
+    session.selectWindow(first);
+    var ts: std.c.timespec = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts));
+    const now_ns = @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+
+    try server.status_command_cache.entries.append(server.status_command_cache.allocator, .{
+        .command = try server.status_command_cache.allocator.dupe(u8, "printf live-active"),
+        .output = try server.status_command_cache.allocator.dupe(u8, "cached-active"),
+        .last_update_ns = now_ns,
+        .running = false,
+    });
+    try server.status_command_cache.entries.append(server.status_command_cache.allocator, .{
+        .command = try server.status_command_cache.allocator.dupe(u8, "printf live-inactive"),
+        .output = try server.status_command_cache.allocator.dupe(u8, "cached-inactive"),
+        .last_update_ns = now_ns,
+        .running = false,
+    });
+
+    const pane_state = server.session_loop.getPane(first_pane.id).?;
+    const payload = try renderPayloadForTest(&server, session, pane_state);
+    defer std.testing.allocator.free(payload);
+
+    try std.testing.expect(std.mem.indexOf(u8, payload, "cached-active") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "cached-inactive") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "live-active") == null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "live-inactive") == null);
 }
 
 test "handlePtyReadable ignores EAGAIN on nonblocking panes" {

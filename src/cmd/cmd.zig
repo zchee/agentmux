@@ -246,7 +246,7 @@ pub const Registry = struct {
 
 fn writeReplyMessage(ctx: *Context, msg_type: protocol.MessageType, message: []const u8) CmdError!void {
     if (ctx.reply_fd) |fd| {
-        protocol.sendMessage(fd, msg_type, message) catch return CmdError.CommandFailed;
+        ctx.server.sendClientMessage(fd, msg_type, message) catch return CmdError.CommandFailed;
         return;
     }
 
@@ -270,7 +270,7 @@ fn sendOsc52Clipboard(ctx: *Context, data: []const u8) void {
     defer ctx.allocator.free(osc52);
     for (ctx.server.clients.items) |client| {
         if (client.session == session and client.fd >= 0) {
-            protocol.sendMessage(client.fd, .output, osc52) catch {};
+            ctx.server.sendClientMessage(client.fd, .output, osc52) catch {};
         }
     }
 }

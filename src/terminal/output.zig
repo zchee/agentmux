@@ -4,17 +4,51 @@ const colour = @import("../core/colour.zig");
 /// Terminal output writer.
 /// Buffers escape sequences and text to be written to a file descriptor.
 pub const Output = struct {
+    pub const Capture = struct {
+        buf: []u8,
+        len: usize = 0,
+        truncated: bool = false,
+
+        pub fn init(buf: []u8) Capture {
+            return .{ .buf = buf };
+        }
+
+        fn append(self: *Capture, data: []const u8) void {
+            const space = self.buf.len - self.len;
+            const n = @min(space, data.len);
+            if (n > 0) {
+                @memcpy(self.buf[self.len..][0..n], data[0..n]);
+                self.len += n;
+            }
+            if (n < data.len) self.truncated = true;
+        }
+
+        pub fn written(self: *const Capture) []const u8 {
+            return self.buf[0..self.len];
+        }
+    };
+
     buf: [8192]u8 = undefined,
     len: usize = 0,
-    fd: std.c.fd_t,
+    fd: std.c.fd_t = -1,
+    capture: ?*Capture = null,
 
     pub fn init(fd: std.c.fd_t) Output {
         return .{ .fd = fd };
     }
 
+    pub fn initCapture(capture: *Capture) Output {
+        return .{ .capture = capture };
+    }
+
     /// Flush buffered output to the fd.
     pub fn flush(self: *Output) void {
         if (self.len == 0) return;
+        if (self.capture) |capture| {
+            capture.append(self.buf[0..self.len]);
+            self.len = 0;
+            return;
+        }
         _ = std.c.write(self.fd, &self.buf, self.len);
         self.len = 0;
     }
@@ -218,3 +252,32 @@ pub const Output = struct {
         self.writeBytes("\x07");
     }
 };
+
+test "output capture flush preserves bytes across internal buffer boundaries" {
+    var storage: [9000]u8 = undefined;
+    var capture = Output.Capture.init(storage[0..]);
+    var out = Output.initCapture(&capture);
+
+    var payload: [9000]u8 = undefined;
+    @memset(payload[0..], 'x');
+
+    out.writeBytes(payload[0..]);
+    out.flush();
+
+    try std.testing.expectEqual(@as(usize, payload.len), capture.len);
+    try std.testing.expect(!capture.truncated);
+    try std.testing.expectEqualStrings(payload[0..], capture.written());
+}
+
+test "output capture marks truncation and preserves written prefix" {
+    var storage: [8]u8 = undefined;
+    var capture = Output.Capture.init(storage[0..]);
+    var out = Output.initCapture(&capture);
+
+    out.writeBytes("abcdefghijkl");
+    out.flush();
+
+    try std.testing.expect(capture.truncated);
+    try std.testing.expectEqual(@as(usize, storage.len), capture.len);
+    try std.testing.expectEqualStrings("abcdefgh", capture.written());
+}
