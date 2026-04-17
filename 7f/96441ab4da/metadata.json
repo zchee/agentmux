@@ -3,7 +3,7 @@
   "checkpoint_id": "7f96441ab4da",
   "strategy": "manual-commit",
   "branch": "main",
-  "checkpoints_count": 9,
+  "checkpoints_count": 6,
   "files_touched": [
     "src/server.zig"
   ],
@@ -46,11 +46,11 @@
     }
   ],
   "token_usage": {
-    "input_tokens": 76886625,
+    "input_tokens": 78159867,
     "cache_creation_tokens": 0,
-    "cache_read_tokens": 66007296,
-    "output_tokens": 227454,
-    "api_call_count": 382
+    "cache_read_tokens": 67277184,
+    "output_tokens": 228031,
+    "api_call_count": 385
   },
   "combined_attribution": {
     "calculated_at": "2026-04-17T08:34:04.593393Z",
