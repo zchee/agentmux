@@ -361,6 +361,25 @@ pub const Server = struct {
         }
     }
 
+    fn rewriteCaptureTailForSafety(capture: *output_mod.Output.Capture, cursor: ?ActiveCursorState) void {
+        if (!capture.truncated or capture.len == 0) return;
+
+        var recovery_storage: [128]u8 = undefined;
+        var recovery_capture = output_mod.Output.Capture.init(recovery_storage[0..]);
+        var recovery_out = output_mod.Output.initCapture(&recovery_capture);
+        recovery_out.attrReset();
+        restoreActiveCursor(&recovery_out, cursor);
+        recovery_out.flush();
+
+        const recovery = recovery_capture.written();
+        if (recovery.len == 0) return;
+        const tail_len = @min(recovery.len, capture.len);
+        @memcpy(
+            capture.buf[capture.len - tail_len .. capture.len],
+            recovery[recovery.len - tail_len .. recovery.len],
+        );
+    }
+
     fn hostname() []const u8 {
         const host = std.c.getenv("HOSTNAME") orelse std.c.getenv("HOST");
         return if (host) |value| std.mem.sliceTo(value, 0) else "";
@@ -2037,6 +2056,7 @@ pub const Server = struct {
         restoreActiveCursor(&out, active_cursor);
 
         out.flush();
+        rewriteCaptureTailForSafety(&capture, active_cursor);
 
         if (capture.len > 0) {
             try self.sendClientMessage(client_fd, .output, capture.written());
@@ -2670,6 +2690,70 @@ fn renderPayloadForTest(server: *Server, session: *Session, pane_state: ?*server
 
     try std.testing.expectEqual(protocol.MessageType.output, msg.msg_type);
     return try std.testing.allocator.dupe(u8, msg.payload);
+}
+
+test "renderComposedToClient preserves recovery tail when oversized output truncates" {
+    var server = try Server.init(std.testing.allocator, "/tmp/zmux-render-truncation-tail.sock");
+    defer server.deinit();
+
+    const cols: u32 = 80;
+    const rows: u32 = 900;
+
+    const session = try Session.init(std.testing.allocator, "demo");
+    try server.sessions.append(server.allocator, session);
+    server.default_session = session;
+    session.options.status = false;
+
+    const window = try Window.init(std.testing.allocator, "wide", cols, rows);
+    try session.addWindow(window);
+
+    const pane = try Pane.init(std.testing.allocator, cols, rows);
+    try window.addPane(pane);
+    try server.session_loop.addPane(pane.id, -1, pane.sx, pane.sy);
+
+    var content: std.ArrayListAligned(u8, null) = .empty;
+    defer content.deinit(std.testing.allocator);
+
+    var row: u32 = 0;
+    while (row < rows) : (row += 1) {
+        try content.appendNTimes(std.testing.allocator, 'x', cols);
+        if (row + 1 < rows) {
+            try content.append(std.testing.allocator, '\n');
+        }
+    }
+
+    const pane_state = server.session_loop.getPane(pane.id).?;
+    pane_state.processPtyOutput(content.items);
+
+    var client_pipe: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&client_pipe));
+    defer _ = std.c.close(client_pipe[0]);
+    defer _ = std.c.close(client_pipe[1]);
+
+    const render_thread = try std.Thread.spawn(.{}, struct {
+        fn run(srv: *Server, client_fd: std.c.fd_t, sess: *Session, pane_state_arg: *server_loop.PaneState) !void {
+            try srv.renderComposedToClient(client_fd, sess, pane_state_arg);
+        }
+    }.run, .{ &server, client_pipe[1], session, pane_state });
+    defer render_thread.join();
+
+    var msg = try protocol.recvMessageAlloc(std.testing.allocator, client_pipe[0]);
+    defer msg.deinit();
+    try std.testing.expectEqual(protocol.MessageType.output, msg.msg_type);
+
+    const payload = try std.testing.allocator.dupe(u8, msg.payload);
+    defer std.testing.allocator.free(payload);
+
+    try std.testing.expectEqual(@as(usize, protocol.max_payload), payload.len);
+
+    var recovery_storage: [128]u8 = undefined;
+    var recovery_capture = output_mod.Output.Capture.init(recovery_storage[0..]);
+    var recovery_out = output_mod.Output.initCapture(&recovery_capture);
+    recovery_out.attrReset();
+    Server.restoreActiveCursor(&recovery_out, server.getActiveCursorState(session, window));
+    recovery_out.flush();
+
+    try std.testing.expect(std.mem.endsWith(u8, payload, recovery_capture.written()));
 }
 
 test "renderComposedToClient uses configured status-left and status-right" {
